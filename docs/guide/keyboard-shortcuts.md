@@ -12,7 +12,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Ctrl+Enter` | Send composer prompt (`Enter` in the composer also sends) | Chat editor focused |
 | `Ctrl+Enter`, in a fenced code block of the draft | Send, where `Enter` is a new line (see [code blocks in the draft](chat.md#code-blocks-in-the-draft)) | Chat editor focused, caret inside a block |
 | `Ctrl+Enter`, on a quote line of the draft | Send, where `Enter` is a new line that carries the `> ` prefix; `Shift+Tab` leaves the quote (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor focused, caret after the `>` of a quote line |
-| `Esc` | Stop current turn | Chat editor, turn running |
+| `Esc` | Cancel the open question or dialog (OMP's `/review` pickers, a question card, an approval or a text prompt); with none open, stop the current turn. Never both: while a dialog is open `Esc` only cancels it, exactly like its **Cancel** button | Chat editor; stopping needs a running turn |
 | `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
 | `Alt+Q` | Quote the selected Chat text into the draft (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor |
 | `Alt+Q` | Quote Selection to Session: the selected editor text goes into a Chat draft as a quote with its file and lines, straight into the Chat that is visible in this window (the one focused last if several), else into the Chat you pick from a list. In either side of a diff editor the lines are those of that side, and a side that is a Git version says which one (`src/app.ts:3-4 @ HEAD (3f2a9c1)`; see [quoting Chat text](chat.md#quoting-chat-text)) | Text editor or diff editor with a selection |

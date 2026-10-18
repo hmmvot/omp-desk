@@ -1356,7 +1356,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	useEffect(() => {
 		if (onRewind === undefined) return;
 		const onKeyDown = (event: globalThis.KeyboardEvent): void => {
-			if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || composingRef.current) return;
+			if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || composingRef.current || client.getSnapshot().uiRequest !== null) return;
 			const target = event.target instanceof Element ? event.target : document.activeElement;
 			if (target !== null && isEditableTarget(target)) return;
 			const idle = !client.getSnapshot().working && textRef.current.length === 0 && imagesRef.current.length === 0 && documentsRef.current.length === 0;
@@ -1612,6 +1612,28 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		},
 		[client],
 	);
+
+	// An open dialog owns Escape: it cancels the dialog (the same answer as its Cancel button) and never stops the turn. The host's
+	// stop key is disarmed through the popup owner; the listener is on the bubbling phase, so an inner layer that takes Escape itself
+	// (the transcript find bar, a menu) has already prevented it, and a composition or an `isComposing` key is left alone. Like VS Code's
+	// quick pick and input box, one Escape closes the whole dialog, also from the "Other" field of a question.
+	const dialogOpen = request !== null && canPrompt;
+	const dialogId = request?.id ?? null;
+	useEffect(() => {
+		if (!dialogOpen || dialogId === null) return;
+		reportComposerPopupOpen("dialog", true);
+		const onKeyDown = (event: globalThis.KeyboardEvent): void => {
+			if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+			event.preventDefault();
+			event.stopPropagation();
+			respond({ id: dialogId, cancelled: true });
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => {
+			document.removeEventListener("keydown", onKeyDown);
+			reportComposerPopupOpen("dialog", false);
+		};
+	}, [dialogOpen, dialogId, respond]);
 
 	const dialog = request !== null && canPrompt ? (
 			<>

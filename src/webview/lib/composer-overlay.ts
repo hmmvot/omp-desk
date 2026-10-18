@@ -12,8 +12,8 @@
  * cleaned up by the function it returns.
  */
 const listeners = new Set<(open: boolean) => void>();
-/** Every chat popup whose open state must keep Escape from also stopping a running turn (the transcript's find bar while its field has the focus). */
-export type ComposerPopupOwner = "completion" | "context" | "commands" | "tool-menu" | "find";
+/** Every chat popup whose open state must keep Escape from also stopping a running turn (the transcript's find bar while its field has the focus, and an open extension-UI dialog, which Escape cancels). */
+export type ComposerPopupOwner = "completion" | "context" | "commands" | "tool-menu" | "find" | "dialog";
 const owners = new Set<ComposerPopupOwner>();
 let open = false;
 

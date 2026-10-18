@@ -20,7 +20,7 @@ Chat is the rich editor view of a session. It opens in an editor tab, shows the 
 - While a turn runs, `Enter` steers it and `Alt+Enter` queues a follow-up.
 - Queued messages can be edited, removed or sent now as steering. `Alt+↑` takes the newest one back into the draft.
 - **Stop** (or `Esc`) puts messages that were still queued back into the draft instead of running them.
-- OMP's questions and approval requests appear as a card above the composer.
+- OMP's questions and approval requests appear as a card above the composer. `Esc` cancels the open card (a list, a text or multi-line prompt, a confirmation or a question) and answers it as cancelled, the same as its **Cancel** button; while a card is open `Esc` never stops the turn. From the "Other" field of a question one `Esc` also cancels the whole card, as in VS Code's quick pick. `Esc` during an IME composition does nothing to it, and the find bar still takes its own `Esc` first.
 
 ### Code blocks in the draft
 
@@ -163,7 +163,7 @@ These work in Chat.
 
 `/review` is OMP's own code review, and it works in Chat as in the terminal: OMP asks what to review in a dialog in place of the message box, then sends the review request (the mode, the changed files and the diff) to the model as your message.
 
-- Type `/review` or pick it in the Commands list. **Review Mode** offers **uncommitted changes**, a **branch diff** (then the base branch to compare against), a **specific commit** (then one of the latest commits), a **specific pull request** (the open pull requests, a search row, or `#123`) and **custom review instructions** (a multi-line box, prefilled with `Review the following:`; `Enter` submits, `Shift+Enter` adds a line). **Cancel** in any of these dialogs ends the command and sends nothing.
+- Type `/review` or pick it in the Commands list. **Review Mode** offers **uncommitted changes**, a **branch diff** (then the base branch to compare against), a **specific commit** (then one of the latest commits), a **specific pull request** (the open pull requests, a search row, or `#123`) and **custom review instructions** (a multi-line box, prefilled with `Review the following:`; `Enter` submits, `Shift+Enter` adds a line). **Cancel**, or `Esc`, in any of these dialogs ends the command and sends nothing, and the message box is idle again at once.
 - `/review <PR link>` reviews that pull request without asking. `/review <text>` keeps the text as the focus of the review, and the custom-instructions choice is not offered.
 - Pull requests need the GitHub CLI (`gh`). Without it OMP's message (`GitHub CLI (gh) is not installed…`) appears as an error message of the window and nothing is sent.
 - A dialog may stay open as long as you like: the `/review` message is not reported as unconfirmed while OMP waits for your answer.

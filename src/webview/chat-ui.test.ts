@@ -1894,6 +1894,80 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.admission(true)");
 		});
 
+		await t.test("Escape cancels every kind of dialog like its Cancel button, answers once, never stops the turn, and owns the key while the dialog is open", async () => {
+			const escape = async (extra: Record<string, unknown> = {}): Promise<void> => {
+				await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, ...extra });
+				await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+			};
+			const answers = () => ui.evaluate<unknown[]>("window.sent.filter(message=>message.type==='omp:chat-ui-response').map(message=>message.response)");
+			const aborts = () => ui.evaluate<number>("window.sent.filter(message=>message.type==='omp:chat-abort').length");
+			const popupReports = () => ui.evaluate<boolean[]>("window.sent.filter(message=>message.type==='omp:composer-popup').map(message=>message.open)");
+			const frames = "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))";
+			const questions = `[{id:'color',question:'Which color?',multi:false,options:[{label:'Red'},{label:'Green'}]},{id:'checks',question:'Checks?',multi:true,options:[{label:'Typecheck'},{label:'Tests'}]}]`;
+			const dialogs: readonly (readonly [string, string, string])[] = [
+				["select", "{id:'esc-select',method:'select',title:'Review Mode',options:[{label:'1. Review against a base branch (PR Style)'},{label:'2. Review uncommitted changes'}]}", ".omp-ask-options button"],
+				["input", "{id:'esc-input',method:'input',title:'Search open pull requests'}", ".omp-ask textarea"],
+				["editor", "{id:'esc-editor',method:'editor',title:'Enter custom review instructions',prefill:'Review the following:\\n\\n',promptStyle:true}", ".omp-ask textarea"],
+				["confirm", "{id:'esc-confirm',method:'confirm',title:'Apply?',message:'Apply the change?'}", ".omp-ask .omp-btn--primary"],
+				["ask", `{id:'esc-ask',method:'ask',title:'t',questions:${questions}}`, ".omp-ask-option"],
+			];
+			for (const [method, request, anchor] of dialogs) {
+				await reset(`escape-${method}`);
+				// A turn is running behind the dialog, as when a command opened it; Escape must not stop it.
+				await ui.evaluate(`window.ui.push({uiRequests:[${request}],working:true,settled:false})`);
+				await ui.wait(`document.querySelector('${anchor}')`);
+				await ui.wait("window.sent.filter(message=>message.type==='omp:composer-popup').at(-1)?.open===true");
+				const id = request.match(/id:'([^']+)'/)![1]!;
+				if (method === "input" || method === "editor") await ui.evaluate("document.querySelector('.omp-ask textarea').focus()");
+				await escape();
+				await ui.wait(`window.sent.some(message=>message.type==='omp:chat-ui-response' && message.response.id==='${id}')`);
+				await ui.evaluate(frames);
+				assert.deepEqual(await answers(), [{ id, cancelled: true }], `${method}: one cancelled answer`);
+				assert.equal(await aborts(), 0, `${method}: Escape on a dialog never stops the turn`);
+				assert.equal(await ui.evaluate("document.querySelector('.omp-ask')===null"), true, `${method}: the dialog is gone`);
+				assert.equal((await popupReports()).at(-1), false, `${method}: the stop key is armed again once the dialog is gone`);
+				await escape();
+				await ui.evaluate(frames);
+				assert.deepEqual(await answers(), [{ id, cancelled: true }], `${method}: a second Escape answers nothing`);
+			}
+
+			// The "Other" field of a question: one Escape closes the whole dialog, as in VS Code's quick pick.
+			await reset("escape-ask-other");
+			await ui.evaluate(`window.ui.push({uiRequests:[{id:'esc-other',method:'ask',title:'t',questions:${questions}}],working:true,settled:false})`);
+			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[2].click()");
+			await ui.wait("document.querySelector('.omp-ask-custom textarea')");
+			await ui.call("Input.insertText", { text: "half typed" });
+			await escape();
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-ui-response' && message.response.id==='esc-other')");
+			assert.deepEqual((await answers()).at(-1), { id: "esc-other", cancelled: true });
+			assert.equal(await aborts(), 0);
+
+			// An IME composition keeps its Escape.
+			await reset("escape-composing");
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'esc-ime',method:'input',title:'Search'}],working:true,settled:false})");
+			await ui.wait("document.querySelector('.omp-ask textarea')");
+			await ui.evaluate("document.querySelector('.omp-ask textarea').focus()");
+			await ui.call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Process", code: "Escape", windowsVirtualKeyCode: 229 });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+			await ui.evaluate(frames);
+			assert.deepEqual(await answers(), [], "Escape during a composition does not cancel the dialog");
+
+			// A dialog that is not on screen does not take the key; the transcript find bar still closes first.
+			await reset("escape-find");
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'esc-find',method:'select',title:'Mode',options:[{label:'A'}]}],working:true,settled:false})");
+			await ui.wait("document.querySelectorAll('.omp-ask-options button').length===1");
+			await ui.evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'f',ctrlKey:true,bubbles:true,cancelable:true}))");
+			if (await ui.evaluate<boolean>("document.querySelector('.omp-find-input')!==null")) {
+				await ui.evaluate("document.querySelector('.omp-find-input').focus()");
+				await escape();
+				await ui.evaluate(frames);
+				assert.deepEqual(await answers(), [], "Escape in the find bar closes the bar, not the dialog");
+				assert.equal(await ui.evaluate("document.querySelector('.omp-find-input')===null"), true);
+			}
+			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
+		});
+
 		await t.test("transcript displays native content but never internal entries, fields or role echoes", async () => {
 			await reset("native-visibility", "detailed", true);
 			await ui.evaluate(`(()=>{

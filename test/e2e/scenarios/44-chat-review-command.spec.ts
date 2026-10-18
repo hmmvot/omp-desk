@@ -147,6 +147,30 @@ test("cancelling the Review Mode dialog starts no turn, returns the composer to 
 	});
 });
 
+test("Escape cancels the Review Mode dialog, wherever the focus is in the Chat, returns the composer to idle and sends the next message", async ({ desk, state }) => {
+	test.setTimeout(240_000);
+	await inReviewChat(desk, state, "review-escape", async chat => {
+		const before = (await modelPrompts(state.mockUrl)).length;
+		const progress = chat.locator(".omp-turn-progress");
+		// Round 1: the focus is on a picker row; round 2: on the Cancel button; round 3: nowhere in particular (the page body).
+		for (let round = 1; round <= 3; round++) {
+			const picker = await openReviewMode(desk, chat, "/review");
+			if (round === 1) await picker.getByRole("button", { name: /Review uncommitted changes/ }).focus();
+			else if (round === 2) await chat.getByRole("button", { name: "Cancel" }).focus();
+			else await chat.locator("body").evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+			await chat.locator("body").press("Escape");
+			await expect(picker, `round ${round}: Escape leaves the dialog open`).toHaveCount(0, { timeout: 5_000 });
+			await expect(progress, `round ${round}: the working animation stays after Escape`).toHaveCount(0, { timeout: 5_000 });
+			await expect(chat.getByRole("button", { name: "Stop the running turn" })).toHaveCount(0);
+		}
+		await desk.send(chat, "after escape");
+		await expect(chat.getByText("Mock reply to: after escape")).toBeVisible({ timeout: 60_000 });
+		const prompts = (await modelPrompts(state.mockUrl)).slice(before);
+		expect(prompts.some(text => text.includes("Code Review Request")), "the cancelled review reached the model").toBe(false);
+		await expect(chat.getByText(UNCONFIRMED)).toHaveCount(0);
+	});
+});
+
 test("a pull request without the GitHub CLI says so, and so does /review <PR link>", async ({ desk, state }) => {
 	test.setTimeout(240_000);
 	let ghInstalled = true;
