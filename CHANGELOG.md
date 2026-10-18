@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chat: a C# type with generated or split partial parts links instead of showing a choice.** The C# language server names a partial type's container after the file of each part, so a type split over `Session.cs` and a generated `Session.Generated.g.cs` counted as two types and its name was an "N definitions" choice. The parts are one type again and the name links to the first by path. Entries captured from a real source-generator project (member containers of nested generic types over 700 characters, in-memory generated documents with no path) are now the fixtures of the symbol tests.
+
 ## [0.4.7] - 2026-10-18
 
 ### Added

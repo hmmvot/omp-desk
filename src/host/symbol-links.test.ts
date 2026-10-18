@@ -545,45 +545,81 @@ test("a lookup that waits for a slot is dropped by an invalidation instead of re
 });
 
 /**
- * The failing case of a real log (2026-10-18): a type and its members looked up in a C# project with a source generator
- * (a serialization generator): the workspace symbol search lists the declarations next to generated partial files, a generic sibling and the
- * formatter's methods, whose display names are whole signatures. Entries shaped like the C# language server's, with kinds as `vscode.SymbolKind`.
+ * Entries as the C# language server answers `workspace/symbol` for a project with an incremental source generator (captured 2026-10-19
+ * from ms-dotnettools.csharp 2.160.4's Microsoft.CodeAnalysis.LanguageServer over stdio, a scratch project with a generator that emits a
+ * second part of a partial type and a formatter class with generic nested types; `kind` is the LSP number, one more than `vscode.SymbolKind`,
+ * line and character are zero-based). What the capture showed, and the fixtures keep:
+ * - a name is always the bare name (`SessionService` for `SessionService<T>` too; no parameter list, no type arguments);
+ * - a partial type's container is the file of its part, `Session.cs - OmpDesk (net10.0)`; a non-partial top-level type's is `project OmpDesk (net10.0)`;
+ * - a member's container is `in Type (project OmpDesk (net10.0))`, and the type's own text carries its type parameters, so a member of a
+ *   nested generic type had a container of about 725 characters with one 40-parameter level and 1121 with two (the adapter once allowed 512);
+ * - a declaration in a file on disk has a `file:` URI; one the compiler generates only in memory (no file on disk) has a
+ *   `roslyn-source-generated://` URI, which has no path here and so is never in the session's folders.
  */
+const lsp = (name: string, kind: number, container: string, file: string, line: number, character: number, uri = `file:///${CWD.replaceAll("\\", "/")}/${file}`) =>
+	symbolEntry({ name, kind: kind - 1, containerName: container, location: { uri: { scheme: uri.slice(0, uri.indexOf(":")), fsPath: uri.startsWith("file:") ? `${CWD}\\${file}` : uri }, range: { start: { line, character }, end: { line, character: character + name.length } } } });
+const PROJECT = "OmpDesk (net10.0)";
+const typeParameters = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => `${prefix}${index}`).join(", ");
+const SLOT = `SessionServiceFormatter.Slot<${typeParameters("TBufferWriter", 40)}>`;
+const INNER = `${SLOT}.Inner<${typeParameters("TInner", 40)}>`;
+const PART = "SessionService.Generated.g.cs";
+const FORMATTER = "SessionService.SessionServiceFormatter.g.cs";
+const CAPTURED: Record<string, SymbolEntry[]> = {
+	SessionService: [
+		lsp("SessionService", 5, `${PART} - ${PROJECT}`, PART, 2, 14),
+		lsp("SessionService", 5, `Session.cs - ${PROJECT}`, "Session.cs", 9, 21),
+		lsp("SessionService", 5, `Session.cs - ${PROJECT}`, "Session.cs", 15, 21),
+	],
+	Dispose: [
+		lsp("Dispose", 6, `in SessionService (project ${PROJECT})`, PART, 4, 16),
+		lsp("Dispose", 6, `in Other (project ${PROJECT})`, "Session.cs", 22, 16),
+		lsp("Dispose", 6, `in SessionServiceFormatter (project ${PROJECT})`, FORMATTER, 6, 16),
+		lsp("Dispose", 6, `in ${SLOT} (project ${PROJECT})`, FORMATTER, 9, 20),
+		lsp("Dispose", 6, `in ${INNER} (project ${PROJECT})`, FORMATTER, 10, 438),
+		lsp("Dispose", 6, `in SessionServiceFormatter<${typeParameters("TBufferWriter", 40)}> (project ${PROJECT})`, FORMATTER, 13, 728),
+		lsp("Dispose", 6, `in SessionService (project ${PROJECT})`, "ignored.g.cs", 5, 16, "roslyn-source-generated://5f0f6f1a-0000-4000-8000-000000000000/ignored.g.cs?hintName=ignored.g.cs&assemblyName=Gen"),
+	],
+	Deserialize: [lsp("Deserialize", 6, `in SessionServiceFormatter (project ${PROJECT})`, FORMATTER, 4, 23)],
+	Slot: [lsp("Slot", 5, `in SessionServiceFormatter (project ${PROJECT})`, FORMATTER, 7, 24)],
+	Inner: [lsp("Inner", 5, `in ${SLOT} (project ${PROJECT})`, FORMATTER, 10, 28)],
+	Count: [
+		lsp("Count", 7, `in SessionService (project ${PROJECT})`, "Session.cs", 11, 15),
+		lsp("Count", 7, `in ${INNER} (project ${PROJECT})`, FORMATTER, 10, 463),
+	],
+};
+
+test("the captured entries have the shapes the matching rules read: bare names, file-named partial containers, generic containers over 512 characters, no path for an in-memory generated file", () => {
+	assert.ok(CAPTURED.Dispose![3]!.container.length > 512 && CAPTURED.Dispose![4]!.container.length > 1000, "the member containers of nested generic types are long");
+	assert.equal(CAPTURED.Dispose![3]!.opaque, undefined, "a long container is kept: it is read as it is");
+	assert.equal(CAPTURED.Dispose![6]!.path, "", "an in-memory generated document has no path");
+	assert.deepEqual([CAPTURED.SessionService![0]!.kind, CAPTURED.Dispose![0]!.kind, CAPTURED.Count![0]!.kind], [SymbolKind.Class, SymbolKind.Method, SymbolKind.Property], "LSP kinds are converted to vscode kinds");
+});
+
+test("a type and its members in a project with generated code link as they should: a long generic container no longer poisons the lookup, and a generated part is one symbol with the others", async () => {
+	const resolver = new SymbolLinkResolver(provider(CAPTURED).source);
+	const found = (name: string) => resolver.resolve(symbol(name), scope);
+	assert.deepEqual(await found("SessionService"), { status: "found", target: "Session.cs:10:22" }, "the parts in `Session.cs` and in the generated file are one partial type, opened at the first by path");
+	assert.deepEqual(await found("SessionService.Dispose"), { status: "found", target: `${PART}:5:17` }, "the member the generated part declares; the long containers of the formatter's nested types are other types'");
+	assert.deepEqual(await found("Other.Dispose"), { status: "found", target: "Session.cs:23:17" });
+	assert.deepEqual(await found("Dispose"), { status: "ambiguous", definitions: 5 }, "the in-memory declaration has no path and is no rival");
+	assert.deepEqual(await found("SessionServiceFormatter.Deserialize"), { status: "found", target: `${FORMATTER}:5:24` });
+	assert.deepEqual(await found("Slot.Dispose"), { status: "found", target: `${FORMATTER}:10:21` }, "the member of a type with 40 type parameters");
+	assert.deepEqual(await found("Inner.Count"), { status: "found", target: `${FORMATTER}:11:464` }, "the member of a type nested in it, 1122 characters of container");
+});
+
+test("a name or container beyond what the adapter keeps is cut down to what matching reads of it; a container that stays unreadable makes the entry opaque (defensive: not seen in the capture)", () => {
+	const huge = `Deserialize(ref GeneratedReader reader, ${"global::System.Collections.Generic.Dictionary<string, int> map, ".repeat(6)}int tail)`;
+	const signature = lsp(huge, 6, `in SessionServiceFormatter (project ${PROJECT})`, FORMATTER, 4, 23);
+	assert.ok(huge.length > 256);
+	assert.deepEqual([signature.name.length <= 256, signature.container, signature.opaque], [true, `in SessionServiceFormatter (project ${PROJECT})`, undefined]);
+	assert.equal(unique("SessionServiceFormatter.Deserialize", [signature]), `${FORMATTER}:5`, "by its bare name it is the method `Deserialize`");
+	const wide = lsp("Dispose", 6, `in SessionService<${typeParameters("TArgument", 400)}> (project ${PROJECT})`, "SessionService.cs", 8, 16);
+	assert.equal(wide.container, `in SessionService (project ${PROJECT})`, "a container made over 2048 characters long by type arguments reads the same without them");
+	const unreadable = lsp("Dispose", 6, `in SessionService (project ${"P".repeat(3000)} (net10.0))`, "SessionService.cs", 8, 16);
+	assert.deepEqual([unreadable.name, unreadable.kind, unreadable.container, unreadable.opaque], ["Dispose", SymbolKind.Method, "", true], "a container that stays long is never cut into another container");
+});
+
 const provided = (name: string, kind: number, file: string, line: number, container: string) => symbolEntry({ name, kind, containerName: container, location: { uri: { scheme: "file", fsPath: `${CWD}\\${file}` }, range: { start: { line: line - 1, character: 4 }, end: { line: line - 1, character: 9 } } } });
-const SIGNATURE = `(ref GeneratedReader reader, scoped ref global::OmpDesk.Sessions.SessionService? value, ${"global::System.Collections.Generic.Dictionary<string, int> map, ".repeat(6)}int tail)`;
-
-test("an entry whose name or container is too long is kept as what matching reads of it, and one whose container cannot be read is opaque", () => {
-	const signature = provided(`Deserialize${SIGNATURE}`, SymbolKind.Method, "Generated\\SessionService.Formatter.g.cs", 12, IN("SessionServiceFormatter"));
-	assert.ok(`Deserialize${SIGNATURE}`.length > 256);
-	assert.deepEqual([signature.name.length <= 256, signature.kind, signature.container, signature.opaque], [true, SymbolKind.Method, IN("SessionServiceFormatter"), undefined], "the name is cut down; the kind and the container stay");
-	assert.equal(unique("Deserialize", [signature]), "Generated\\SessionService.Formatter.g.cs:12", "by its bare name it is the method `Deserialize`");
-	assert.equal(unique("SessionServiceFormatter.Deserialize", [signature]), "Generated\\SessionService.Formatter.g.cs:12");
-	const generic = provided(`Pair<${Array.from({ length: 120 }, (_, index) => `T${index}`).join(", ")}>`, SymbolKind.Class, "Pair.cs", 3, TOP);
-	assert.equal(generic.name, `Pair<${",".repeat(119)}>`, "the generic arity is kept: it tells `Pair<T>` from `Pair<T, U>`");
-	const wide = provided("Dispose", SymbolKind.Method, "SessionService.cs", 8, `in SessionService<${"TArgument, ".repeat(200)}TLast> (project OmpDesk (net8.0))`);
-	assert.equal(wide.container, "in SessionService (project OmpDesk (net8.0))", "a container made long by generic arguments reads the same without them");
-	assert.equal(wide.opaque, undefined);
-	const unreadable = provided("Dispose", SymbolKind.Method, "SessionService.cs", 8, `in SessionService (project ${"P".repeat(3000)} (net8.0))`);
-	assert.deepEqual([unreadable.name, unreadable.kind, unreadable.container, unreadable.opaque], ["Dispose", SymbolKind.Method, "", true], "a container that stays long is never cut into another container: the entry is opaque");
-});
-
-test("generated declarations with long signatures or generic containers do not hide a unique type or member", async () => {
-	const generated = "Generated\\SessionService.Formatter.g.cs";
-	const entries = [
-		provided("SessionService", SymbolKind.Class, "SessionService.cs", 6, TOP),
-		provided("SessionServiceFormatter", SymbolKind.Class, generated, 9, TOP),
-		provided(`Deserialize${SIGNATURE}`, SymbolKind.Method, generated, 12, IN("SessionServiceFormatter")),
-		provided(`Serialize${SIGNATURE}`, SymbolKind.Method, generated, 30, IN("SessionServiceFormatter")),
-		provided("Dispose", SymbolKind.Method, "SessionService.cs", 20, IN("SessionService")),
-		provided("Dispose", SymbolKind.Method, generated, 40, `in SessionServiceFormatter<${"TBufferWriter, ".repeat(200)}TLast> (project OmpDesk (net8.0))`),
-	];
-	const answers = provider({ SessionService: entries, Deserialize: entries, Dispose: entries, "SessionService.Dispose": entries });
-	const resolver = new SymbolLinkResolver(answers.source);
-	assert.deepEqual(await resolver.resolve(symbol("SessionService"), scope), { status: "found", target: "SessionService.cs:6:5" }, "the generated formatter is another name");
-	const sibling = provided("SessionService<T>", SymbolKind.Class, "SessionServiceOfT.cs", 4, TOP);
-	assert.deepEqual(await new SymbolLinkResolver(provider({ SessionService: [...entries, sibling] }).source).resolve(symbol("SessionService"), scope), { status: "ambiguous", definitions: 2 }, "a generic sibling is a second type of that name");
-	assert.deepEqual(await resolver.resolve(symbol("SessionService.Dispose"), scope), { status: "found", target: "SessionService.cs:20:5" }, "the member of the generated formatter belongs to another type");
-});
 
 test("an entry named like the symbol whose container cannot be read makes the name plain: an answer, never a wrong link and never a retry", async () => {
 	const lines: LoggedLine[] = [];

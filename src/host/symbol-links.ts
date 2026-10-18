@@ -234,15 +234,25 @@ export function isNameCandidate(name: string, last: string): boolean {
 	return bare === last || bare === `${last}Attribute`;
 }
 
+/**
+ * The C# language server shows a partial type's container as the file of the part, `Session.cs - OmpDesk (net10.0)`, and a non-partial
+ * top-level type's as `project OmpDesk (net10.0)`. The file says which part this is, not which type, so the parts of one partial type,
+ * a generated part in `Session.Generated.g.cs` among them, share the project text after the file.
+ */
+function partContainer(container: string): string {
+	return /^[^\s()]+\.[A-Za-z0-9]+ - (.+)$/.exec(container.trim())?.[1] ?? container;
+}
+
 /** Which declarations are one symbol: the partial parts of one type, or the overloads of one member. */
 function declarationKey(entry: SymbolEntry): string | null {
-	const container = containerInfo(entry.container).key;
 	const name = bareName(entry.name);
 	if (entry.kind in TYPE_KINDS) {
+		const container = containerInfo(partContainer(entry.container)).key;
 		// Parts of a C# partial type share name, arity and container; a global-namespace type has no container, so only `.cs` files may share without one.
 		if (container === "" && !entry.path.toLowerCase().endsWith(".cs")) return null;
 		return `type\0${container}\0${name}\0${genericArity(entry.name)}`;
 	}
+	const container = containerInfo(entry.container).key;
 	if (container === "") return null;
 	const methodLike = entry.kind === SymbolKind.Method || entry.kind === SymbolKind.Constructor || entry.kind === SymbolKind.Function;
 	return `${methodLike ? "method" : `kind${entry.kind}`}\0${container}\0${name}`;
