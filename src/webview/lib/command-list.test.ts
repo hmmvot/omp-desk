@@ -28,7 +28,7 @@ test("GUI-supported commands come first and are marked; each group is alphabetic
 	for (const group of [rows.slice(0, firstPlain), rows.slice(firstPlain)]) {
 		assert.deepEqual(group.map(row => row.name), [...group.map(row => row.name)].sort((a, b) => a.localeCompare(b, "en")));
 	}
-	assert.deepEqual(rows.slice(0, firstPlain).map(row => row.name), ["agents", "clear", "compact", "delete", "export", "extensions", "fresh", "git", "hotkeys", "login", "logout", "models", "new", "rewind", "settings", "setup", "skills"]);
+	assert.deepEqual(rows.slice(0, firstPlain).map(row => row.name), ["agents", "clear", "compact", "delete", "export", "extensions", "fork", "fresh", "git", "hotkeys", "login", "logout", "models", "new", "rewind", "settings", "setup", "skills"]);
 });
 
 test("the marker names the surface a command opens", () => {
@@ -111,6 +111,7 @@ test("availability: a GUI command follows its own requirements, a plain command 
 	assert.match(commandAvailability(rowOf("new"), running)!, /Stop it first/);
 	assert.match(commandAvailability(rowOf("clear"), running)!, /abort it before resetting/);
 	assert.match(commandAvailability(rowOf("fresh"), running)!, /\/fresh/);
+	assert.match(commandAvailability(rowOf("fork"), running)!, /before forking/);
 	assert.equal(commandAvailability(rowOf("compact"), running), null, "compact interrupts a running turn");
 	assert.equal(commandAvailability(rowOf("compact"), { ...OPEN, maintenanceRunning: true }), "Context maintenance is already running.");
 	assert.equal(commandAvailability(rowOf("export"), stopped), "This session is not running.");

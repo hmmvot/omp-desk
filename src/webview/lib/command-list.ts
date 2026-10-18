@@ -12,6 +12,7 @@
  * does it.
  */
 import { CLEAR_REFUSAL_SENTENCES } from "../../chat/clear.ts";
+import { FORK_BUSY_SENTENCE } from "../../chat/fork.ts";
 import { NEW_BUSY_SENTENCE } from "../../chat/desk-commands.ts";
 import type { ChatSlashCommand } from "../../chat/model.ts";
 import type { GuestChatCommand } from "../../protocol/messages.ts";
@@ -65,6 +66,7 @@ const DESK_GUI: Readonly<Record<string, GuiSupport>> = {
 	fresh: { ui: "Rotates provider state in place and reports the result in the composer", route: { kind: "text" }, whileRunning: FRESH_BUSY },
 	new: { ui: "Starts a new session in place of this tab", route: { kind: "text" }, whileRunning: NEW_BUSY_SENTENCE },
 	delete: { ui: "Opens a confirmation dialog, then replaces this tab with a new session", route: { kind: "text" } },
+	fork: { ui: "Opens a copy of this session in a new Chat tab beside it", route: { kind: "text" }, whileRunning: FORK_BUSY_SENTENCE },
 };
 
 /** OMP builtins the session advertises and Desk has a native surface for; the extension, skill and prompt commands of the same names are not these. */
