@@ -207,6 +207,8 @@ import { ChatRuntime } from "./host/chat-runtime";
 import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, stopRpcHost } from "./host/rpc-launch";
+import { PendingForks } from "./host/pending-forks";
+import { FORK_REFUSAL_SENTENCES } from "./chat/fork";
 import { attachNativeHost, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "./host/native-session";
 import type { SessionHostRuntime, SessionTransitionFacts } from "./host/native-session";
 import {
@@ -985,6 +987,8 @@ interface WindowState {
    * A repeated New Session for the folder is ignored and reveals that session. A guard, not a display: it is not part of `pending`.
    */
   readonly newSessionsInFlight: Map<string, string | null>;
+  /** Drafts that are forks: the original's session file their first launch passes to OMP's `--fork`. */
+  readonly pendingForks: PendingForks;
   /** The last connection-relevant phase logged per tab, so a restoration is reported against the failure it ends. */
   readonly loggedChatPhases: Map<string, ChatPhase>;
   /**
@@ -1393,6 +1397,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     turnNotifier: undefined,
     replacingConversations: new Set<string>(),
     newSessionsInFlight: new Map<string, string | null>(),
+    pendingForks: new PendingForks(),
     loggedChatPhases: new Map<string, ChatPhase>(),
     subagentWork: new Map<string, boolean>(),
     subagentWatches: new Map<string, ReturnType<typeof setInterval>>(),
@@ -1893,6 +1898,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       switch (action) {
         case "new-session": return newSessionInPlace(context, index, tabId);
         case "delete-session": return deleteSessionInPlace(context, index, tabId);
+        case "fork-session": return forkSession(context, index, tabId);
         case "omp-settings": await ompConfigEditors.open(await ompConfigBinding(tabId)); return;
         default: return runDeskSlashAction(action);
       }
@@ -2147,6 +2153,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.renameSession", (argument: unknown) => renameSession(context, index, argument)),
     registerDeskCommand("ompDesk.closeSession", (argument: unknown) => closeSession(context, index, argument)),
     registerDeskCommand("ompDesk.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
+    registerDeskCommand("ompDesk.forkSession", (argument: unknown) => forkSession(context, index, argument)),
+    registerDeskCommand("ompDesk.branchSession", (argument: unknown) => branchSession(context, index, argument)),
+    registerDeskCommand("ompDesk.clearSession", (argument: unknown) => clearSession(context, index, argument)),
     registerDeskCommand("ompDesk.addWorkspaceFolder", () => addWorkspaceFolder(index)),
     registerDeskCommand("ompDesk.chooseSessionsLayout", () => chooseSessionsLayout()),
     registerDeskCommand("ompDesk.chooseSessionsLayout.flat", () => chooseSessionsLayout()),
@@ -2475,6 +2484,108 @@ async function deleteSessionInPlace(context: vscode.ExtensionContext, index: Ses
   const column = windowState().editorPanels.sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
   if (!(await windowState().sessionActions.confirmAndDelete(index, tabId))) return;
   await createSessionInColumn(context, index, entry.cwd, column);
+}
+
+/**
+ * The live Chat session one command names, or `null` after saying why there is none (docs/designs/2026-10-18-fork-branch-clear-session-actions.md).
+ * A verified survivor this window has not attached is reattached first, as Rename does. Stopped rows, Terminal-mode sessions and an editor
+ * this window may not drive are refused with a sentence; nothing is started, switched or stopped.
+ */
+async function liveChatTarget(
+  context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, verb: string,
+): Promise<{ readonly tabId: string; readonly entry: SessionIndexEntry } | null> {
+  const s = windowState();
+  const target = sessionTargetFromArgument(index, argument);
+  if (target === null) { showWarning(`Select an OMP session to ${verb}.`); return null; }
+  const { tabId, entry } = target;
+  if (hostOf(stateOf(tabId)) == null && s.sessionRuntime.conversations.incarnationOf(tabId) === null && entry.sessionFile !== null && await s.sessionRuntime.verifiedWriterPid(tabId) !== null) {
+    await openTab(context, index, tabId, "opened", "restored");
+  }
+  const state = stateOf(tabId);
+  const runtime = hostOf(state);
+  if (state === undefined || runtime == null) { showWarning("That session is not running in this window. Resume it first."); return null; }
+  if (runtime.kind !== "chat" || state.mode === "terminal") { showWarning(FORK_REFUSAL_SENTENCES.terminal); return null; }
+  const refused = fencedOf(state) ? "The session view is changing or its process is stopping." : passiveReasonForSlot(state.slotId);
+  if (refused !== null) { showWarning(refused); return null; }
+  return target;
+}
+
+/**
+ * Fork a live Chat session into a new Chat tab beside it (`ompDesk.forkSession`, typed `/fork`). The original's process, tab and file are
+ * not touched: the fork is a new draft row whose first launch passes `--fork <the original's session file>` to OMP, which writes the new
+ * file (history, parent link, title) itself. The checks (idle, saved, the file holds the live leaf) are the runtime's `forkSourceOf`.
+ */
+async function forkSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+  const s = windowState();
+  const target = await liveChatTarget(context, index, argument, "fork");
+  if (target === null) return;
+  const { tabId, entry } = target;
+  const source = await s.sessionRuntime.conversations.forkSourceOf(tabId);
+  if (source.status === "refused") { showWarning(FORK_REFUSAL_SENTENCES[source.reason]); return; }
+  const panel = stateOf(tabId)?.panel ?? null;
+  const column = panel === null ? vscode.ViewColumn.Active : s.editorPanels.sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
+  let draft: SessionIndexEntry;
+  try {
+    draft = await index.createDraft({ cwd: source.cwd, scope: entry.scope });
+  } catch (error) {
+    showError(`The fork could not be reserved: ${messageOf(error)}`);
+    return;
+  }
+  s.pendingForks.register(draft.tabId, source.file);
+  refreshLauncher();
+  s.sessionPanelColumns.set(draft.tabId, column);
+  try {
+    await pendingEntry(draft.tabId, "new-session", { origin: "row", step: "waiting" }, () => openTab(context, index, draft.tabId, "started", "explicit", "chat"));
+    if (stateOf(draft.tabId)?.panel == null) showError("The fork's editor could not be opened.");
+  } catch (error) {
+    showError(`The fork's editor could not be opened: ${messageOf(error)}`);
+  } finally {
+    s.sessionPanelColumns.delete(draft.tabId);
+  }
+}
+
+/** Wait (bounded) for the Chat page of a tab to announce itself, then ask its composer to run one panel action. `false` when it never could. */
+async function deliverPanelAction(tabId: string, action: GuestPanelAction): Promise<boolean> {
+  const s = windowState();
+  const deadline = Date.now() + INSERT_TARGET_TIMEOUT_MS;
+  for (;;) {
+    const state = stateOf(tabId);
+    const panel = state?.panel ?? null;
+    if (state !== undefined && panel !== null && state.mode === "chat" && state.document?.kind === "guest" && !fencedOf(state) && s.readyDocuments.get(state) === state.document) {
+      return panel.webview.postMessage({ type: "omp:webview-action", action } satisfies GuestPanelActionMessage);
+    }
+    if (Date.now() >= deadline) return false;
+    await delay(INSERT_POLL_MS);
+  }
+}
+
+/**
+ * Branch: show the live Chat session and open its Rewind message picker, exactly as a typed `/branch` does (`ompDesk.branchSession`).
+ * The editor is opened or revealed like Show in Chat; the page's own `onRewind` opens the picker once the page is ready.
+ */
+async function branchSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+  const target = await liveChatTarget(context, index, argument, "branch");
+  if (target === null) return;
+  await openSessionInMode(context, index, target.tabId, "chat", "show");
+  if (!(await deliverPanelAction(target.tabId, "open-rewind"))) showWarning("The Chat page did not become ready, so its Rewind picker was not opened. Try Branch again.");
+}
+
+/**
+ * Clear Context (`ompDesk.clearSession`): ask first with a modal dialog, then run the typed `/clear` flow of the live Chat session
+ * (`ChatRuntime.clearConversation`: the same refusals and the same wait for OMP to be ready). Typed `/clear` stays unconfirmed.
+ */
+async function clearSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+  const target = await liveChatTarget(context, index, argument, "clear");
+  if (target === null) return;
+  const { tabId, entry } = target;
+  const confirm = "Clear Context";
+  const choice = await vscode.window.showWarningMessage(
+    `Clear the context of the OMP session “${windowState().launcherProvider?.headlineFor(entry.tabId) ?? sessionHeadline(entry, null)}”?`,
+    { modal: true, detail: "OMP forgets the conversation so far: later replies no longer see it. The session, its file and its title stay, and the earlier messages stay in the transcript behind a “Context cleared” divider." },
+    confirm,
+  );
+  if (choice !== confirm) return;
+  await windowState().sessionRuntime.conversations.clearConversation(tabId, (text, outcome) => { if (outcome === "refused") showWarning(text); else showInfo(text); });
 }
 
 /**
@@ -4010,6 +4121,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     brokerUnavailableReason: () => windowState().ptyGate?.reason(),
     brokerWatches: s.brokerWatches,
     linkReminder: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("linkReminder", false),
+    forks: s.pendingForks,
     control: s.sessionRuntime.control,
     native: s.sessionRuntime.nativeWatch,
     exit: s.sessionRuntime.exit,
@@ -5856,7 +5968,7 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
 }
 
 /** The Desk stand-in for a terminal-UI slash command typed into Chat (`host/slash-registry.ts`). */
-async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings" | "new-session" | "delete-session">): Promise<void> {
+async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings" | "new-session" | "delete-session" | "fork-session">): Promise<void> {
   switch (action) {
     case "keyboard-shortcuts":
       await showChatKeyboardShortcuts();

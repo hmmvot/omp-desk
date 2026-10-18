@@ -14,6 +14,13 @@ test("only a leading /clear, /new, /delete or /fresh token is a Desk session com
 	for (const text of ["explain /clear", "/cleared", "/clear-all", "/usr/new", "/news", "/omp-desk-clear {}", "clear", ""]) assert.equal(deskSessionCommand(text), null, text);
 });
 
+test("/fork is a Desk session command, with or without arguments; longer names that start with it are not", () => {
+	assert.deepEqual(deskSessionCommand("/fork"), { command: "fork", hasArguments: false });
+	assert.deepEqual(deskSessionCommand("/fork pane"), { command: "fork", hasArguments: true });
+	assert.deepEqual(deskSessionCommand("  /FORK \n"), { command: "fork", hasArguments: false });
+	for (const text of ["/forked", "/fork-it", "explain /fork", "fork"]) assert.equal(deskSessionCommand(text), null, text);
+});
+
 test("the clear request round-trips and anything malformed is refused", () => {
 	const text = encodeClearCommand({ v: 1, requestId: REQUEST, sessionId: "s1" });
 	assert.ok(text.startsWith(`/${CLEAR_COMMAND} {`));

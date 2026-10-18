@@ -60,6 +60,9 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 	} as unknown as BrokerSlotStore;
 	const diagnostics = new Proxy({}, { get: () => () => undefined }) as never;
 	const state = options.launch ?? "running";
+	const launches: Array<{ forkFrom?: string | null }> = [];
+	const sources = new Map<string, string>();
+	const dropped: string[] = [];
 	const deps: LocalLauncherDeps = {
 		index: { get: () => null, setRunIntent: async () => { events.push("setRunIntent"); } } as unknown as SessionIndex,
 		window,
@@ -70,7 +73,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 			return { hostControl: { path: "control.mjs" }, runtimeProbe: { path: "runtime-probe.mjs" } } as never;
 		},
 		hosts: {
-			launchRpc: async () => { events.push("launch"); return state === "running" ? { state, reason: "ok", runtime } : { state, reason: "no", runtime: null }; },
+			launchRpc: async (launchRequest: { forkFrom?: string | null }) => { launches.push(launchRequest); events.push("launch"); return state === "running" ? { state, reason: "ok", runtime } : { state, reason: "no", runtime: null }; },
 			launchNative: async () => { throw new Error("not used"); },
 			attachRpc: async () => ({ state: "unavailable", reason: "x", runtime: null }),
 			attachNative: async () => ({ state: "unavailable", reason: "x", runtime: null }),
@@ -81,6 +84,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		brokerUnavailableReason: () => null,
 		brokerWatches: new WeakMap(),
 		linkReminder: () => false,
+		forks: { peek: tab => sources.get(tab) ?? null, forget: tab => { dropped.push(tab); } },
 		control: {
 			storeRecipient: async () => { events.push("storeRecipient"); },
 			directory: () => "control-dir",
@@ -95,7 +99,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		log: silentLogger,
 	};
 	const launcher = new LocalLauncher(deps);
-	return { launcher, events, recorded, forgotten, runtime, deps, withheld };
+	return { launcher, events, recorded, forgotten, runtime, deps, withheld, launches, sources, dropped };
 }
 
 describe("launch", () => {
@@ -145,6 +149,38 @@ describe("launch", () => {
 		const unconfirmed = fixture({ launch: "unconfirmed" });
 		assert.equal((await unconfirmed.launcher.launch(request)).state, "unconfirmed");
 		assert.deepEqual(unconfirmed.forgotten, [], "a broker may exist, so the reservation is kept");
+	});
+
+	it("passes the fork source of a fileless draft to every launch until the row has a file (a fork that died is retried)", async () => {
+		for (const state of ["running", "unconfirmed", "not-started"] as const) {
+			const f = fixture({ launch: state });
+			f.sources.set(TAB, "C:/proj/original.jsonl");
+			await f.launcher.launch(request);
+			f.deps.brokerWatches.get(f.runtime)?.();
+			assert.equal(f.launches[0]?.forkFrom, "C:/proj/original.jsonl", state);
+			assert.deepEqual(f.dropped, [], `${state}: the source is not spent by a launch that has not shown a file`);
+		}
+	});
+
+	it("never forks an ordinary draft, and a resume of a file ends the fork", async () => {
+		const draft = fixture();
+		await draft.launcher.launch(request);
+		draft.deps.brokerWatches.get(draft.runtime)?.();
+		assert.equal(draft.launches[0]?.forkFrom, null);
+		assert.deepEqual(draft.dropped, []);
+		const resume = fixture();
+		resume.sources.set(TAB, "C:/proj/original.jsonl");
+		await resume.launcher.launch({ ...request, sessionFile: "C:/proj/exact.jsonl" });
+		resume.deps.brokerWatches.get(resume.runtime)?.();
+		assert.equal(resume.launches[0]?.forkFrom, null, "a resume names its exact file");
+		assert.deepEqual(resume.dropped, [TAB]);
+	});
+
+	it("forgets the fork source before a native launch, which has no --fork", async () => {
+		const f = fixture();
+		f.sources.set(TAB, "C:/proj/original.jsonl");
+		await assert.rejects(f.launcher.launch({ ...request, transport: "native" }), /not used/);
+		assert.deepEqual(f.dropped, [TAB]);
 	});
 });
 

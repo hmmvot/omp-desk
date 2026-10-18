@@ -2,14 +2,15 @@
  * Slash commands Chat runs itself on the session instead of sending them to OMP (ADR-0059).
  *
  * `/clear` is OMP's in-place context reset (through the Desk-registered `omp-desk-clear`), `/new` starts a new session
- * in the same folder in place of this tab, and `/delete` runs Desk's own Delete Session flow for this session and then
- * starts a new one. Only a leading `/name` token counts, the same token rule as the identity-command refusal; any
+ * in the same folder in place of this tab, `/delete` runs Desk's own Delete Session flow for this session and then
+ * starts a new one, and `/fork` opens a copy of this session in a new Chat tab beside it (the original is untouched).
+ * Only a leading `/name` token counts, the same token rule as the identity-command refusal; any
  * text after it is an argument these commands do not take.
  */
 
-export type DeskSessionCommand = "clear" | "new" | "delete" | "fresh";
+export type DeskSessionCommand = "clear" | "new" | "delete" | "fresh" | "fork";
 
-const NAMES: Readonly<Record<string, DeskSessionCommand>> = { clear: "clear", new: "new", delete: "delete", fresh: "fresh" };
+const NAMES: Readonly<Record<string, DeskSessionCommand>> = { clear: "clear", new: "new", delete: "delete", fresh: "fresh", fork: "fork" };
 
 /** The Desk session command a draft starts with, and whether anything follows the command name; `null` otherwise. */
 export function deskSessionCommand(text: string): { command: DeskSessionCommand; hasArguments: boolean } | null {

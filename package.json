@@ -828,6 +828,21 @@
         "category": "OMP Desk"
       },
       {
+        "command": "ompDesk.forkSession",
+        "title": "Fork Session",
+        "category": "OMP Desk"
+      },
+      {
+        "command": "ompDesk.branchSession",
+        "title": "Branch…",
+        "category": "OMP Desk"
+      },
+      {
+        "command": "ompDesk.clearSession",
+        "title": "Clear Context…",
+        "category": "OMP Desk"
+      },
+      {
         "command": "ompDesk.sendSelection",
         "title": "Add Selection to Session",
         "category": "OMP Desk",
@@ -1244,6 +1259,16 @@
           "command": "ompDesk.rewindConversation",
           "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
           "group": "2_rewind@1"
+        },
+        {
+          "command": "ompDesk.forkSession",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
+          "group": "2_rewind@2"
+        },
+        {
+          "command": "ompDesk.clearSession",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
+          "group": "3_session@5"
         }
       ],
       "view/title": [
@@ -1488,6 +1513,21 @@
           "command": "ompDesk.switchToSessionWindow",
           "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.otherWindow\\..*\\.window-switchable$/",
           "group": "1_open@1"
+        },
+        {
+          "command": "ompDesk.forkSession",
+          "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\.[^.]*\\.[^.]*\\.materialized\\.view-(none|chat)$/",
+          "group": "2_conversation@1"
+        },
+        {
+          "command": "ompDesk.branchSession",
+          "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\.[^.]*\\.[^.]*\\.materialized\\.view-(none|chat)$/",
+          "group": "2_conversation@2"
+        },
+        {
+          "command": "ompDesk.clearSession",
+          "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\.[^.]*\\.[^.]*\\.[^.]*\\.view-(none|chat)$/",
+          "group": "2_conversation@3"
         },
         {
           "command": "ompDesk.renameSession",

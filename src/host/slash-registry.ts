@@ -80,7 +80,7 @@ export function readSlashRegistry(input: { readonly bunPath: string; readonly he
 }
 
 /** A Desk action that stands in for a terminal-UI command. */
-export type DeskSlashAction = "keyboard-shortcuts" | "source-control" | "tools-view" | "provider-login" | "provider-logout" | "omp-settings" | "new-session" | "delete-session";
+export type DeskSlashAction = "keyboard-shortcuts" | "source-control" | "tools-view" | "provider-login" | "provider-logout" | "omp-settings" | "new-session" | "delete-session" | "fork-session";
 
 /** What Chat does with a terminal-UI command instead of sending it. */
 export interface TuiCommandGuidance {

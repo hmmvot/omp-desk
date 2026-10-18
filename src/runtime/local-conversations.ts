@@ -15,6 +15,7 @@ import type {
 	RpcSession, RpcSessionOutput, SendOutcome, ThinkingLevelsResult,
 } from "../host/rpc/session.ts";
 import type { ConversationPort, JoinResult, LegacyViewRequest, LiveConversation, ModelDefault, StaleIncarnation, ViewOnlyRequest } from "./session-runtime.ts";
+import type { ForkSource } from "../chat/fork.ts";
 import { settingsSessionApply } from "../host/omp-settings-apply.ts";
 
 const STALE: StaleIncarnation = Object.freeze({ status: "stale" });
@@ -113,6 +114,14 @@ export class LocalConversations implements ConversationPort {
 
 	notify(conversation: string, text: string): boolean {
 		return this.#chat.notify(conversation, text);
+	}
+
+	forkSourceOf(conversation: string): Promise<ForkSource> {
+		return this.#chat.forkSourceOf(conversation);
+	}
+
+	clearConversation(conversation: string, report: (text: string, outcome: "done" | "refused" | "deferred") => void): Promise<void> {
+		return this.#chat.clearConversation(conversation, report);
 	}
 
 	refreshDisplayPreferences(): void {

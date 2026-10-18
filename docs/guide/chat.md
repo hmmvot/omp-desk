@@ -115,7 +115,7 @@ Fenced `mermaid` blocks are drawn as diagrams in your theme's colours once the b
 
 **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again:
 
-- `Esc` `Esc` in an empty composer or anywhere else on the Chat page (while no turn runs), **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP Desk: Rewind Conversation…**.
+- `Esc` `Esc` in an empty composer or anywhere else on the Chat page (while no turn runs), **Rewind to here** on a prompt, `/rewind` or `/branch`, **OMP Desk: Rewind Conversation…**, or **Branch…** in a running session's context menu in Sessions.
 - **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
 - Rewind never restores files; it lists the files changed after that point.
 - A chat started by an older OMP Desk must be restarted before it can rewind.
@@ -148,6 +148,22 @@ These work in Chat.
 - `/new` opens a same-folder replacement and stops the old session only if its observed RPC settled predicate still allows it; a failed stop retains the old editor and reports the partial outcome.
 - `/delete` confirms deletion before starting a replacement.
 - Clear requires the Desk command and supported OMP entry points.
+
+### `/fork`
+
+`/fork` opens a copy of this session in a **new Chat tab** beside it, and this session carries on untouched:
+
+- The copy is a separate session with its own OMP process and its own row in Sessions. It starts with the whole conversation so far; both sessions can be continued, and neither sees what the other does next. OMP itself writes the copy and records the original as its parent, as OMP's own `/fork` does in a terminal.
+- It works while the session is idle. While a response is running, or a message is queued or being saved, it says OMP's own sentence (`Wait for the current response to finish or abort it before forking.`) or why it waits, and starts nothing.
+- `/fork` takes no arguments here: `pane`, `window` and `tab` are the terminal UI's placements, and typing one shows a one-line reason. **Fork Session** in the session's context menu, in the Chat tab's `…` menu and in the Command Palette does the same.
+- A stopped session cannot be forked (Resume it first), and a session shown in Terminal is forked from the Terminal with OMP's own `/fork`.
+
+### Branch and Clear from the Sessions view
+
+A running session's context menu in Sessions also has **Branch…** and **Clear Context…**, and the Chat tab's `…` menu has **Clear Context…**:
+
+- **Branch…** shows the session in Chat (opening a closed tab) and opens the Rewind picker, exactly as typing `/branch` does.
+- **Clear Context…** asks first in a dialog; **Clear Context** then runs the same `/clear` as typing it, with the same refusals and the same short wait for OMP to be ready. Cancel changes nothing. Typed `/clear` still asks nothing.
 
 ## Model, thinking, context and quotas
 

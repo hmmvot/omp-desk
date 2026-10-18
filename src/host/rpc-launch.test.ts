@@ -102,6 +102,7 @@ describe("the rpc-ui launch command line", () => {
 			readonly profile?: string | null;
 			readonly sessionFile?: string | null;
 			readonly sessionDir?: string | null;
+			readonly forkFrom?: string | null;
 			readonly control?: NativeControlBootstrap | null;
 			readonly prefixArgs?: readonly string[];
 			/** How the flags reach the launcher; the default is a bun shim's command line. */
@@ -119,6 +120,7 @@ describe("the rpc-ui launch command line", () => {
 			cwd: cwd(),
 			sessionFile: overrides.sessionFile === undefined ? null : overrides.sessionFile,
 			sessionDir: overrides.sessionDir === undefined ? null : overrides.sessionDir,
+			forkFrom: overrides.forkFrom === undefined ? null : overrides.forkFrom,
 			profile: overrides.profile === undefined ? null : overrides.profile,
 			linkReminder: overrides.linkReminder ?? true,
 		});
@@ -161,6 +163,31 @@ describe("the rpc-ui launch command line", () => {
 		const result = spec({ sessionDir: sessionDir() });
 		assert.equal(valueOf(result.args, "--session-dir"), sessionDir());
 		assert.equal(result.args.includes("--session"), false);
+	});
+
+	it("forks the exact source file with --fork, before --session-dir, only for a draft with no session file", () => {
+		const result = spec({ forkFrom: sessionFile(), sessionDir: sessionDir() });
+		assert.equal(valueOf(result.args, "--fork"), sessionFile());
+		assert.equal(valueOf(result.args, "--session-dir"), sessionDir());
+		assert.ok(result.args.indexOf("--fork") < result.args.indexOf("--session-dir"));
+		assert.equal(result.args.includes("--session"), false);
+		const withoutDirectory = spec({ forkFrom: sessionFile() });
+		assert.equal(valueOf(withoutDirectory.args, "--fork"), sessionFile());
+		assert.equal(withoutDirectory.args.includes("--session-dir"), false);
+		for (const forbidden of ["--resume", "-r", "--continue", "-c", "--session"]) assert.equal(withoutDirectory.args.includes(forbidden), false, forbidden);
+	});
+
+	it("never emits --fork together with --session: a resumed file wins over a stale fork source", () => {
+		const result = spec({ sessionFile: sessionFile(), forkFrom: path.join(temp, "other.jsonl"), sessionDir: sessionDir() });
+		assert.equal(valueOf(result.args, "--session"), sessionFile());
+		assert.equal(result.args.includes("--fork"), false);
+		assert.equal(result.args.includes("--session-dir"), false);
+	});
+
+	it("emits no --fork without a fork source", () => {
+		for (const result of [spec({ forkFrom: null }), spec({ forkFrom: null, sessionDir: sessionDir() }), spec({ sessionFile: sessionFile(), forkFrom: null })]) {
+			assert.equal(result.args.includes("--fork"), false);
+		}
 	});
 
 	it("passes no session flag at all for a new conversation in the default directory", () => {

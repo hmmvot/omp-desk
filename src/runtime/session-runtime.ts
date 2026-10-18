@@ -19,6 +19,7 @@ import type {
 } from "../host/rpc/session.ts";
 import type { ContextRead, ContextReportRead } from "../host/context/context-parse.ts";
 import type { ChatEpoch, ChatLiteState, ChatPendingControl, ChatPhase, ChatSlashCommand, ChatStatePayload } from "../chat/model.ts";
+import type { ForkSource } from "../chat/fork.ts";
 import type { MaintenanceState } from "../chat/events.ts";
 import type { RpcToolDescriptor } from "../protocol/rpc.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
@@ -361,6 +362,10 @@ export interface ConversationPort {
 	navigate(conversation: string, request: NavigateRequest, origin: ChatPage | null): Promise<NavigateOutcome>;
 	/** Say a fixed sentence to the routes showing the conversation; `false` when there is no route to say it to. */
 	notify(conversation: string, text: string): boolean;
+	/** What a fork of the conversation's live session starts from, or why it cannot start now (the session's state, then the file on disk). */
+	forkSourceOf(conversation: string): Promise<ForkSource>;
+	/** `/clear` for a conversation nobody typed it into: the typed command's flow; `report` gets each sentence (one now, one more when a waiting clear ends). */
+	clearConversation(conversation: string, report: (text: string, outcome: "done" | "refused" | "deferred") => void): Promise<void>;
 	refreshDisplayPreferences(): void;
 	refreshCodeThemes(): void;
 	dispose(): void;

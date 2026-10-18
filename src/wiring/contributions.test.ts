@@ -77,7 +77,7 @@ const { projectView } = await import("../host/inventory/inventory-model.ts");
 // ---------------------------------------------------------------------------------------------------------------
 
 interface MenuEntry { readonly command?: string; readonly submenu?: string; readonly when?: string; readonly group?: string }
-interface CommandDeclaration { readonly command: string; readonly title?: string; readonly icon?: string }
+interface CommandDeclaration { readonly command: string; readonly title?: string; readonly icon?: string; readonly category?: string }
 interface ViewDeclaration { readonly id: string; readonly type?: string }
 interface PackageJson {
 	readonly contributes: {
@@ -496,6 +496,35 @@ describe("commands", () => {
 		assert.equal(declared.get("ompDesk.newSession")?.title, "New Session");
 		assert.equal(declared.get("ompDesk.resumeWorkspaceFolder")?.title, "Resume Session");
 	});
+
+	it("declare Fork Session, Branch… and Clear Context…, register each, offer them on live Sessions rows in Chat or with no editor, and in the Chat title menu except Branch, never hidden from the palette", () => {
+		const titles: [string, string][] = [["ompDesk.forkSession", "Fork Session"], ["ompDesk.branchSession", "Branch…"], ["ompDesk.clearSession", "Clear Context…"]];
+		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		for (const [command, title] of titles) {
+			assert.equal(declared.get(command)?.title, title, `${command} title`);
+			assert.equal(declared.get(command)?.category, "OMP Desk", `${command} category`);
+			assert.ok(source.includes(`registerDeskCommand("${command}", `), `${command} is registered in extension.ts`);
+			assert.ok(!hiddenFromPalette.has(command), `${command} is not hidden from the palette`);
+		}
+		const rows = (command: string) => menus.filter(({ menu, entry }) => menu === "view/item/context" && entry.command === command).map(({ entry }) => entry);
+		const groups: [string, string][] = [["ompDesk.forkSession", "2_conversation@1"], ["ompDesk.branchSession", "2_conversation@2"], ["ompDesk.clearSession", "2_conversation@3"]];
+		for (const [command, group] of groups) {
+			const entries = rows(command);
+			assert.equal(entries.length, 1, `${command} has one Sessions row entry`);
+			assert.equal(entries[0]?.group, group, `${command} row group`);
+			assert.ok((entries[0]?.when ?? "").startsWith("view == ompDesk.sessions"), `${command} row entry is limited to the Sessions view`);
+			assert.ok((entries[0]?.when ?? "").includes("view-(none|chat)"), `${command} row entry needs a row shown in Chat or with no editor`);
+		}
+		assert.ok((rows("ompDesk.forkSession")[0]?.when ?? "").includes("materialized\\.view-(none|chat)"), "Fork needs a saved session file");
+		assert.ok((rows("ompDesk.branchSession")[0]?.when ?? "").includes("materialized\\.view-(none|chat)"), "Branch needs a saved session file");
+		assert.ok(!(rows("ompDesk.clearSession")[0]?.when ?? "").includes("materialized"), "Clear works on a fileless draft too");
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
+		const titleMenu = menus.filter(({ menu }) => menu === "editor/title").map(({ entry }) => entry);
+		const inTitle = (command: string) => titleMenu.filter(entry => entry.command === command);
+		assert.deepEqual(inTitle("ompDesk.forkSession").map(entry => [entry.group, entry.when]), [["2_rewind@2", chatOnly]]);
+		assert.deepEqual(inTitle("ompDesk.clearSession").map(entry => [entry.group, entry.when]), [["3_session@5", chatOnly]]);
+		assert.deepEqual(inTitle("ompDesk.branchSession"), [], "Branch is not in the Chat title menu: Rewind there opens the same picker");
+	});
 });
 
 describe("views", () => {
@@ -676,7 +705,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.findInChat", "ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
+		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.branchSession", "ompDesk.clearSession", "ompDesk.findInChat", "ompDesk.forkSession", "ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [

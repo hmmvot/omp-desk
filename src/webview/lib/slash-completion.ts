@@ -5,7 +5,8 @@ import { classifySlashInput } from "../../protocol/rpc.ts";
  * Commands Chat runs itself before anything is sent. `/rewind` and `/branch` are Chat's in-place Rewind, as they are
  * OMP's TUI rewind selector (`branch`, alias `rewind`); they never reach OMP or its fork-into-a-new-file RPC `branch`.
  * `/clear`, `/new` and `/delete` are the session-clearing commands of OMP's TUI as Desk runs them (ADR-0059): they
- * replace the catalogue entries of the same names, which OMP itself only runs in its terminal UI.
+ * replace the catalogue entries of the same names, which OMP itself only runs in its terminal UI. `/fork` is OMP's, run as Desk's
+ * Fork: a new Chat tab, never OMP's in-place switch.
  */
 const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "models", aliases: ["model"], source: "OMP Desk", description: "Open native Models settings (selector arguments retain OMP RPC semantics)" },
@@ -16,6 +17,7 @@ const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "fresh", source: "OMP Desk", description: "Rotate provider state without clearing local conversation history" },
  { name: "new", source: "OMP Desk", description: "Start a new session in this folder in place of this tab; this one stays in Sessions" },
  { name: "delete", source: "OMP Desk", description: "Delete this session after confirming, then start a new one in this tab" },
+ { name: "fork", source: "OMP Desk", description: "Open a copy of this session in a new Chat tab beside it; this one keeps running" },
 ];
 
 /** Only the leading command token is completion-owned; embedded skill tokens are prose. */

@@ -1401,8 +1401,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				},
 				"retry-turn": () => void retry(),
 				"quote-selection": () => { quoteSelectionIntoDraft(); },
+				"open-rewind": () => { if (onRewind === undefined) setSendError("Rewind is not available in this editor."); else onRewind(); },
 			}),
-		[retry, send, stop],
+		[onRewind, retry, send, stop],
 	);
 
 	// Quoting (docs/designs/2026-10-15-quote-chat-selection.md): every trigger asks this composer through the sink, so the refusals, the edit and the notice are the same whoever asked.

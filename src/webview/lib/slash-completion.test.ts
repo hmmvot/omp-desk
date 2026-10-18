@@ -73,3 +73,13 @@ test("/clear, /new, /delete and /fresh list with Desk descriptions; the internal
  assert.deepEqual(slashSuggestions(commands, "omp-desk"), []);
  assert.equal(slashSuggestions(commands, "hotkeys").length, 1, "the remaining terminal-only commands stay listed");
 });
+
+test("/fork lists once with the Desk description and replaces OMP's entry of the same name", () => {
+ const commands = [{ name: "fork", source: "builtin", description: "OMP fork" }, { name: "forked-work", source: "extension" }];
+ const found = slashSuggestions(commands, "fork");
+ assert.deepEqual(found.map(command => command.name), ["fork", "forked-work"]);
+ assert.equal(found[0]!.source, "OMP Desk");
+ assert.match(found[0]!.description!, /new Chat tab/);
+ assert.notEqual(found[0]!.description, "OMP fork");
+ assert.equal(slashSuggestions([], "fork").filter(command => command.name === "fork").length, 1);
+});

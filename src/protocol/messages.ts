@@ -425,7 +425,7 @@ export interface GuestPanelActionMessage {
 	action: GuestPanelAction;
 }
 
-export type GuestPanelAction = "send-prompt" | "stop-turn" | "focus-composer" | "retry-turn" | "quote-selection" | "find-in-chat";
+export type GuestPanelAction = "send-prompt" | "stop-turn" | "focus-composer" | "retry-turn" | "quote-selection" | "find-in-chat" | "open-rewind";
 
 /**
  * Longest reference text one editor-context insertion may carry.
@@ -1303,6 +1303,7 @@ const PANEL_ACTION: Record<string, GuestPanelAction> = {
 	"retry-turn": "retry-turn",
 	"quote-selection": "quote-selection",
 	"find-in-chat": "find-in-chat",
+	"open-rewind": "open-rewind",
 };
 
 

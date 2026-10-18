@@ -13,7 +13,8 @@
  * Runner: `node --test src/host/chat-runtime.test.ts`.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import path from "node:path";
+import { afterEach, describe, it } from "node:test";
 import { createChatModel, setChatPhase, snapshotOf } from "../chat/model.ts";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import type { ChatEpoch } from "../chat/model.ts";
@@ -31,13 +32,14 @@ import type { FakeChildModel } from "./rpc/fake-channel.ts";
 import type { HistoryReader } from "./rpc/history-reader.ts";
 import { RpcSession } from "./rpc/session.ts";
 import type { readViewOnlySnapshot } from "./rpc/session.ts";
-import { ManualTimers, assistantMessage, messageEntry, tick, userMessage, waitUntil } from "./rpc/test-support.ts";
+import { ManualTimers, ScratchDir, assistantMessage, messageEntry, sessionFileText, tick, userMessage, waitUntil } from "./rpc/test-support.ts";
 import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, parseNavigateArgs } from "../chat/rewind.ts";
 import { parseChatHostMessage, parseChatWebviewMessage } from "../protocol/chat-messages.ts";
 import { isoOf } from "./rpc/test-support.ts";
 import { CLEAR_BUSY_SENTENCE, CLEAR_COMMAND, CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_ERROR_PATH, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import type { ClearMarkerData } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE } from "../chat/desk-commands.ts";
+import { FORK_ARGUMENTS_SENTENCE, FORK_BUSY_SENTENCE, FORK_FAILED_SENTENCE, FORK_REFUSAL_SENTENCES } from "../chat/fork.ts";
 import { runClearCommand, type ClearCommandContext } from "../omp/clear-command.ts";
 
 const TAB = "tab:one";
@@ -987,6 +989,158 @@ describe("Desk session commands typed into Chat (ADR-0059)", () => {
 		assert.equal(runtime.sessionOf(TAB)!.sessionId, "fresh-provider");
 		assert.equal(channel.commandsOfType("prompt").length, 1);
 		assert.deepEqual(page.notices(), ["Provider state refreshed. Local conversation history is unchanged."]);
+	});
+
+	describe("Fork and Clear run for a tab without a typed command", () => {
+		const scratches: ScratchDir[] = [];
+		afterEach(async () => {
+			for (const scratch of scratches.splice(0)) await scratch.remove();
+		});
+
+		/** A live idle conversation whose session file is a real file holding every entry, so the disk holds the live leaf. */
+		async function forkRig(extra: Pick<ChatRuntimeOptions, "runDeskAction"> = {}) {
+			const dir = await ScratchDir.create();
+			scratches.push(dir);
+			const entries = rows(4);
+			const file = await dir.file("fork.jsonl", sessionFileText({ entries }));
+			const rig = await liveRig({ sessionFile: file, entries: entries as never, leafId: "r3" }, extra);
+			const page = new RecordingPage("editor");
+			rig.runtime.attachPage(TAB, page);
+			return { ...rig, page, file, dir };
+		}
+		const typed = (requestId: string, text: string) => ({ type: "omp:chat-prompt" as const, requestId, text });
+
+		it("typed /fork with an argument tells the arguments sentence, runs no action and sends no prompt", async () => {
+			const ran: string[] = [];
+			const { runtime, channel, page } = await forkRig({ runDeskAction: async action => { ran.push(action); } });
+			for (const [index, text] of ["/fork pane", "/fork window", "/fork tab", "/fork now"].entries()) {
+				assert.equal(await runtime.handleMessage(TAB, typed(`fork-a${index}`, text), page), "explained", text);
+			}
+			assert.deepEqual(page.notices(), Array.from({ length: 4 }, () => FORK_ARGUMENTS_SENTENCE));
+			assert.deepEqual(ran, []);
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+		});
+
+		it("typed /fork while the session is working tells OMP's own busy sentence and runs no action", async () => {
+			const ran: string[] = [];
+			const { runtime, channel, page } = await forkRig({ runDeskAction: async action => { ran.push(action); } });
+			channel.emit({ type: "agent_start" });
+			await tick();
+			assert.equal(await runtime.handleMessage(TAB, typed("fork-b1", "/fork"), page), "explained");
+			assert.deepEqual(page.notices(), [FORK_BUSY_SENTENCE]);
+			assert.equal(FORK_BUSY_SENTENCE, "Wait for the current response to finish or abort it before forking.");
+			assert.deepEqual(ran, []);
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+		});
+
+		it("typed /fork on an idle session whose file holds the leaf runs the fork action once and sends nothing to OMP", async () => {
+			const ran: string[] = [];
+			const { runtime, channel, page } = await forkRig({ runDeskAction: async (action, tabId) => { ran.push(`${tabId}:${action}`); } });
+			const request = typed("fork-c1", " /FORK ");
+			assert.equal(await runtime.handleMessage(TAB, request, page), "explained");
+			assert.equal(await runtime.handleMessage(TAB, request, page), "explained", "a repeated request answers again");
+			assert.deepEqual(ran, [`${TAB}:fork-session`], "and runs the action once");
+			assert.deepEqual(page.notices(), [], "the action tells its own outcome");
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+			assert.equal(channel.commandsOfType("steer").length, 0);
+		});
+
+		it("typed /fork tells the failed sentence when the action throws", async () => {
+			const { runtime, channel, page } = await forkRig({ runDeskAction: async () => { throw new Error("no editor"); } });
+			assert.equal(await runtime.handleMessage(TAB, typed("fork-d1", "/fork"), page), "explained");
+			assert.deepEqual(page.notices(), [FORK_FAILED_SENTENCE]);
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+		});
+
+		it("typed /fork tells the unavailable sentence when the host cannot run Desk actions", async () => {
+			const { runtime, channel, page } = await forkRig();
+			assert.equal(await runtime.handleMessage(TAB, typed("fork-e1", "/fork"), page), "explained");
+			assert.deepEqual(page.notices(), [DESK_COMMAND_UNAVAILABLE_SENTENCE]);
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+		});
+
+		it("typed /fork on a session whose file does not exist tells the empty sentence and runs no action", async () => {
+			const ran: string[] = [];
+			const dir = await ScratchDir.create();
+			scratches.push(dir);
+			const { runtime, page } = await (async () => {
+				const rig = await liveRig({ sessionFile: path.join(dir.dir, "absent.jsonl"), entries: rows(4) as never, leafId: "r3" }, { runDeskAction: async action => { ran.push(action); } });
+				const route = new RecordingPage("editor");
+				rig.runtime.attachPage(TAB, route);
+				return { ...rig, page: route };
+			})();
+			assert.equal(await runtime.handleMessage(TAB, typed("fork-f1", "/fork"), page), "explained");
+			assert.deepEqual(page.notices(), [FORK_REFUSAL_SENTENCES.empty]);
+			assert.deepEqual(ran, []);
+		});
+
+		it("forkSourceOf is ready for the idle session, busy while it works, and refused not-live for an unknown tab", async () => {
+			const { runtime, channel, file } = await forkRig();
+			assert.deepEqual(await runtime.forkSourceOf(TAB), { status: "ready", file, sessionId: channel.child.sessionId, cwd: "D:\\scratch" });
+			assert.deepEqual(await runtime.forkSourceOf("tab:unknown"), { status: "refused", reason: "not-live" });
+			channel.emit({ type: "agent_start" });
+			await tick();
+			assert.deepEqual(await runtime.forkSourceOf(TAB), { status: "refused", reason: "busy" });
+		});
+
+		/** An idle conversation with the real clear command over the fake child, the way the first /clear test builds it. */
+		async function idleClearRig() {
+			const rig = await liveRig({ entries: rows(4) as never, leafId: "r3" });
+			rig.channel.emit({ type: "available_commands_update", commands: [{ name: CLEAR_COMMAND, source: "extension", description: "Desk clear" }] });
+			await waitUntil(() => rig.runtime.sessionOf(TAB)?.model.commands.some(command => command.name === CLEAR_COMMAND) === true);
+			const seen = runRealCommand(rig.channel, { appendResetBoundary: () => {
+				rig.channel.child.entries.push({ type: "reset_boundary", id: "boundary-1", parentId: rig.channel.child.leafId, timestamp: "2026-10-11T00:00:01.000Z" });
+				rig.channel.child.leafId = "boundary-1";
+				return "boundary-1";
+			} });
+			const page = new RecordingPage("editor");
+			rig.runtime.attachPage(TAB, page);
+			return { ...rig, seen, page };
+		}
+
+		it("clearConversation runs the typed /clear flow: the done sentence is reported once and told to the page", async () => {
+			const { runtime, channel, seen, page } = await idleClearRig();
+			const reports: [string, string][] = [];
+			await runtime.clearConversation(TAB, (text, outcome) => reports.push([text, outcome]));
+			assert.deepEqual(reports, [[CLEAR_DONE_SENTENCE, "done"]]);
+			assert.deepEqual(page.notices(), [CLEAR_DONE_SENTENCE]);
+			assert.equal(seen.reloads, 1);
+			assert.deepEqual(channel.commandsOfType("prompt").map(command => String(command.message).split(" ")[0]), ["/omp-desk-clear", "/fresh", "/omp-desk-clear"]);
+		});
+
+		it("clearConversation while a response runs reports the refusal with OMP's own sentence and sends nothing", async () => {
+			const { runtime, channel } = await liveRig();
+			const page = new RecordingPage("editor");
+			runtime.attachPage(TAB, page);
+			channel.emit({ type: "agent_start" });
+			await tick();
+			const reports: [string, string][] = [];
+			await runtime.clearConversation(TAB, (text, outcome) => reports.push([text, outcome]));
+			assert.deepEqual(reports, [[CLEAR_BUSY_SENTENCE, "refused"]]);
+			assert.deepEqual(page.notices(), [CLEAR_BUSY_SENTENCE]);
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+		});
+
+		it("clearConversation right after an aborted turn reports deferred, then the final outcome once OMP settles", async () => {
+			const { runtime, channel, seen, page } = await clearRig();
+			const reports: [string, string][] = [];
+			await runtime.clearConversation(TAB, (text, outcome) => reports.push([text, outcome]));
+			assert.deepEqual(reports, [[CLEAR_DEFERRED_SENTENCES.unsettled, "deferred"]]);
+			assert.deepEqual(page.notices(), [CLEAR_DEFERRED_SENTENCES.unsettled]);
+			assert.equal(seen.reloads, 0);
+			channel.emit({ type: "session_settled" });
+			await waitUntil(() => reports.length === 2);
+			assert.deepEqual(reports.slice(1), [[CLEAR_DONE_SENTENCE, "done"]]);
+			assert.deepEqual(page.notices(), [CLEAR_DEFERRED_SENTENCES.unsettled, CLEAR_DONE_SENTENCE]);
+			assert.equal(seen.reloads, 1);
+		});
+
+		it("clearConversation for an unknown tab reports refused with the not-live sentence", async () => {
+			const { runtime } = await liveRig();
+			const reports: [string, string][] = [];
+			await runtime.clearConversation("tab:unknown", (text, outcome) => reports.push([text, outcome]));
+			assert.deepEqual(reports, [[CLEAR_REFUSAL_SENTENCES["not-live"], "refused"]]);
+		});
 	});
 });
 

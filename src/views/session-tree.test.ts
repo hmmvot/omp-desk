@@ -289,6 +289,8 @@ describe("session row menu per state", () => {
 	const OPEN = ["ompDesk.openSessionInChat", "ompDesk.openSessionInTerminal"];
 	const SHOW_BOTH = ["ompDesk.showSessionInChat", "ompDesk.showSessionInTerminal"];
 	const LIVE_REST = ["ompDesk.renameSession", "ompDesk.reloadSession", "ompDesk.closeSession", "ompDesk.deleteSession", "ompDesk.killSession"];
+	/** Fork, Branch and Clear work on the Chat view of a live session; a Terminal row has no Chat conversation to act on. */
+	const CONVERSATION = ["ompDesk.forkSession", "ompDesk.branchSession", "ompDesk.clearSession"];
 	const attached = (viewMode: "chat" | "terminal" | null): SessionLauncherFacts =>
 		({ ...NO_FACTS, open: viewMode !== null, running: true, viewMode });
 	const materialized = entry({ tabId: "tab:menu", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "live", runIntent: "running" });
@@ -306,16 +308,16 @@ describe("session row menu per state", () => {
 			expected: ["ompDesk.openSession", ...OPEN, "ompDesk.renameSession", "ompDesk.forgetSession"] },
 		...LIVE.flatMap(state => [
 			{ name: `${state} shown in Chat`, state, entry: materialized, facts: attached("chat"),
-				expected: ["ompDesk.showSessionInTerminal", ...LIVE_REST] },
+				expected: ["ompDesk.showSessionInTerminal", ...LIVE_REST, ...CONVERSATION] },
 			{ name: `${state} shown in Terminal`, state, entry: materialized, facts: attached("terminal"),
 				expected: ["ompDesk.showSessionInChat", ...LIVE_REST] },
 			{ name: `${state} with its editor closed`, state, entry: materialized, facts: attached(null),
-				expected: [...SHOW_BOTH, ...LIVE_REST] },
+				expected: [...SHOW_BOTH, ...LIVE_REST, ...CONVERSATION] },
 		]),
 		{ name: "a fileless live draft has nothing to reload or delete", state: "working", entry: fileless, facts: attached("chat"),
-			expected: ["ompDesk.showSessionInTerminal", "ompDesk.renameSession", "ompDesk.closeSession", "ompDesk.killSession"] },
+			expected: ["ompDesk.showSessionInTerminal", "ompDesk.renameSession", "ompDesk.closeSession", "ompDesk.killSession", "ompDesk.clearSession"] },
 		{ name: "a verified live writer this window has not attached", state: "running", entry: materialized,
-			facts: { ...NO_FACTS, ownedWriterPid: 4242, ownershipChecked: true }, expected: [...SHOW_BOTH, ...LIVE_REST] },
+			facts: { ...NO_FACTS, ownedWriterPid: 4242, ownershipChecked: true }, expected: [...SHOW_BOTH, ...LIVE_REST, ...CONVERSATION] },
 		{ name: "open in another window", state: "otherWindow", entry: materialized,
 			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: true }, expected: ["ompDesk.stopSessionHost", "ompDesk.switchToSessionWindow", "ompDesk.killSession"] },
 		{ name: "another window without a saved navigation identity", state: "otherWindow", entry: materialized,

@@ -38,17 +38,22 @@ function readEntries(state: RunState): CatalogEntry[] {
 	}
 }
 
+/** Every recorded session whose title contains `marker` (the first prompt becomes the title; a fork copies it, so a fork and its original both match). */
+export function recordedSessions(state: RunState, marker: string): RecordedSession[] {
+	return readEntries(state)
+		.filter(candidate => candidate.title?.includes(marker))
+		.map(entry => ({
+			tabId: entry.tabId,
+			title: entry.title,
+			runIntent: entry.runIntent,
+			brokerPid: entry.host?.rpc?.brokerPid ?? null,
+			childPid: entry.host?.rpc?.childPid ?? entry.host?.pid ?? null,
+		}));
+}
+
 /** The recorded session whose title contains `marker` (the first prompt becomes the title), or `undefined`. */
 export function recordedSession(state: RunState, marker: string): RecordedSession | undefined {
-	const entry = readEntries(state).find(candidate => candidate.title?.includes(marker));
-	if (entry === undefined) return undefined;
-	return {
-		tabId: entry.tabId,
-		title: entry.title,
-		runIntent: entry.runIntent,
-		brokerPid: entry.host?.rpc?.brokerPid ?? null,
-		childPid: entry.host?.rpc?.childPid ?? entry.host?.pid ?? null,
-	};
+	return recordedSessions(state, marker)[0];
 }
 
 /** Whether a process with this id exists (signal 0 is a liveness look, it signals nothing). */

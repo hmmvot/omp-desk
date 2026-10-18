@@ -53,7 +53,9 @@ export interface RpcOmpLaunchSpec {
  * after it would reach OMP instead of bun), then OMP's arguments, then the host-control module. A launcher that
  * does not take Bun's flags there carries them in the environment instead (`runtime.env`, ADR-0075) or not at
  * all. `--session` pins the exact file of a resume; a new conversation passes no session flag and learns its
- * exact path from `get_state`. `@file` arguments, `--fork`, `--continue` and bare `--resume` are never used.
+ * exact path from `get_state`; a Fork passes `--fork <the original's session file>` (`forkFrom`), so OMP itself writes the
+ * new file and the process serves it, and the new path is learned the same way. `@file` arguments, `--continue` and bare
+ * `--resume` are never used, and `--fork` never accompanies `--session`.
  *
  * The profile is always explicit: a session whose index scope recorded no named profile
  * gets OMP's verified `--profile default` sentinel, so an `OMP_PROFILE` inherited from this
@@ -67,8 +69,10 @@ export function rpcOmpLaunchSpec(input: {
 	readonly cwd: string;
 	/** The exact existing file to resume, or `null` for a new conversation. */
 	readonly sessionFile: string | null;
-	/** Explicit session directory from the index scope, used for a new conversation only. */
+	/** Explicit session directory from the index scope, used for a new conversation or a fork only. */
 	readonly sessionDir: string | null;
+	/** The exact existing session file this new process forks (`--fork`), or `null`/absent for an ordinary launch. Ignored when `sessionFile` is set. */
+	readonly forkFrom?: string | null;
 	readonly profile: string | null;
 	/** The `ompDesk.linkReminder` setting; the Chat prompt module reads it from the environment. */
 	readonly linkReminder: boolean;
@@ -89,7 +93,10 @@ export function rpcOmpLaunchSpec(input: {
 		input.profile ?? DEFAULT_OMP_PROFILE,
 	];
 	if (input.sessionFile !== null) args.push("--session", input.sessionFile);
-	else if (input.sessionDir !== null) args.push("--session-dir", input.sessionDir);
+	else {
+		if (input.forkFrom != null) args.push("--fork", input.forkFrom);
+		if (input.sessionDir !== null) args.push("--session-dir", input.sessionDir);
+	}
 	if (input.control !== null) args.push("-e", input.control.modulePath);
 	return { file: input.binary.command, args, cwd: input.cwd, env: { ...env, ...input.runtime.env } };
 }
@@ -137,8 +144,10 @@ export interface RpcLaunchRequest {
 	readonly sessionFile: string | null;
 	/** OMP profile, or `null` for the default profile. */
 	readonly profile: string | null;
-	/** Explicit session directory from the index scope; used for a new conversation only. */
+	/** Explicit session directory from the index scope; used for a new conversation or a fork only. */
 	readonly sessionDir: string | null;
+	/** The exact existing session file this process forks (`--fork`); `null` or absent for an ordinary launch. Ignored when `sessionFile` is set. */
+	readonly forkFrom?: string | null;
 	/** Host-control bootstrap, or `null` to launch without the channel. */
 	readonly control: NativeControlBootstrap | null;
 	/** The `ompDesk.linkReminder` setting when this launch starts; applies to this process for its whole life. */
@@ -252,6 +261,7 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		cwd,
 		sessionFile: request.sessionFile,
 		sessionDir: request.sessionDir,
+		forkFrom: request.forkFrom ?? null,
 		profile: request.profile,
 		linkReminder: request.linkReminder,
 	});

@@ -15,6 +15,8 @@ date: 2026-09-29
 
 > §1 amended 2026-10-12 (see the [design](../designs/2026-09-29-rpc-ui-chat-and-sessions.md), retention rules): the 4 MiB / 2048-line bound counts retained lines only. Transient lines (`response`, `rpc_chunk`) held for an attached client until every cursor has passed them have their own 128 MiB budget per broker, so a reattaching client's own `get_entries` answer no longer evicts the replay ahead of it. Eviction still walks one oldest-first queue: overflowing either bound evicts the oldest line of any kind, and a cursor that loses an unsent line is disconnected and reattaches. Memory is bounded per broker, not across brokers.
 
+> §1 narrowly amended 2026-10-18 by the [fork design](../designs/2026-10-18-fork-branch-clear-session-actions.md): a Desk draft that was opened as a fork of a live session starts its one `omp --mode rpc-ui` process with OMP's own `--fork <source session file>` instead of a bare new session. OMP writes the copy before RPC starts, and the row then resumes with `--session <exact file>` like any other; `--fork` is never emitted with `--session` and the original's process is never involved.
+
 ## Context and Problem Statement
 
 The chat editor is a Collab guest ([ADR-0002](0002-local-collab-gui-native-omp.md)): a loopback relay sidecar, a room and bearer link

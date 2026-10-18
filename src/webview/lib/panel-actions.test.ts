@@ -21,6 +21,7 @@ function recorder(name: string, calls: string[]) {
 		"focus-composer": () => calls.push(`${name}:focus`),
 		"retry-turn": () => calls.push(`${name}:retry`),
 		"quote-selection": () => calls.push(`${name}:quote`),
+		"open-rewind": () => calls.push(`${name}:rewind`),
 	};
 }
 
@@ -49,6 +50,18 @@ describe("dispatch", () => {
 		releaseFirst();
 		assert.equal(requestPanelAction("focus-composer"), false);
 		assert.deepEqual(calls, ["second:focus", "first:focus"]);
+	});
+
+	it("dispatches open-rewind to the newest composer and reports when none is mounted", () => {
+		const calls: string[] = [];
+		assert.equal(requestPanelAction("open-rewind"), false);
+		const releaseFirst = providePanelActions(recorder("first", calls));
+		const releaseSecond = providePanelActions(recorder("second", calls));
+		assert.equal(requestPanelAction("open-rewind"), true);
+		assert.deepEqual(calls, ["second:rewind"]);
+		releaseSecond();
+		releaseFirst();
+		assert.equal(requestPanelAction("open-rewind"), false);
 	});
 
 	it("releases only the registration it was given", () => {

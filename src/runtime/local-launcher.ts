@@ -33,6 +33,7 @@ import { brokerAndRootGone } from "../host/native-session.ts";
 import type { attachNativeHost, launchNativeHost, NativeAttachOutcome, SessionHostRuntime } from "../host/native-session.ts";
 import { isPtyProcessAlive } from "../host/pty-identity.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
+import type { PendingForks } from "../host/pending-forks.ts";
 import type { attachRpcHost, launchRpcHost, RpcAttachOutcome } from "../host/rpc-launch.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
 import type {
@@ -92,6 +93,8 @@ export interface LocalLauncherDeps {
 	/** One watch per runtime; starting a new one replaces the old. */
 	readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
 	readonly linkReminder: () => boolean;
+	/** Which drafts are forks: the first launch of a fileless draft passes `--fork <source>`; a launch of a materialized row, or a native one, drops the source. */
+	readonly forks: Pick<PendingForks, "peek" | "forget">;
 	readonly control: Pick<LocalHostControl, "connect" | "reconnect" | "fail" | "storeRecipient" | "directory" | "withhold">;
 	/** The early check of a launch: does an authenticated native process of this window already serve the file. */
 	readonly native: Pick<LocalNativeWatch, "servesFile">;
@@ -373,18 +376,23 @@ export class LocalLauncher implements OmpHostLauncher {
 		if (reserved !== undefined && !reserved.ok) return notStarted(reserved.reason);
 		timeline?.lap(request.tabId, "broker slot");
 		const spawnedAt = Date.now();
-		const outcome = await (request.transport === "native" ? this.#deps.hosts.launchNative : this.#deps.hosts.launchRpc)(
-			{
-				slot,
-				cwd: request.cwd,
-				sessionFile: request.sessionFile,
-				profile: request.scope.profile,
-				sessionDir: request.scope.sessionDir,
-				control: control === null ? null : control.bootstrap,
-				linkReminder: this.#deps.linkReminder(),
-			},
-			client,
-		);
+		// A fileless draft opened as a fork starts with OMP's own `--fork`, and keeps its source until the row has a file (a fork
+		// process that dies first is retried from the same source). A resume names its exact file and a native launch has no `--fork`:
+		// both end the fork.
+		if (request.sessionFile !== null || request.transport === "native") this.#deps.forks.forget(request.tabId);
+		const forkFrom = request.sessionFile === null && request.transport !== "native" ? this.#deps.forks.peek(request.tabId) : null;
+		const base = {
+			slot,
+			cwd: request.cwd,
+			sessionFile: request.sessionFile,
+			profile: request.scope.profile,
+			sessionDir: request.scope.sessionDir,
+			control: control === null ? null : control.bootstrap,
+			linkReminder: this.#deps.linkReminder(),
+		};
+		const outcome = request.transport === "native"
+			? await this.#deps.hosts.launchNative(base, client)
+			: await this.#deps.hosts.launchRpc({ ...base, forkFrom }, client);
 		const timings: Record<string, number> = { spawn: Date.now() - spawnedAt };
 		if ("timings" in outcome) for (const [phase, ms] of Object.entries(outcome.timings)) timeline?.add(request.tabId, phase, ms);
 		const runtime = outcome.runtime;

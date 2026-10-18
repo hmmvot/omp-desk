@@ -67,6 +67,7 @@ import {
 	type ClearDeferrable,
 	type ClearRefusal,
 } from "../../chat/clear.ts";
+import type { ForkSource } from "../../chat/fork.ts";
 import {
 	NAVIGATE_COMMAND,
 	NAVIGATE_ERROR_PATH,
@@ -1306,6 +1307,26 @@ export class RpcSession {
 	/** Why a clear cannot start now, or null. Every check is on host-known state; OMP re-checks its own. */
 	#clearRefusal(requireCommand = true): ClearRefusal | null {
 		return this.#clearBlock(requireCommand)?.reason ?? null;
+	}
+
+	/**
+	 * What a fork of this session starts from, or why it cannot start now. Only what the host knows: a response, a compaction,
+	 * a dialog, a queued or unconfirmed message or an unsettled turn is `busy` (OMP's own `/fork` refuses a streaming
+	 * response the same way), and a conversation with no saved entry has nothing to fork. The file's existence and that the
+	 * disk holds the live leaf are checked by the caller, which reads the file. Nothing is written and the session is not fenced.
+	 */
+	forkSource(): ForkSource {
+		const control = this.#controlRefusal();
+		if (control !== null) return { status: "refused", reason: control === "busy" ? "busy" : "not-live" };
+		const model = this.#model;
+		if (model.state?.isCompacting === true || model.maintenance?.status === "working" || model.working || model.state?.isStreaming === true || model.asyncPaused ||
+			model.uiRequest !== null || (model.state?.queuedMessageCount ?? 0) > 0 || !model.settled ||
+			this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return { status: "refused", reason: "busy" };
+		const file = this.#boundFile;
+		const sessionId = this.#model.header?.id ?? this.#boundId;
+		if (file === null || sessionId === null) return { status: "refused", reason: "not-live" };
+		if (model.durableCount === 0) return { status: "refused", reason: "empty" };
+		return { status: "ready", file, sessionId, cwd: this.#options.cwd };
 	}
 
 	/** The first thing in the way of a clear, named for the user, and whether it passes by itself. */

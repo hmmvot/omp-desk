@@ -47,7 +47,9 @@ import type { HostToolProvider } from "./tools/host-tool.ts";
 import { SettingsRefusal } from "./omp-settings-core.ts";
 import { OmpUnavailableError } from "../shared/omp-unavailable.ts";
 import { nativeSettingsCommand, type NativeSettingsTarget } from "../chat/settings-command.ts";
-import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
+import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES, type ClearDeferrable } from "../chat/clear.ts";
+import { FORK_ARGUMENTS_SENTENCE, FORK_FAILED_SENTENCE, FORK_REFUSAL_SENTENCES, type ForkSource } from "../chat/fork.ts";
+import { awaitForkDisk } from "./fork-source.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
 import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
 import { turnActivity } from "../protocol/activity.ts";
@@ -933,22 +935,34 @@ export class ChatRuntime {
 		const operation = (async (): Promise<ChatCommandOutcome> => {
 			const { command } = request;
 			if (request.hasArguments) {
-				this.#tell(conversation, origin, command === "clear" ? CLEAR_REFUSAL_SENTENCES.arguments : DESK_COMMAND_ARGUMENTS_SENTENCE);
+				this.#tell(conversation, origin, command === "clear" ? CLEAR_REFUSAL_SENTENCES.arguments : command === "fork" ? FORK_ARGUMENTS_SENTENCE : DESK_COMMAND_ARGUMENTS_SENTENCE);
 				return "explained";
 			}
 			// Another Desk command ends a clear that is waiting for OMP; `/clear` itself is answered by the session.
-			if (command !== "clear") session.cancelDeferredClear();
+			if (command !== "clear" && command !== "fork") session.cancelDeferredClear();
 			if (command === "clear") {
-				const sentence = (outcome: ClearOutcome): string => outcome.status === "done" ? CLEAR_DONE_SENTENCE : CLEAR_REFUSAL_SENTENCES[outcome.status === "refused" ? outcome.reason : "unconfirmed"];
-				const waiting = Promise.withResolvers<void>();
-				const run = session.clear(randomBytes(16).toString("hex"), reason => { this.#tellAll(conversation, CLEAR_DEFERRED_SENTENCES[reason]); waiting.resolve(); });
-				const first = await Promise.race([run, waiting.promise]);
-				if (first === undefined) {
+				const started = await this.#startClear(conversation, session);
+				if (started.later !== null) {
 					// The clear waits for OMP to be ready. The composer is released now; every route is told the outcome when it comes.
-					void run.then(outcome => { if (!conversation.disposed) this.#tellAll(conversation, sentence(outcome)); });
+					void started.later.then(later => { if (!conversation.disposed) this.#tellAll(conversation, later.text); });
 					return "explained";
 				}
-				this.#tell(conversation, origin, sentence(first));
+				this.#tell(conversation, origin, started.text);
+				return "explained";
+			}
+			if (command === "fork") {
+				const source = await this.#forkSource(session);
+				if (source.status === "refused") {
+					this.#tell(conversation, origin, FORK_REFUSAL_SENTENCES[source.reason]);
+					return "explained";
+				}
+				const open = this.#options.runDeskAction;
+				if (open === undefined) {
+					this.#tell(conversation, origin, DESK_COMMAND_UNAVAILABLE_SENTENCE);
+					return "explained";
+				}
+				try { await open("fork-session", conversation.tabId); }
+				catch { this.#tell(conversation, origin, FORK_FAILED_SENTENCE); }
 				return "explained";
 			}
 			if (command === "fresh") {
@@ -973,6 +987,24 @@ export class ChatRuntime {
 		this.#settingsRequests.set(key, operation);
 		if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
 		return operation;
+	}
+
+	/**
+	 * Start a `/clear` and wait for the first thing that decides it: the outcome, or the notice that it waits for OMP to be ready
+	 * (told to every route here). `later` is the outcome of a waiting clear; `null` when the answer is final.
+	 */
+	async #startClear(conversation: Conversation, session: RpcSession): Promise<{ text: string; outcome: "done" | "refused" | "deferred"; later: Promise<{ text: string; outcome: "done" | "refused" }> | null }> {
+		const answer = (outcome: ClearOutcome): { text: string; outcome: "done" | "refused" } =>
+			outcome.status === "done" ? { text: CLEAR_DONE_SENTENCE, outcome: "done" } : { text: CLEAR_REFUSAL_SENTENCES[outcome.status === "refused" ? outcome.reason : "unconfirmed"], outcome: "refused" };
+		const waiting = Promise.withResolvers<ClearDeferrable>();
+		const run = session.clear(randomBytes(16).toString("hex"), reason => waiting.resolve(reason));
+		const first = await Promise.race([run, waiting.promise]);
+		if (typeof first === "string") {
+			const text = CLEAR_DEFERRED_SENTENCES[first];
+			this.#tellAll(conversation, text);
+			return { text, outcome: "deferred", later: run.then(answer) };
+		}
+		return { ...answer(first), later: null };
 	}
 
 	/** A terminal-UI builtin typed into Chat: never sent to OMP. Its Desk equivalent runs when there is one. Once per request. */
@@ -1058,6 +1090,49 @@ export class ChatRuntime {
 		if (message === null) return false;
 		this.#broadcast(conversation, message);
 		return true;
+	}
+
+	/**
+	 * What a fork of the tab's session starts from, or why it cannot start now: the session's own state, then the disk
+	 * (`awaitForkDisk`). Typed `/fork` and the extension's Fork both ask here, so a refusal reads the same on every route.
+	 */
+	async forkSourceOf(tabId: string): Promise<ForkSource> {
+		const conversation = this.#conversations.get(tabId);
+		const session = conversation?.kind === "live" ? conversation.session : null;
+		return session === null ? { status: "refused", reason: "not-live" } : this.#forkSource(session);
+	}
+
+	async #forkSource(session: RpcSession): Promise<ForkSource> {
+		const source = session.forkSource();
+		if (source.status !== "ready") return source;
+		const disk = await awaitForkDisk(source.file, session.model.leafId);
+		return disk === "holds" ? source : { status: "refused", reason: disk === "missing" ? "empty" : "unsaved" };
+	}
+
+	/**
+	 * `/clear` for a conversation nobody typed it into (the Sessions menu, the palette, after the extension's own
+	 * confirmation): the same flow as the typed command, with the same refusals and the same deferral. Every route showing
+	 * the conversation is told in its footer, and `report` gets each sentence too (one now, and one more when a deferred clear ends).
+	 */
+	async clearConversation(tabId: string, report: (text: string, outcome: "done" | "refused" | "deferred") => void): Promise<void> {
+		const conversation = this.#conversations.get(tabId);
+		const session = conversation?.kind === "live" ? conversation.session : null;
+		if (conversation === undefined || session === null) {
+			report(CLEAR_REFUSAL_SENTENCES["not-live"], "refused");
+			return;
+		}
+		const started = await this.#startClear(conversation, session);
+		if (started.later === null) {
+			this.#tellAll(conversation, started.text);
+			report(started.text, started.outcome);
+			return;
+		}
+		report(started.text, "deferred");
+		void started.later.then(later => {
+			if (conversation.disposed) return;
+			this.#tellAll(conversation, later.text);
+			report(later.text, later.outcome);
+		});
 	}
 
 	/** A fixed sentence for every route showing the conversation. */

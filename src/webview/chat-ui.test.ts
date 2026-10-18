@@ -6350,6 +6350,35 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("the host's open-rewind action opens the picker a typed /branch opens, and says the same when the conversation has no earlier message", async () => {
+			await reset("rewind-host-action");
+			await pushRewind();
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
+			await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'open-rewind'})");
+			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+			assert.equal(await pickedPreview(), "fix the parser", "picking starts at the newest prompt, as for a typed /branch");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			const noEarlierMessage = "There is no earlier message in this conversation to rewind to.";
+			const notice = (): Promise<string | null> => ui.evaluate("document.querySelector('.omp-rewind-bar--notice > span')?.textContent ?? null");
+			await pushRewind({ entries: [], durableCount: 0, leafId: null });
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===0");
+			await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'open-rewind'})");
+			await ui.wait("document.querySelector('.omp-rewind-bar--notice')");
+			assert.equal(await notice(), noEarlierMessage);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--picking')"), null);
+			await ui.evaluate("document.querySelector('[aria-label=\"Dismiss rewind notice\"]').click()");
+			await ui.wait("!document.querySelector('.omp-rewind-bar')");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "/branch" });
+			await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
+			await ui.wait("document.querySelector('.omp-rewind-bar--notice')");
+			assert.equal(await notice(), noEarlierMessage, "a typed /branch says the same");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "neither route reaches OMP");
+			assert.deepEqual(await navigations(), []);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("Esc Esc with the focus on the page around the composer opens Rewind; one Esc, a draft, a working session, an open popup or a focused input do not", async () => {
 			await reset("rewind-page-escape");
 			await pushRewind();

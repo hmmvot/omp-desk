@@ -31,6 +31,8 @@ export interface PanelActionHandlers extends Record<Exclude<GuestPanelAction, "f
 	"retry-turn"(): void;
 	/** Quote the Chat's text selection into the draft (`Alt+Q`, the context menu item); the composer says why when there is nothing to quote. */
 	"quote-selection"(): void;
+	/** Open Rewind's message picker, as a typed `/branch` or `/rewind` does (the Sessions menu's Branch). */
+	"open-rewind"(): void;
 }
 
 const providers: PanelActionHandlers[] = [];
