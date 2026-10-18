@@ -17,9 +17,11 @@
  */
 import type { ReactNode } from "react";
 import { Fragment, memo, useLayoutEffect, useMemo, useRef } from "react";
-import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH, USER_INLINE_TOKEN, inlinePieces } from "../lib/markdown-inline.ts";
+import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH, USER_INLINE_TOKEN, inlinePieces, isMathToken, mathTokenText, scanInline } from "../lib/markdown-inline.ts";
 import { LeafCollector, registerMarkdown, unregisterMarkdown, type Leaf, type LeafLine, type LeafTable, type LineOrigin } from "../lib/markdown-leaves.ts";
 import { splitTableCells } from "../lib/markdown-table.ts";
+import { mathBlockAt } from "../lib/latex-math.ts";
+import { latexToBlock } from "../lib/latex-block.ts";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
@@ -35,6 +37,9 @@ import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
 import { MermaidBlock } from "./MermaidBlock.tsx";
+import { SvgFigureBlock } from "./SvgFigureBlock.tsx";
+import { TableChart } from "./TableChart.tsx";
+import { MathBlock } from "./MathBlock.tsx";
 
 const HEADING = /^(#{1,6})\s+(.*)$/;
 /** An opening fence: a run of three or more backticks and an info string without backticks (the composer's rule, `code-fence.ts`); the language is the first token of the info string. Leading whitespace of any width is tolerated: list item bodies keep their extra columns. */
@@ -55,9 +60,9 @@ const QUOTE = /^\s*>\s?(.*)$/;
 /** How many blockquotes may nest; a `>` inside the deepest one is literal text. */
 const MAX_QUOTE_DEPTH = 8;
 
-/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram), how many quotes deep, whether inline emphasis is parsed (not in text the user typed), and the collector of the leaf records when the message is quotable. */
-interface BlockContext { readonly quoted: boolean; readonly depth: number; readonly emphasis: boolean; readonly leaves: LeafCollector | null }
-const TOP_LEVEL: BlockContext = { quoted: false, depth: 0, emphasis: true, leaves: null };
+/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram), how many quotes deep, inside a list item (the TUI draws a figure or a chart only for a top-level block), whether inline emphasis (and math) is parsed (not in text the user typed), and the collector of the leaf records when the message is quotable. */
+interface BlockContext { readonly quoted: boolean; readonly depth: number; readonly inList: boolean; readonly emphasis: boolean; readonly leaves: LeafCollector | null }
+const TOP_LEVEL: BlockContext = { quoted: false, depth: 0, inList: false, emphasis: true, leaves: null };
 
 /** Where line `index` of a nested parse came from; `null` origins are the source's own lines. */
 function originAt(origins: readonly LineOrigin[] | null, index: number): LineOrigin {
@@ -159,15 +164,16 @@ function renderInline(text: string, keyPrefix: string, emphasis = true, depth = 
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
 	let tokenIndex = 0;
-	const grammar = emphasis ? INLINE_TOKEN : USER_INLINE_TOKEN;
-	grammar.lastIndex = 0;
-	let match = grammar.exec(text);
-	while (match !== null) {
+	// Math is only the model's own text (`emphasis`): a `$` in a message the user typed is a dollar sign.
+	for (const match of scanInline(text, emphasis ? INLINE_TOKEN : USER_INLINE_TOKEN, emphasis)) {
 		if (match.index > cursor) nodes.push(plain(text.slice(cursor, match.index), `${keyPrefix}-p${tokenIndex}`));
-		const token = match[0];
+		const token = match.text;
 		const key = `${keyPrefix}-t${tokenIndex++}`;
 		cursor = match.index + token.length;
-		if (token.startsWith("`")) {
+		if (isMathToken(token)) {
+			// The shown text is the converted formula and nothing else (Find and Quote read it); the TeX is the tooltip.
+			nodes.push(<span key={key} className="omp-math" title={token}>{mathTokenText(token)}</span>);
+		} else if (token.startsWith("`")) {
 			nodes.push(codeSpan(token.slice(1, -1), key));
 		} else if (token.startsWith("**") || token.startsWith("__")) {
 			nodes.push(<strong key={key}>{emphasized(token.slice(2, -2), `${key}f`, depth)}</strong>);
@@ -198,9 +204,6 @@ function renderInline(text: string, keyPrefix: string, emphasis = true, depth = 
 		} else {
 			nodes.push(<em key={key}>{emphasized(token.slice(1, -1), `${key}f`, depth)}</em>);
 		}
-		// A nested call moved the shared regex; continue right after this token.
-		grammar.lastIndex = cursor;
-		match = grammar.exec(text);
 	}
 	if (cursor < text.length) nodes.push(plain(text.slice(cursor), `${keyPrefix}-p${tokenIndex}`));
 	return nodes;
@@ -219,6 +222,11 @@ function renderLines(lines: readonly string[], keyPrefix: string, emphasis: bool
 /** Split a table row on unescaped pipes, dropping the optional edge pipes. */
 function splitTableRow(line: string): string[] {
 	return splitTableCells(line).map(cell => cell.text);
+}
+
+/** A table cell as the reader sees it: emphasis marks, code ticks and link syntax gone, math converted (what a chart reads). */
+function shownCell(cell: string): string {
+	return inlinePieces(cell, true).map(piece => piece.visible).join("");
 }
 
 /** Column width of leading whitespace, with tabs as four columns. */
@@ -324,7 +332,7 @@ function parseList(lines: readonly string[], origins: readonly LineOrigin[] | nu
 		if (sibling === null || sibling.indent < first.indent || sibling.ordered !== first.ordered) break;
 	}
 	const rendered = items.map((body, itemIndex) => (
-		<li key={`li${itemIndex}`}>{parseBlockRange(body.lines, tracking ? body.origins : null, 0, 0, !loose, `${listKey}-${itemIndex}`, context).blocks}</li>
+		<li key={`li${itemIndex}`}>{parseBlockRange(body.lines, tracking ? body.origins : null, 0, 0, !loose, `${listKey}-${itemIndex}`, { ...context, inList: true }).blocks}</li>
 	));
 	return {
 		node: first.ordered
@@ -350,6 +358,27 @@ export interface MarkdownParse {
 	readonly emphasis: boolean;
 	readonly leaves: readonly Leaf[];
 	readonly leafStarts: readonly number[];
+	/** Whether a display-math opener is still waiting for its closer: a later append may turn lines far before the tail into one block, so the next parse starts over. */
+	readonly openMath: boolean;
+}
+
+/** A line that opens a display-math block, closed or not (`$$`, `\[`, or a bare `\begin{…}`). */
+const MATH_OPENER_LINE = /^ {0,3}(?:\$\$[ \t]*$|\\\[[ \t]*$|\\begin\{)/;
+
+/** Whether some display-math opener of `lines` outside a fenced block has no closer yet (a fenced `$$` is code, never an opener). */
+function hasOpenMath(lines: readonly string[]): boolean {
+	let fence = 0;
+	for (let index = 0; index < lines.length; index++) {
+		const line = lines[index] as string;
+		if (fence > 0) {
+			if (closesFence(line, fence)) fence = 0;
+		} else {
+			const open = FENCE.exec(line);
+			if (open !== null) fence = (open[1] as string).length;
+			else if (MATH_OPENER_LINE.test(line) && mathBlockAt(lines, index) === undefined) return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -361,7 +390,7 @@ export interface MarkdownParse {
  */
 export function parseMarkdown(text: string, previous: MarkdownParse | null, quotable = false, emphasis = true): MarkdownParse {
 	const lines = text.split(/\r?\n/);
-	if (previous !== null && previous.quotable === quotable && previous.emphasis === emphasis && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
+	if (previous !== null && !previous.openMath && previous.quotable === quotable && previous.emphasis === emphasis && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
 		const modified = previous.lineCount - 1;
 		const last = previous.starts.length - 1;
 		// A block that starts on the modified line may now be joined by the block before it
@@ -379,6 +408,7 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null, quot
 				starts: [...previous.starts.slice(0, from), ...tail.starts],
 				quotable,
 				emphasis,
+				openMath: emphasis && hasOpenMath(lines),
 				leaves: collector === null ? [] : [...previous.leaves.slice(0, kept), ...collector.leaves],
 				leafStarts: [...previous.leafStarts.slice(0, from), ...tail.leafStarts],
 			};
@@ -386,7 +416,7 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null, quot
 	}
 	const collector = quotable ? new LeafCollector(0, emphasis) : null;
 	const parsed = parseBlockRange(lines, null, 0, 0, false, "b", { ...TOP_LEVEL, emphasis, leaves: collector });
-	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts, quotable, emphasis, leaves: collector === null ? [] : collector.leaves, leafStarts: parsed.leafStarts };
+	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts, quotable, emphasis, openMath: emphasis && hasOpenMath(lines), leaves: collector === null ? [] : collector.leaves, leafStarts: parsed.leafStarts };
 }
 
 /**
@@ -489,13 +519,36 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 				language,
 				closed,
 			});
+			// The TUI lifts a figure only from a top-level fence: one inside a quote or a list item stays code.
 			blocks.push(
 				language.toLowerCase() === "mermaid" && !context.quoted ? (
 					<MermaidBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
+				) : language.toLowerCase() === "svg" && !context.quoted && !context.inList ? (
+					<SvgFigureBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
 				) : (
 					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} leaf={leaf} />
 				),
 			);
+			continue;
+		}
+
+		// A display block (`$$` / `\[` on lines of their own, or a bare math environment) of the model's own text, once its closer has arrived. Its shown lines are the stacked layout; the leaf has the code leaf's shape, so Find reads the shown lines and a Quote of them is the text selected (the shown lines are not source lines).
+		const math = context.emphasis ? mathBlockAt(lines, index) : undefined;
+		if (math !== undefined) {
+			const open = index;
+			const source = math.bodyLines.join("\n");
+			const shown = latexToBlock(source);
+			const leaf = collector?.add({
+				kind: "code",
+				lines: shown.map(text => leafLine(origins, lines, open, text)),
+				first: originAt(origins, open).line,
+				last: originAt(origins, math.last).line,
+				open: leafLine(origins, lines, open),
+				language: "math",
+				closed: true,
+			});
+			blocks.push(<MathBlock key={`b${key++}`} shown={shown} source={source} leaf={leaf} />);
+			index = math.last + 1;
 			continue;
 		}
 
@@ -557,8 +610,11 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 				index++;
 			}
 			// A table cannot wrap below its longest words: a wide one scrolls inside its own block, never the transcript.
-			blocks.push(
-				<div className="omp-table-scroll" key={`b${key++}`}>
+			const tableKey = `b${key++}`;
+			// The TUI charts only a top-level table of the model's own text; the chart reads the cells as shown (emphasis, code and links stripped).
+			const chartable = context.emphasis && !context.quoted && !context.inList;
+			const scroll = (
+				<div className="omp-table-scroll" key={chartable ? "table" : tableKey}>
 					<table>
 						<thead>
 							<tr data-md-leaf={headerLeaf}>
@@ -577,7 +633,22 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 							))}
 						</tbody>
 					</table>
-				</div>,
+				</div>
+			);
+			blocks.push(
+				chartable ? (
+					<Fragment key={tableKey}>
+						{scroll}
+						<TableChart
+							key="chart"
+							header={header.map(shownCell)}
+							rows={rows.map(row => header.map((_, cellIndex) => shownCell(row[cellIndex] ?? "")))}
+							followedByContent={lines.slice(index).some(rest => rest.trim() !== "")}
+						/>
+					</Fragment>
+				) : (
+					scroll
+				),
 			);
 			continue;
 		}
@@ -591,6 +662,7 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 				paragraph.length > 0 &&
 				(paragraphLine.trim() === "" ||
 					FENCE.test(paragraphLine) ||
+					(context.emphasis && mathBlockAt(lines, index) !== undefined) ||
 					HEADING.test(paragraphLine) ||
 					RULE.test(paragraphLine) ||
 					quoteLine(paragraphLine, context) ||

@@ -19,6 +19,9 @@ import { QUEUE_STYLES } from "./queue-styles.ts";
 import { BTW_STYLES } from "./btw-styles.ts";
 import { MERMAID_STYLES } from "./mermaid-styles.ts";
 import { FIND_STYLES } from "./find-styles.ts";
+import { FIGURE_STYLES } from "./figure-styles.ts";
+import { CHART_STYLES } from "./chart-styles.ts";
+import { MATH_STYLES } from "./math-styles.ts";
 
 const CSS = `
 ${BASE_CSS}
@@ -921,6 +924,9 @@ ${HUD_STYLES}
 ${QUEUE_STYLES}
 ${BTW_STYLES}
 ${MERMAID_STYLES}
+${FIGURE_STYLES}
+${CHART_STYLES}
+${MATH_STYLES}
 ${FIND_STYLES}
 .omp-native-child button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 .omp-native-agent + .omp-native-agent { border-top: 1px solid var(--omp-border); padding-top: 8px; margin-top: 8px; }

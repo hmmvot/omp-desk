@@ -110,6 +110,30 @@ Fenced `mermaid` blocks are drawn as diagrams in your theme's colours once the b
 - The diagram renderer is loaded only when a reply has one.
 - A block too large for the transcript has **Open diagram in a tab**, which draws it in an editor tab of its own.
 
+### SVG figures
+
+A fenced `svg` block in a reply is drawn as an image once the block is complete, as OMP's terminal UI draws it; until then, and when the SVG cannot be drawn, you see the code, with a muted line saying why.
+
+- **Figure | Source** switches the view and Copy copies the source. The figure uses your theme's colours: the `var(--fg)`, `var(--muted)`, `var(--accent)`, `var(--c1)` … `var(--c6)` tokens OMP asks models to draw with are replaced by your theme's text, accent and chart colours.
+- The SVG is never run: scripts, links, animation, embedded HTML and anything that would load a file or a web address are removed (the figure says so), and the image is shown as a picture, which cannot do any of that itself. A figure needs a `viewBox` (or a width and height) to have a size.
+- Only the assistant's reply text draws figures, and only a fence on its own, not one inside a list item or a quote; the same block in your own message, in a tool's output or in thinking stays code.
+
+### Charts under tables
+
+A table of numbers in a reply gets a chart under it (bars, grouped bars, or a line when the rows run in order, such as dates or `Run 1`, `Run 2`…), in your theme's colours, when OMP's terminal UI would draw one: at least four rows, values that are not all alike, and enough of them to be worth a picture. Tables of words, ids, dates and versions, tables of a few rows and tables inside a list or a quote get none. The table itself is unchanged and the chart is not part of what Find searches.
+
+- The last table of a reply is charted once it has stopped growing (about half a second after its last row).
+- **Hide chart** (beside the chart's title) hides every chart in the Chat until you reload it, leaving a **Show chart** line under each charted table; **Show chart** on any of them brings all the charts back. OMP's own off switch for the terminal, `tui.autoGraph`, is not read here.
+- Desk draws the common kinds (bar, grouped bar of two or three measures, line); the terminal's other chart kinds, a heatmap of four or more same-unit columns among them, are not drawn.
+
+### Math
+
+LaTeX in a reply is shown as readable text, as in OMP's terminal UI: `$x^2 + \alpha$`, `\(a_1\)` and `$$…$$` become `x² + α`, `a₁` and the formula; a `$$` or `\[` on a line of its own with its closing line (or a bare `\begin{align}…\end{align}`) is a block with stacked fractions, matrices and aligned rows. Hover a formula to see its TeX.
+
+- Dollar amounts are left alone: `$5 and $10`, `$5-$10` and `costs $5` are text. A formula you want shown as TeX goes in backticks.
+- Text you type yourself is never converted. Find searches and Quote copies the text as shown (quoting a whole inline formula quotes its TeX).
+- A command Desk does not know shows as `\name`. A formula that `\(`…`\)` spreads over several lines is shown as written.
+
 ### Links to files, code symbols and the web
 
 - File paths in replies and tool rows are links. A click opens the file at that line.
