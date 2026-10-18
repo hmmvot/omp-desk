@@ -151,12 +151,23 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 	const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 	const panelRef = useRef<HTMLDivElement | null>(null);
 	const focusTabNext = useRef(false);
+	const submitRef = useRef<HTMLButtonElement | null>(null);
 
 	useEffect(() => {
 		if (!focusTabNext.current) return;
 		focusTabNext.current = false;
 		tabRefs.current[active]?.focus();
 	}, [active]);
+
+	// Arriving on review by answering (a picked option or a committed "Other" unmounts what had the focus) puts the focus on
+	// Submit answers, so Enter submits; arriving by keyboard keeps it on the tab, where Enter submits too (see onKeyDown).
+	const onReview = hasTabs && active === reviewIndex;
+	useEffect(() => {
+		if (!onReview) return;
+		const focused = document.activeElement;
+		if (focused instanceof HTMLElement && focused.closest(".omp-ask-tabs") !== null) return;
+		submitRef.current?.focus();
+	}, [onReview]);
 
 	const submit = useCallback(
 		(final: readonly QuestionState[]): void => {
@@ -239,6 +250,12 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 		if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
 		const target = event.target;
 		if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return;
+		// On review, Enter submits from anywhere but a review row, which opens its question.
+		if (event.key === "Enter" && onReview && !(target instanceof HTMLElement && target.closest(".omp-ask-review-row") !== null) && !event.nativeEvent.isComposing) {
+			event.preventDefault();
+			submit(states);
+			return;
+		}
 		if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
 			if (!hasTabs) return;
 			event.preventDefault();
@@ -255,7 +272,6 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 		}
 	};
 
-	const onReview = hasTabs && active === reviewIndex;
 	const index = Math.min(active, questions.length - 1);
 	const question = questions[index]!;
 	const state = states[index]!;
@@ -340,7 +356,7 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 							})}
 						</div>
 						<div className="omp-composer-actions">
-							<button type="button" className="omp-btn omp-btn--primary" onClick={() => submit(states)}>
+							<button ref={submitRef} type="button" className="omp-btn omp-btn--primary" onClick={() => submit(states)}>
 								Submit answers
 							</button>
 						</div>

@@ -1753,6 +1753,52 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
 		});
 
+		await t.test("on the review step Enter submits the answers: after a typed last answer, after a picked one, and from the Submit tab; Enter on a review row still opens its question", async () => {
+			await reset("ask-review-enter");
+			const enter = async () => {
+				for (const type of ["keyDown", "keyUp"]) await ui.call("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, ...(type === "keyDown" ? { text: "\r" } : {}) });
+			};
+			const responses = "window.sent.filter(message=>message.type==='omp:chat-ui-response').length";
+			const ask = (id: string) => `window.ui.push({uiRequests:[{id:'${id}',method:'ask',title:'t',questions:[
+			 {id:'a',header:'A',question:'A?',multi:false,options:[{label:'Yes'},{label:'No'}]},
+			 {id:'b',header:'B',question:'B?',multi:false,options:[{label:'Yes'},{label:'No'}]}]}],working:true,settled:false})`;
+			// A typed "Other" answer to the last question, committed with Enter, lands on review; the next Enter submits.
+			await ui.evaluate(ask("enter-typed"));
+			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[0].click()");
+			await ui.wait("document.querySelectorAll('.omp-ask-tab')[1].getAttribute('aria-selected')==='true'");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[2].click()");
+			await ui.wait("document.querySelector('.omp-ask-custom textarea')");
+			await ui.call("Input.insertText", { text: "typed answer" });
+			await enter();
+			await ui.wait("document.querySelector('.omp-ask-review')");
+			assert.equal(await ui.evaluate(responses), 0, "committing the last answer only opens review");
+			await enter();
+			await ui.wait(`${responses}===1`);
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-ui-response').at(-1).response"), { id: "enter-typed", answers: [{ id: "a", selectedOptions: ["Yes"] }, { id: "b", selectedOptions: [], customInput: "typed answer" }] });
+			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
+			await ui.wait("!document.querySelector('.omp-ask')");
+			// A clicked last answer lands on review too; Enter on a review row opens that question, and Enter from the Submit tab submits.
+			await ui.evaluate(ask("enter-picked"));
+			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[0].click()");
+			await ui.wait("document.querySelectorAll('.omp-ask-tab')[1].getAttribute('aria-selected')==='true'");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[1].click()");
+			await ui.wait("document.querySelector('.omp-ask-review')");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-review-row')[0].focus()");
+			await enter();
+			await ui.wait("document.querySelectorAll('.omp-ask-tab')[0].getAttribute('aria-selected')==='true'");
+			assert.equal(await ui.evaluate(responses), 1, "a review row opens its question and sends nothing");
+			await ui.evaluate("document.querySelector('.omp-ask-tab--submit').focus()");
+			await enter();
+			await ui.wait("document.querySelector('.omp-ask-review')");
+			await ui.evaluate("document.querySelector('.omp-ask-tab--submit').focus()");
+			await enter();
+			await ui.wait(`${responses}===2`);
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-ui-response').at(-1).response"), { id: "enter-picked", answers: [{ id: "a", selectedOptions: ["Yes"] }, { id: "b", selectedOptions: ["No"] }] });
+			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
+		});
+
 		await t.test("the ask tab strip wraps instead of overflowing at narrow widths and a lone single-select question has no tabs and answers at once", async () => {
 			await reset("ask-tabs-narrow");
 			const many = Array.from({ length: 6 }, (_, index) => `{id:'q${index}',header:'Header number ${index} that is far too long to fit',question:'Question ${index}?',multi:false,options:[{label:'Yes'},{label:'No'}]}`).join(",");
