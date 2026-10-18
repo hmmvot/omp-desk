@@ -76,12 +76,12 @@ export function EmptyState({ cwd, model, thinkingLevel }: {
 					</Group>
 					<Group title="In the conversation">
 						<Hint keys={<CommandKey command="ompDesk.findInChat" />}>find</Hint>
-						<Hint keys={<CommandKey command="ompDesk.quoteChatSelection" />}>quote</Hint>
+						<Hint keys={<CommandKey command="ompDesk.quoteChatSelection" />}>quote the selected text</Hint>
 						<Hint keys={<kbd>Esc Esc</kbd>}>rewind</Hint>
 						<Hint keys={<><CommandKey command="ompDesk.toggleThinking" /> / <CommandKey command="ompDesk.toggleToolOutput" /></>}>thinking / tool calls</Hint>
 					</Group>
 					<Group title="From the editor and anywhere">
-						<Hint keys={<CommandKey command="ompDesk.quoteEditorSelection" />}>quote or line reference</Hint>
+						<Hint keys={<CommandKey command="ompDesk.quoteEditorSelection" />}>in an editor: quote the selection, or reference the caret line</Hint>
 						<Hint keys={<CommandKey command="ompDesk.focusComposer" />}>composer</Hint>
 						<Hint keys={<CommandKey command="ompDesk.goToSession" />}>go to session</Hint>
 						<Hint keys={<CommandKey command="ompDesk.newSession" />}>new session</Hint>

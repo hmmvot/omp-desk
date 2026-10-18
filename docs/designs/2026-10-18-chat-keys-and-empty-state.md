@@ -61,8 +61,8 @@ The key's `when` becomes `editorTextFocus`, the `editor/context` entry's `when` 
 | --- | --- |
 | Start | `/` commands and skills · `@` attach a file · `Ctrl+V` or `Shift`+drag: an attachment · `↑` an earlier prompt · `Ctrl+Alt+Y` search prompts |
 | While the agent works | `Enter` steer · `Alt+Enter` queue · `Alt+↑` take a queued message back · `Esc` stop |
-| In the conversation | `Ctrl+F` find · `Alt+Q` quote · `Esc Esc` rewind · `Ctrl+Alt+T` / `Ctrl+O` thinking / tool calls |
-| From the editor and anywhere | `Alt+Q` quote or line reference · `Ctrl+Shift+L` composer · `Ctrl+Alt+Q` go to session · `Ctrl+Alt+N` new session |
+| In the conversation | `Ctrl+F` find · `Alt+Q` quote the selected text · `Esc Esc` rewind · `Ctrl+Alt+T` / `Ctrl+O` thinking / tool calls |
+| From the editor and anywhere | `Alt+Q` in an editor: quote the selection, or reference the caret line · `Ctrl+Shift+L` composer · `Ctrl+Alt+Q` go to session · `Ctrl+Alt+N` new session |
 
 Under the groups a link, **All keyboard shortcuts (Ctrl+/)**, runs the same `keyboard-shortcuts` command. The texts are English, the UI language.
 

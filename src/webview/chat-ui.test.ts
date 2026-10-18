@@ -7188,8 +7188,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-group')].map(group=>({title:group.querySelector('h3').textContent,rows:[...group.querySelectorAll('dl.omp-empty-keys > .omp-empty-key')].map(row=>[[...row.querySelectorAll('dt kbd')].map(node=>node.textContent),row.querySelector('dd').textContent])}))"), [
 				{ title: "Start", rows: [[["/"], "commands and skills"], [["@"], "attach a file"], [["Ctrl+V", "Shift"], "an attachment"], [["↑"], "an earlier prompt"], [["Ctrl+Alt+Y"], "search prompts"]] },
 				{ title: "While the agent works", rows: [[["Enter"], "steer"], [["Alt+Enter"], "queue"], [["Alt+↑"], "take a queued message back"], [["Esc"], "stop"]] },
-				{ title: "In the conversation", rows: [[["Ctrl+F"], "find"], [["Alt+Q"], "quote"], [["Esc Esc"], "rewind"], [["Ctrl+Alt+T", "Ctrl+O"], "thinking / tool calls"]] },
-				{ title: "From the editor and anywhere", rows: [[["Alt+Q"], "quote or line reference"], [["Ctrl+Shift+L"], "composer"], [["Ctrl+Alt+Q"], "go to session"], [["Ctrl+Alt+N"], "new session"]] },
+				{ title: "In the conversation", rows: [[["Ctrl+F"], "find"], [["Alt+Q"], "quote the selected text"], [["Esc Esc"], "rewind"], [["Ctrl+Alt+T", "Ctrl+O"], "thinking / tool calls"]] },
+				{ title: "From the editor and anywhere", rows: [[["Alt+Q"], "in an editor: quote the selection, or reference the caret line"], [["Ctrl+Shift+L"], "composer"], [["Ctrl+Alt+Q"], "go to session"], [["Ctrl+Alt+N"], "new session"]] },
 			]);
 			assert.deepEqual(await emptyKeys(), EMPTY_STATE_KBDS);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-empty-key dt').textContent"), "/");
