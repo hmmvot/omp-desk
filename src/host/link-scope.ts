@@ -33,8 +33,8 @@ export type FileLookup =
 	| { readonly state: "none" }
 	| { readonly state: "unique"; readonly path: string }
 	| { readonly state: "many"; readonly paths: readonly string[] }
-	/** The search failed, timed out or was refused, or files changed while it ran: no reliable answer yet. */
-	| { readonly state: "unavailable" };
+	/** The search failed, timed out or was refused, or files changed while it ran: no reliable answer yet. `waiting`: the search line was full, so the lookup was not tried; it is asked again once the line has drained. */
+	| { readonly state: "unavailable"; readonly waiting?: true };
 
 /** The bare-file-name side as the symbol resolver uses it (`FileNameLinkResolver` in `file-name-links.ts` implements it). */
 export interface FileNameLinks {

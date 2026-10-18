@@ -203,12 +203,19 @@ function useSeen(): [RefObject<HTMLElement | null>, boolean] {
 	return [ref, seen];
 }
 
+/** Whether `element` is in the viewport now (a static render and a hidden element are not): the host is asked about what the user sees first. */
+function inViewport(element: HTMLElement | null): boolean {
+	if (element === null || typeof window === "undefined") return false;
+	const rect = element.getBoundingClientRect();
+	return rect.width > 0 && rect.height > 0 && rect.bottom > 0 && rect.top < window.innerHeight;
+}
+
 /**
  * The definition the host found for `token` once it is asked (after the text settles); `null` before and when there is none.
  * An answer is not polled: once it has expired the next render of the span asks again, and while it is being asked
  * the previous answer stays so a repaint never flickers the text. While the host has the feature off nothing is shown.
  */
-function useSymbolLink(symbols: ChatSymbolLinks | null, token: string | null): SymbolLink | null {
+function useSymbolLink(symbols: ChatSymbolLinks | null, token: string | null, node: RefObject<HTMLElement | null>): SymbolLink | null {
 	const [, refresh] = useReducer((count: number) => count + 1, 0);
 	const remembered = useRef<{ symbols: ChatSymbolLinks | null; answers: Map<string, SymbolLink | null> }>({ symbols, answers: new Map() });
 	if (remembered.current.symbols !== symbols) remembered.current = { symbols, answers: new Map() };
@@ -228,7 +235,7 @@ function useSymbolLink(symbols: ChatSymbolLinks | null, token: string | null): S
 		if (symbols === null || token === null || off || symbols.peek(token) !== undefined) return;
 		// Only the timer is cancelled by a later render; an answer that arrives still refreshes the span (a dispatch after unmount is a no-op).
 		const timer = setTimeout(() => {
-			void symbols.resolve(token).then(link => {
+			void symbols.resolve(token, inViewport(node.current)).then(link => {
 				if (symbols.peek(token) === undefined) return;
 				remembered.current.answers.set(token, link);
 				refresh();
@@ -254,7 +261,7 @@ export function CodeSymbolSpan({ content, path, plain }: { content: string; path
 	const fileProven = path !== null && proven.has(path);
 	const fileRefused = path === null || (links !== null && links.peek(path) === false);
 	const [ref, seen] = useSeen();
-	const symbol = useSymbolLink(eligible ? symbols : null, !fileProven && fileRefused && seen ? content : null);
+	const symbol = useSymbolLink(eligible ? symbols : null, !fileProven && fileRefused && seen ? content : null, ref);
 	if (!fileProven && links !== null && symbol?.definitions !== undefined) {
 		return <code ref={ref}><SymbolSearchAnchor links={links} symbol={content} definitions={symbol.definitions} files={symbol.files === true}>{breakable(content)}</SymbolSearchAnchor></code>;
 	}

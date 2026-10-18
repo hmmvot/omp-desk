@@ -41,6 +41,8 @@ export interface FileNameResolverOptions {
 	readonly isFile?: (file: string) => Promise<boolean>;
 	/** One compact line per finished lookup (the extension's output channel). */
 	readonly log?: Logger;
+	/** Called when the search line has emptied after it refused lookups: they were answered `unavailable` with `waiting` and are to be asked again. */
+	readonly onDrained?: () => void;
 }
 
 /** Results of one folder a search keeps; an answer that reaches it is still several files. */
@@ -91,6 +93,9 @@ export class FileNameLinkResolver implements FileNameLinks {
 	readonly #waiting: { grant(): void; timer: NodeJS.Timeout }[] = [];
 	#running = 0;
 	#generation = 0;
+	/** A lookup was refused (the line was full or its wait ran out) since the line last drained. */
+	#refused = false;
+	readonly #onDrained: (() => void) | undefined;
 
 	/** Moves on whenever {@link invalidate} forgets the answers. */
 	get generation(): number { return this.#generation; }
@@ -108,6 +113,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 		this.#isFile = options.isFile ?? statIsFile;
 		this.#log = options.log ?? silentLogger;
 		this.#giveUps = new GiveUpReporter(this.#log, this.#now);
+		this.#onDrained = options.onDrained;
 	}
 
 	/** Forget every answer: a file appeared, vanished or moved, so any of them may be stale. */
@@ -156,7 +162,9 @@ export class FileNameLinkResolver implements FileNameLinks {
 			return { lookup, ttlMs };
 		};
 		const failure = (failed: "invalidated" | "queue-full" | "error" | "timeout") => {
-			// A full line and an invalidation are not worth remembering; I/O that timed out or threw is, so retries do not repeat it.
+			// A full line is no verdict: the lookup waits to be asked again once the line has drained (`onDrained`) and is neither cached nor a try.
+			if (failed === "queue-full") return done({ state: "unavailable", waiting: true }, 0, "parked (queue)");
+			// An invalidation is not worth remembering; I/O that timed out or threw is, so retries do not repeat it.
 			const remember = failed === "timeout" || failed === "error";
 			return done(unavailable, remember ? this.#failedTtlMs : 0, `unavailable: ${failed}`);
 		};
@@ -214,8 +222,10 @@ export class FileNameLinkResolver implements FileNameLinks {
 	/** The slot goes to the next waiter, or is freed. */
 	#release(): void {
 		const next = this.#waiting.shift();
-		if (next !== undefined) next.grant();
-		else this.#running--;
+		if (next !== undefined) { next.grant(); return; }
+		this.#running--;
+		// The line is empty again after it had refused some lookups: they wait for this to be asked again.
+		if (this.#running === 0 && this.#refused) { this.#refused = false; this.#onDrained?.(); }
 	}
 
 	/**
@@ -223,7 +233,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 	 * work itself settles, not until the timeout; on the timeout the work's signal aborts so it settles soon. `null` from the work is a failure.
 	 */
 	async #bounded<T>(work: (signal: AbortSignal) => Promise<T | null>): Promise<{ readonly value: T } | { readonly failed: "queue-full" | "error" | "timeout" }> {
-		if (!await this.#acquire()) return { failed: "queue-full" };
+		if (!await this.#acquire()) { this.#refused = true; return { failed: "queue-full" }; }
 		const controller = new AbortController();
 		const settled = Promise.resolve()
 			.then(() => work(controller.signal))
@@ -248,7 +258,7 @@ export function fileNameOutcome(lookup: FileLookup, file: BareFileName, cwd: str
 		case "unique": return { status: "found", target: fileNameTarget(lookup.path, cwd, file) };
 		case "many": return { status: "ambiguous", definitions: lookup.paths.length, files: true };
 		case "none": return { status: "none" };
-		default: return { status: "unavailable" };
+		default: return lookup.waiting === true ? { status: "pending" } : { status: "unavailable" };
 	}
 }
 

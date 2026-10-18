@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { recordingLogger } from "../shared/logger.ts";
 import type { LoggedLine } from "../shared/logger.ts";
 import { parseCodeSymbol } from "../shared/code-symbols.ts";
+import type { SymbolLinksResolution } from "../shared/code-symbols.ts";
 import { FileNameLinkResolver } from "./file-name-links.ts";
 import { GIVE_UP_ATTEMPTS, GIVE_UP_WINDOW_MS, GiveUpReporter, giveUpReason } from "./link-give-up.ts";
 import { SymbolLinkResolver, handleSymbolLinks } from "./symbol-links.ts";
@@ -15,7 +16,7 @@ const infos = (lines: readonly LoggedLine[]) => lines.filter(line => line.level 
 test("verdicts become short reasons", () => {
 	assert.equal(giveUpReason("unavailable: invalidated"), "invalidated");
 	assert.equal(giveUpReason("parked (invalidated)"), "invalidated");
-	assert.equal(giveUpReason("unavailable: queue-full"), "queue full");
+	assert.equal(giveUpReason("unavailable: no-answer"), "no-answer");
 	assert.equal(giveUpReason("parked (timeout)"), "timeout");
 	assert.equal(giveUpReason("parked (not ready)"), "provider not ready");
 	assert.equal(giveUpReason("parked (queue)"), "queue full");
@@ -40,15 +41,15 @@ test("a name that gives up is reported once per window, with its reasons, at inf
 	reporter.missed("code symbol", "Other", "timeout");
 	assert.equal(infos(lines).length, 2, "another name is reported on its own");
 	now += GIVE_UP_WINDOW_MS;
-	for (let index = 0; index < 3; index++) reporter.missed("code symbol", "Session.Copy", "queue full");
+	for (let index = 0; index < 3; index++) reporter.missed("code symbol", "Session.Copy", "error");
 	assert.equal(infos(lines).length, 3, "the window passed: reported again");
-	assert.match(infos(lines)[2]!, /queue full x3/);
+	assert.match(infos(lines)[2]!, /error x3/);
 });
 
 test("a miss that only waits (provider not ready, files changing) is no try and never gives a name up", () => {
 	const lines: LoggedLine[] = [];
 	const reporter = new GiveUpReporter(recordingLogger(lines), () => 0);
-	for (const reason of ["provider not ready", "invalidated", "invalidated while the batch ran", "files changed while the batch ran", "workspace folders changed"]) {
+	for (const reason of ["provider not ready", "queue full", "invalidated", "invalidated while the batch ran", "files changed while the batch ran", "workspace folders changed"]) {
 		for (let index = 0; index < 10; index++) reporter.missed("code symbol", "Session.Dispose", reason);
 	}
 	reporter.missed("code symbol", "Session.Dispose", "timeout");
@@ -111,14 +112,15 @@ test("a file name whose search keeps failing is reported once", async () => {
 	assert.match(infos(lines)[0]!, /file name "Session\.cs" had no answer in 3 tries .*error x3/);
 });
 
-test("a token the host refuses for want of batch capacity gives up with the reason capped", async () => {
+test("a batch the host cannot take (batch cap) or finish in time waits for the retry signal: no try, no give-up line", async () => {
 	const lines: LoggedLine[] = [];
 	const resolver = new SymbolLinkResolver({ query: () => Promise.withResolvers<null>().promise }, { log: recordingLogger(lines), queryTimeoutMs: 1000 });
-	const host = { cwd: CWD, roots: () => [CWD], enabled: () => true, isCurrent: () => true, reply: () => {} };
+	const replies: string[] = [];
+	const host = { cwd: CWD, roots: () => [CWD], enabled: () => true, isCurrent: () => true, reply: (message: SymbolLinksResolution) => { replies.push(message.results.map(result => result.status).join(",")); } };
 	const running = Array.from({ length: 8 }, (_, index) => handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: index, tokens: [`Name${"abcdefgh"[index]}x`] }, host, resolver, 30));
 	for (let index = 0; index < 3; index++) await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 90 + index, tokens: ["Session.Copy"] }, host, resolver, 30);
 	await Promise.all(running);
-	assert.equal(infos(lines).filter(line => line.includes("Session.Copy")).length, 1);
-	assert.match(infos(lines).find(line => line.includes("Session.Copy"))!, /too many batches at once \(capped\) x3/);
-	assert.ok(infos(lines).some(line => line.includes("batch deadline")) === false, "eight single tries are not a give-up");
+	assert.deepEqual(infos(lines).filter(line => line.includes("gave up")), [], "waiting for capacity is not a failure");
+	assert.deepEqual(replies.slice(0, 3), ["pending", "pending", "pending"], "the refused batches are pending, not unavailable");
+	assert.ok(replies.slice(3).every(status => status === "pending"), "the deadline leaves unfinished tokens pending");
 });

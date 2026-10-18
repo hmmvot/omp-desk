@@ -202,8 +202,8 @@ test("a provider symbol becomes an entry only for a file location, and a missing
 	assert.equal(symbolEntry({ name: "A", kind: 4, location: { uri: file } }).line, 0);
 	assert.equal(symbolEntry({ name: "A", kind: 4, location: { uri: file, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } } } }).line, 0, "an unresolved placeholder at the origin");
 	assert.equal(symbolEntry({ name: "A", kind: 4, location: { uri: file, range: at(0, 0) } }).line, 1, "a real declaration on the first line");
-	const oversize = symbolEntry({ name: "A", kind: 4, containerName: "x".repeat(2000), location: { uri: file, range: at(1, 1) } });
-	assert.deepEqual([oversize.name, oversize.kind, oversize.container], ["", -1, ""], "metadata too long to match faithfully is never cut into another identity");
+	const oversize = symbolEntry({ name: "A", kind: 4, containerName: "x".repeat(3000), location: { uri: file, range: at(1, 1) } });
+	assert.deepEqual([oversize.name, oversize.kind, oversize.container, oversize.opaque], ["A", 4, "", true], "a container too long to keep is never cut into another identity: the entry stays named and is opaque");
 });
 
 /** A provider answering from a table of query text to entries, with a record of what it was asked. */
@@ -480,12 +480,12 @@ test("a setting turned off, a folder set that changed, or a replaced document wh
 	assert.deepEqual(replaced.replies, [], "a replaced document is answered with nothing");
 });
 
-test("a batch is answered at its deadline with what has settled, and the rest stays unavailable", async () => {
+test("a batch is answered at its deadline with what has settled, and the rest stays pending: it was not answered, so it is no try", async () => {
 	const answers: Record<string, SymbolEntry[] | "hang"> = { Session: [entry("Session", SymbolKind.Class, "A.cs", 3)], Slow: "hang" };
 	const { source } = provider(answers);
 	const { host: h, replies } = host();
 	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 3, tokens: ["Slow", "Session"] }, h, new SymbolLinkResolver(source, { queryTimeoutMs: 1000 }), 20);
-	assert.deepEqual(replies[0]!.results, [{ token: "Slow", status: "unavailable" }, { token: "Session", status: "found", target: "A.cs:3:5" }]);
+	assert.deepEqual(replies[0]!.results, [{ token: "Slow", status: "pending" }, { token: "Session", status: "found", target: "A.cs:3:5" }]);
 });
 
 test("a locally truncated answer never makes a unique match; a failed qualified query is unavailable, not a miss", async () => {
@@ -544,35 +544,131 @@ test("a lookup that waits for a slot is dropped by an invalidation instead of re
 	assert.deepEqual(replies[0]!.results, [{ token: "Session", status: "pending" }, { token: "Slowpoke", status: "pending" }]);
 });
 
-test("an entry too long to match makes the lookup uncertain: it can hide the only rival of a unique match", async () => {
-	const long = symbolEntry({ name: `Load(${"int, ".repeat(100)})`, kind: SymbolKind.Method, containerName: "SessionData", location: { uri: { scheme: "file", fsPath: `${CWD}\\M.cs` }, range: { start: { line: 29, character: 0 }, end: { line: 29, character: 4 } } } });
-	assert.equal(long.kind, -1);
-	const one = provider({ Load: [entry("Load(int)", SymbolKind.Method, "M.cs", 20, "SessionData"), long] });
-	assert.deepEqual(await new SymbolLinkResolver(one.source).resolve(symbol("Load"), scope), { status: "unavailable" });
-	const rivals = provider({ Load: [entry("Load(int)", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Load(string)", SymbolKind.Method, "M.cs", 30, "OtherData"), long] });
-	assert.deepEqual(await new SymbolLinkResolver(rivals.source).resolve(symbol("Load"), scope), { status: "ambiguous", definitions: 2 }, "an ambiguity already seen stays one");
+/**
+ * The failing case of a real log (2026-10-18): a type and its members looked up in a C# project with a source generator
+ * (a serialization generator): the workspace symbol search lists the declarations next to generated partial files, a generic sibling and the
+ * formatter's methods, whose display names are whole signatures. Entries shaped like the C# language server's, with kinds as `vscode.SymbolKind`.
+ */
+const provided = (name: string, kind: number, file: string, line: number, container: string) => symbolEntry({ name, kind, containerName: container, location: { uri: { scheme: "file", fsPath: `${CWD}\\${file}` }, range: { start: { line: line - 1, character: 4 }, end: { line: line - 1, character: 9 } } } });
+const SIGNATURE = `(ref GeneratedReader reader, scoped ref global::OmpDesk.Sessions.SessionService? value, ${"global::System.Collections.Generic.Dictionary<string, int> map, ".repeat(6)}int tail)`;
+
+test("an entry whose name or container is too long is kept as what matching reads of it, and one whose container cannot be read is opaque", () => {
+	const signature = provided(`Deserialize${SIGNATURE}`, SymbolKind.Method, "Generated\\SessionService.Formatter.g.cs", 12, IN("SessionServiceFormatter"));
+	assert.ok(`Deserialize${SIGNATURE}`.length > 256);
+	assert.deepEqual([signature.name.length <= 256, signature.kind, signature.container, signature.opaque], [true, SymbolKind.Method, IN("SessionServiceFormatter"), undefined], "the name is cut down; the kind and the container stay");
+	assert.equal(unique("Deserialize", [signature]), "Generated\\SessionService.Formatter.g.cs:12", "by its bare name it is the method `Deserialize`");
+	assert.equal(unique("SessionServiceFormatter.Deserialize", [signature]), "Generated\\SessionService.Formatter.g.cs:12");
+	const generic = provided(`Pair<${Array.from({ length: 120 }, (_, index) => `T${index}`).join(", ")}>`, SymbolKind.Class, "Pair.cs", 3, TOP);
+	assert.equal(generic.name, `Pair<${",".repeat(119)}>`, "the generic arity is kept: it tells `Pair<T>` from `Pair<T, U>`");
+	const wide = provided("Dispose", SymbolKind.Method, "SessionService.cs", 8, `in SessionService<${"TArgument, ".repeat(200)}TLast> (project OmpDesk (net8.0))`);
+	assert.equal(wide.container, "in SessionService (project OmpDesk (net8.0))", "a container made long by generic arguments reads the same without them");
+	assert.equal(wide.opaque, undefined);
+	const unreadable = provided("Dispose", SymbolKind.Method, "SessionService.cs", 8, `in SessionService (project ${"P".repeat(3000)} (net8.0))`);
+	assert.deepEqual([unreadable.name, unreadable.kind, unreadable.container, unreadable.opaque], ["Dispose", SymbolKind.Method, "", true], "a container that stays long is never cut into another container: the entry is opaque");
 });
 
-test("the host works on a bounded number of batches at once and refuses the rest at once", async () => {
+test("generated declarations with long signatures or generic containers do not hide a unique type or member", async () => {
+	const generated = "Generated\\SessionService.Formatter.g.cs";
+	const entries = [
+		provided("SessionService", SymbolKind.Class, "SessionService.cs", 6, TOP),
+		provided("SessionServiceFormatter", SymbolKind.Class, generated, 9, TOP),
+		provided(`Deserialize${SIGNATURE}`, SymbolKind.Method, generated, 12, IN("SessionServiceFormatter")),
+		provided(`Serialize${SIGNATURE}`, SymbolKind.Method, generated, 30, IN("SessionServiceFormatter")),
+		provided("Dispose", SymbolKind.Method, "SessionService.cs", 20, IN("SessionService")),
+		provided("Dispose", SymbolKind.Method, generated, 40, `in SessionServiceFormatter<${"TBufferWriter, ".repeat(200)}TLast> (project OmpDesk (net8.0))`),
+	];
+	const answers = provider({ SessionService: entries, Deserialize: entries, Dispose: entries, "SessionService.Dispose": entries });
+	const resolver = new SymbolLinkResolver(answers.source);
+	assert.deepEqual(await resolver.resolve(symbol("SessionService"), scope), { status: "found", target: "SessionService.cs:6:5" }, "the generated formatter is another name");
+	const sibling = provided("SessionService<T>", SymbolKind.Class, "SessionServiceOfT.cs", 4, TOP);
+	assert.deepEqual(await new SymbolLinkResolver(provider({ SessionService: [...entries, sibling] }).source).resolve(symbol("SessionService"), scope), { status: "ambiguous", definitions: 2 }, "a generic sibling is a second type of that name");
+	assert.deepEqual(await resolver.resolve(symbol("SessionService.Dispose"), scope), { status: "found", target: "SessionService.cs:20:5" }, "the member of the generated formatter belongs to another type");
+});
+
+test("an entry named like the symbol whose container cannot be read makes the name plain: an answer, never a wrong link and never a retry", async () => {
+	const lines: LoggedLine[] = [];
+	const hidden = provided("Dispose", SymbolKind.Method, "Generated\\Other.g.cs", 3, `in Formatter (project ${"P".repeat(3000)} (net8.0))`);
+	assert.equal(hidden.opaque, true);
+	const own = provided("Dispose", SymbolKind.Method, "SessionService.cs", 20, IN("SessionService"));
+	const answers = provider({ Dispose: [own, hidden], "SessionService.Dispose": [own, hidden] });
+	const resolver = new SymbolLinkResolver(answers.source, { log: recordingLogger(lines) });
+	assert.deepEqual(await resolver.resolve(symbol("SessionService.Dispose"), scope), { status: "none" }, "it could be a second declaration of the member: not linked");
+	assert.match(lines.find(line => line.message.includes("SessionService.Dispose"))!.message, /none \(unmatchable entry\)/);
+	assert.deepEqual(await new SymbolLinkResolver(provider({ Dispose: [own, hidden] }).source).resolve(symbol("Dispose"), scope), { status: "none" });
+	const rival = provided("Dispose", SymbolKind.Method, "Rival.cs", 5, IN("Rival"));
+	assert.deepEqual(await new SymbolLinkResolver(provider({ Dispose: [own, rival, hidden] }).source).resolve(symbol("Dispose"), scope), { status: "ambiguous", definitions: 2 }, "an ambiguity already seen stays one");
+	assert.deepEqual(await new SymbolLinkResolver(provider({ SessionService: [provided("SessionService", SymbolKind.Class, "SessionService.cs", 6, TOP), { ...hidden, name: "Other" }] }).source).resolve(symbol("SessionService"), scope), { status: "found", target: "SessionService.cs:6:5" }, "an opaque entry of another name is no rival");
+	const outside = { ...hidden, path: "D:\\Elsewhere\\Other.g.cs" };
+	assert.deepEqual(await new SymbolLinkResolver(provider({ Dispose: [own, outside] }).source).resolve(symbol("Dispose"), scope), { status: "found", target: "SessionService.cs:20:5" }, "an unreadable entry outside the session's folders is no rival");
+});
+
+test("the host works on a bounded number of batches at once and the rest wait for the retry signal", async () => {
 	const resolver = new SymbolLinkResolver({ query: () => new Promise(() => {}) }, { queryTimeoutMs: 1000 });
 	const running = Array.from({ length: 8 }, (_, index) => handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: index, tokens: [`Name${"abcdefgh"[index]}x`] }, host().host, resolver, 30));
 	const extra = host();
 	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 99, tokens: ["Session"] }, extra.host, resolver, 30);
-	assert.deepEqual(extra.replies[0]!.results, [{ token: "Session", status: "unavailable" }], "the ninth batch is refused without waiting for a deadline");
+	assert.deepEqual(extra.replies[0]!.results, [{ token: "Session", status: "pending" }], "the ninth batch is refused without waiting for a deadline; it was not tried, so it is a wait");
 	await Promise.all(running);
 	const after = host();
 	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 100, tokens: ["Session"] }, after.host, resolver, 30);
 	assert.equal(after.replies.length, 1, "capacity returns once batches end");
 });
 
-test("a name candidate is an exact name, its attribute form or an entry too long to tell; fuzzy neighbours are not", () => {
+test("one batch takes only its share of the provider's slots, so batches of several pages take turns", async () => {
+	const asked: string[] = [];
+	const releases: (() => void)[] = [];
+	const source: SymbolSource = { query: text => { asked.push(text); return new Promise(resolve => { releases.push(() => resolve(Object.assign([entry(text, SymbolKind.Class, `${text}.cs`, 2)], { total: 1 }))); }); } };
+	const resolver = new SymbolLinkResolver(source, { maxConcurrent: 2, queryTimeoutMs: 1000 });
+	const tokens = (prefix: string) => Array.from({ length: 6 }, (_, index) => `${prefix}Name${index}`);
+	const first = handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 1, tokens: tokens("A") }, host().host, resolver);
+	const second = handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 2, tokens: tokens("B") }, host().host, resolver);
+	await tick();
+	assert.deepEqual(asked, ["AName0", "AName1"], "the first batch asks two at a time, not all six");
+	releases.splice(0).forEach(release => release());
+	await tick();
+	await tick();
+	assert.ok(asked.slice(2, 4).some(text => text.startsWith("B")), `the second batch gets its turn before the first is done (${asked.join(", ")})`);
+	for (let turn = 0; turn < 20; turn++) { releases.splice(0).forEach(release => release()); await tick(); }
+	await Promise.all([first, second]);
+});
+
+test("a provider that is loading and has let a call time out is not asked more than its slots: the rest wait for the ready signal", async () => {
+	const lines: LoggedLine[] = [];
+	let retries = 0;
+	let ready = false;
+	const asked: string[] = [];
+	const releases: (() => void)[] = [];
+	const source: SymbolSource = { query: text => { asked.push(text); return ready ? Promise.resolve(Object.assign([entry(text, SymbolKind.Class, `${text}.cs`, 2)], { total: 1 })) : new Promise(resolve => { releases.push(() => resolve([])); }); } };
+	const resolver = new SymbolLinkResolver(source, { maxConcurrent: 2, queryTimeoutMs: 10, log: recordingLogger(lines), probeDelaysMs: [5], minRetryMs: 1, onRetry: () => { retries++; } });
+	assert.deepEqual(await Promise.all([resolver.resolve(symbol("Aaa"), scope), resolver.resolve(symbol("Bbb"), scope)]), [{ status: "pending" }, { status: "pending" }]);
+	assert.deepEqual(await resolver.resolve(symbol("Ccc"), scope), { status: "pending" });
+	assert.deepEqual(asked, ["Aaa", "Bbb"], "the third name never reached the provider or its line");
+	assert.ok(lines.some(line => line.message.includes("\"Ccc\"") && line.message.includes("parked (not ready)")), "it waits as a not-ready name, which no page counts as a try");
+	ready = true;
+	releases.splice(0).forEach(release => release());
+	for (let turn = 0; turn < 100 && retries === 0; turn++) await new Promise<void>(resolve => setTimeout(resolve, 5));
+	assert.ok(retries > 0, "the provider answered: the pages are told to ask again");
+});
+
+test("the file search's drained line asks the waiting pages again, whatever the symbol provider is doing", async () => {
+	let retries = 0;
+	const resolver = new SymbolLinkResolver({ query: () => new Promise(() => {}) }, { minRetryMs: 1, onRetry: () => { retries++; } });
+	void resolver.resolve(symbol("Hanging"), scope);
+	await tick();
+	resolver.filesDrained();
+	for (let turn = 0; turn < 50 && retries === 0; turn++) await new Promise<void>(resolve => setTimeout(resolve, 5));
+	assert.equal(retries, 1);
+});
+
+test("a name candidate is an exact name, its attribute form or the same by its bare name however long the signature; fuzzy neighbours are not", () => {
 	assert.equal(isNameCandidate("Desk", "Desk"), true);
 	assert.equal(isNameCandidate("Desk<T>", "Desk"), true);
 	assert.equal(isNameCandidate("Load(int, string)", "Load"), true);
 	assert.equal(isNameCandidate("DeskAttribute", "Desk"), true);
 	assert.equal(isNameCandidate("DeskManager", "Desk"), false);
 	assert.equal(isNameCandidate("desk", "Desk"), false);
-	assert.equal(isNameCandidate(`Load(${"x".repeat(300)})`, "Load"), true, "oversize cannot be judged here");
+	assert.equal(isNameCandidate(`Load(${"x".repeat(300)})`, "Load"), true, "a long signature is still the bare name");
+	assert.equal(isNameCandidate(`Deserialize(ref GeneratedReader reader, scoped ref ${"Pair<int, string>, ".repeat(30)}value)`, "SessionService"), false, "a long signature of another name is a fuzzy neighbour that must not crowd the exact ones out");
 });
 
 test("a lookup writes one compact line with the counts and the verdict; a provider answer of only fuzzy entries is a miss, an empty one is unavailable", async () => {

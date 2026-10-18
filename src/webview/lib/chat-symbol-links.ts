@@ -44,7 +44,7 @@ export interface ChatSymbolLinksOptions {
 	readonly requestTimeoutMs?: number;
 }
 
-interface Waiter { readonly token: string; readonly settle: (status: SymbolLinkStatus, target?: string, definitions?: number, files?: true) => void }
+interface Waiter { readonly token: string; readonly onScreen: boolean; readonly settle: (status: SymbolLinkStatus, target?: string, definitions?: number, files?: true) => void }
 
 /**
  * One Chat document's code-symbol links: unique inline-code tokens are batched into `omp:terminal-link-symbols`
@@ -99,40 +99,40 @@ export class ChatSymbolLinks {
 	/** Whether the host said the feature is off, so callers can skip asking altogether. */
 	get disabled(): boolean { return this.#now() < this.#disabledUntil; }
 
-	resolve(token: string): Promise<SymbolLink | null> {
+	/** `onScreen`: the span is in the viewport now; its question goes ahead of the ones of spans that are not, and is admitted beyond the budget the others share (up to twice it). */
+	resolve(token: string, onScreen = false): Promise<SymbolLink | null> {
 		const known = this.peek(token);
 		if (known !== undefined) return Promise.resolve(known);
 		if (this.disabled || this.#disposed) return Promise.resolve(null);
 		const parkedUntil = this.#parked.get(token);
 		if (parkedUntil !== undefined && parkedUntil > this.#now()) return Promise.resolve(null);
 		let pending = this.#pending.get(token);
-		if (pending === undefined) {
-			// Every unsettled token (queued, in flight or waiting for its retry) counts: a burst beyond the budget
-			// stays plain code, uncached; the span asks again when the budget has room (a notification) or it next renders.
-			if (this.#pending.size >= MAX_QUEUED_TOKENS) { this.#overflowed = true; return Promise.resolve(null); }
-			pending = this.#ask(token, MAX_RETRIES).then(({ link, answered, parked }) => {
-				this.#pending.delete(token);
-				if (this.#overflowed && this.#pending.size <= MAX_QUEUED_TOKENS / 2) { this.#overflowed = false; this.#notifyLater(); }
-				if (parked === true) {
-					// Not a verdict: nothing is cached, and the token is not asked again until the host's retry signal (or a minute).
-					if (this.#parked.size >= MAX_PARKED) this.#parked.clear();
-					this.#parked.set(token, this.#now() + PARKED_MS);
-					return null;
-				}
-				if (this.#entries.size >= MAX_CACHED) this.#entries.clear();
-				if (!this.#disposed) this.#entries.set(token, { value: link, expires: this.#now() + (link !== null ? FOUND_TTL_MS : answered ? NONE_TTL_MS : UNANSWERED_TTL_MS), ...(link === null && !answered ? { unanswered: true } : {}) });
-				return link;
-			});
-			this.#pending.set(token, pending);
-		}
+		if (pending !== undefined) { if (onScreen) this.#promote(token); return pending; }
+		// Every unsettled token (queued, in flight or waiting for its retry) counts: a burst beyond the budget
+		// stays plain code, uncached; the span asks again when the budget has room (a notification) or it next renders.
+		if (this.#pending.size >= (onScreen ? 2 * MAX_QUEUED_TOKENS : MAX_QUEUED_TOKENS)) { this.#overflowed = true; return Promise.resolve(null); }
+		pending = this.#ask(token, MAX_RETRIES, onScreen).then(({ link, answered, parked }) => {
+			this.#pending.delete(token);
+			if (this.#overflowed && this.#pending.size <= MAX_QUEUED_TOKENS / 2) { this.#overflowed = false; this.#notifyLater(); }
+			if (parked === true) {
+				// Not a verdict: nothing is cached, and the token is not asked again until the host's retry signal (or a minute).
+				if (this.#parked.size >= MAX_PARKED) this.#parked.clear();
+				this.#parked.set(token, this.#now() + PARKED_MS);
+				return null;
+			}
+			if (this.#entries.size >= MAX_CACHED) this.#entries.clear();
+			if (!this.#disposed) this.#entries.set(token, { value: link, expires: this.#now() + (link !== null ? FOUND_TTL_MS : answered ? NONE_TTL_MS : UNANSWERED_TTL_MS), ...(link === null && !answered ? { unanswered: true } : {}) });
+			return link;
+		});
+		this.#pending.set(token, pending);
 		return pending;
 	}
 
 	/** The host's answer for `token`; `answered` is false when it could not answer even after the one retry. */
-	async #ask(token: string, retriesLeft: number): Promise<{ link: SymbolLink | null; answered: boolean; parked?: true }> {
+	async #ask(token: string, retriesLeft: number, onScreen: boolean): Promise<{ link: SymbolLink | null; answered: boolean; parked?: true }> {
 		const signals = this.#signals;
 		const { promise, resolve } = Promise.withResolvers<{ status: SymbolLinkStatus; target?: string; definitions?: number; files?: true }>();
-		this.#queue.push({ token, settle: (status, target, definitions, files) => resolve({ status, ...(target === undefined ? {} : { target }), ...(definitions === undefined ? {} : { definitions }), ...(files === undefined ? {} : { files }) }) });
+		this.#enqueue({ token, onScreen, settle: (status, target, definitions, files) => resolve({ status, ...(target === undefined ? {} : { target }), ...(definitions === undefined ? {} : { definitions }), ...(files === undefined ? {} : { files }) }) });
 		this.#scheduleFlush();
 		const answer = await promise;
 		if (answer.status === "found" && answer.target !== undefined) return { link: { target: answer.target }, answered: true };
@@ -140,7 +140,7 @@ export class ChatSymbolLinks {
 		if (answer.status === "ambiguous" && answer.definitions !== undefined) return { link: { target: token, definitions: answer.definitions, ...(answer.files === true ? { files: true as const } : {}) }, answered: true };
 		if (answer.status === "pending") {
 			// A pending answer uses none of the retries: the host asks again with its signal. A signal that went out while this request was in flight never saw the token parked.
-			if (this.#signals !== signals && !this.#disposed && !this.disabled) return this.#ask(token, retriesLeft);
+			if (this.#signals !== signals && !this.#disposed && !this.disabled) return this.#ask(token, retriesLeft, onScreen);
 			return { link: null, answered: false, parked: true };
 		}
 		if (answer.status !== "unavailable") return { link: null, answered: true };
@@ -150,7 +150,21 @@ export class ChatSymbolLinks {
 		const timer = setTimeout(() => { this.#retries.delete(timer); done(); }, retriesLeft === MAX_RETRIES ? this.#retryMs : this.#retryMs * 4);
 		this.#retries.set(timer, done);
 		await waited;
-		return this.#disposed || this.disabled ? { link: null, answered: false } : this.#ask(token, retriesLeft - 1);
+		return this.#disposed || this.disabled ? { link: null, answered: false } : this.#ask(token, retriesLeft - 1, onScreen);
+	}
+
+	/** A token on screen goes before the ones that are not (each group in its asking order): the page sends the queue's head first, so what the user sees is answered first. */
+	#enqueue(waiter: Waiter): void {
+		const behind = waiter.onScreen ? this.#queue.findIndex(queued => !queued.onScreen) : -1;
+		if (behind < 0) this.#queue.push(waiter); else this.#queue.splice(behind, 0, waiter);
+	}
+
+	/** A token already queued is on screen now: it moves ahead of the ones that are not. */
+	#promote(token: string): void {
+		const at = this.#queue.findIndex(queued => queued.token === token && !queued.onScreen);
+		if (at < 0) return;
+		const [waiter] = this.#queue.splice(at, 1);
+		this.#enqueue({ ...waiter!, onScreen: true });
 	}
 
 	#scheduleFlush(): void {

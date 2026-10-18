@@ -141,7 +141,7 @@ test("a cwd check that hangs is bounded like the search: unavailable, remembered
 	assert.deepEqual(asked, [], "a lookup whose first step did not settle never starts the search");
 });
 
-test("at most the configured searches run at once, the slot is held until the search settles, and a full line refuses at once without remembering it", async () => {
+test("at most the configured searches run at once, the slot is held until the search settles, and a full line refuses at once as a wait that is signalled when the line has drained", async () => {
 	const release: (() => void)[] = [];
 	let running = 0;
 	let peak = 0;
@@ -152,13 +152,16 @@ test("at most the configured searches run at once, the slot is held until the se
 		release.push(() => { running--; resolve({ paths: [], truncated: false }); });
 		return promise;
 	} };
-	const files = new FileNameLinkResolver(source, { isFile: async () => false, maxConcurrent: 2, maxWaiting: 1, queryTimeoutMs: 1000 });
+	let drained = 0;
+	const files = new FileNameLinkResolver(source, { isFile: async () => false, maxConcurrent: 2, maxWaiting: 1, queryTimeoutMs: 1000, onDrained: () => { drained++; } });
 	const first = files.lookup("A1.cs", scope);
 	const second = files.lookup("A2.cs", scope);
 	const third = files.lookup("A3.cs", scope);
 	await tick();
 	assert.equal(running, 2, "two run, one waits");
-	assert.deepEqual(await files.lookup("A4.cs", scope), { state: "unavailable" }, "the line is full: refused at once");
+	assert.deepEqual(await files.lookup("A4.cs", scope), { state: "unavailable", waiting: true }, "the line is full: refused at once, not a failure");
+	assert.deepEqual(fileNameOutcome({ state: "unavailable", waiting: true }, file("A4.cs"), CWD), { status: "pending" }, "a wait for the page, which asks again with the signal");
+	assert.equal(drained, 0, "the line is not empty yet");
 	release.splice(0).forEach(done => done());
 	await tick();
 	await tick();
@@ -168,6 +171,8 @@ test("at most the configured searches run at once, the slot is held until the se
 	assert.ok(peak <= 2);
 	assert.equal((await Promise.all([files.lookup("A4.cs", scope)])).length, 1);
 	release.splice(0).forEach(done => done());
+	await tick();
+	assert.equal(drained, 1, "the line emptied after it had refused a lookup: the waiting ones are asked again");
 });
 
 test("an invalidation drops cached answers; a search that was running and found nothing that still exists is unavailable and not cached", async () => {

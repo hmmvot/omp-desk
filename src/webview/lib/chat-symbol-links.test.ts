@@ -91,6 +91,23 @@ test("a burst beyond the queue budget stays plain code and is not cached", async
 	} finally { mock.timers.reset(); }
 });
 
+test("tokens on screen are asked before the ones that are not, and are admitted when the budget of the others is full", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const { sent, transport } = fixture();
+		const links = new ChatSymbolLinks(transport);
+		const above = Array.from({ length: 70 }, (_, index) => `Above${index}`);
+		for (const name of above) void links.resolve(name);
+		void links.resolve("OnScreen", true);
+		void links.resolve("Above40", true);
+		mock.timers.tick(40);
+		assert.deepEqual(sent[0]!.tokens.slice(0, 3), ["OnScreen", "Above40", "Above0"], "what the user sees goes first: a span queued off screen is promoted when it comes into view");
+		assert.equal(sent.flatMap(message => message.tokens).includes("OnScreen"), true, "an on-screen token is admitted although the budget of sixty-four is spent");
+		assert.equal(links.peek("Above65"), undefined, "tokens beyond the budget that are not on screen stay plain until there is room");
+		links.dispose();
+	} finally { mock.timers.reset(); }
+});
+
 test("an unavailable answer is asked once more later; after that the token is none and not asked again for a while", async () => {
 	mock.timers.enable({ apis: ["setTimeout"] });
 	try {

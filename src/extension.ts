@@ -10251,7 +10251,7 @@ function readInstalledTerminalFonts(): void {
 function symbolLinkResolver(): SymbolLinkResolver {
   const s = windowState();
   if (s.symbolLinks !== undefined) return s.symbolLinks;
-  const resolver = new SymbolLinkResolver({
+  const resolver: SymbolLinkResolver = new SymbolLinkResolver({
     async query(text, last) {
       const found = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>("vscode.executeWorkspaceSymbolProvider", text);
       if (!Array.isArray(found)) return null;
@@ -10278,7 +10278,7 @@ function symbolLinkResolver(): SymbolLinkResolver {
     },
   }, {
     log,
-    files: new FileNameLinkResolver(workspaceFileNameSource(vscode), { log }),
+    files: new FileNameLinkResolver(workspaceFileNameSource(vscode), { log, onDrained: () => resolver.filesDrained() }),
     // Parked tokens (provider not ready, queue full) are asked again by every page that has asked.
     onRetry: () => {
       for (const slotId of [...s.symbolAskers]) {

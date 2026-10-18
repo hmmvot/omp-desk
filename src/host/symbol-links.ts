@@ -28,6 +28,8 @@ export interface SymbolEntry {
 	readonly path: string;
 	readonly line: number;
 	readonly column: number;
+	/** The container was too long to be kept faithfully and `container` is empty: the entry cannot be matched, and a lookup it is named like is uncertain (see {@link symbolEntry}). */
+	readonly opaque?: true;
 }
 
 /** One type of the provider's type hierarchy: what {@link HierarchyType} holds, and the provider's own handle for asking about its supertypes. */
@@ -70,18 +72,45 @@ export interface ProviderSymbol {
 export function symbolEntry(symbol: ProviderSymbol): SymbolEntry {
 	const range = symbol.location?.range;
 	const unresolved = range === undefined || (range.start.line === 0 && range.start.character === 0 && range.end.line === 0 && range.end.character === 0);
-	const name = String(symbol.name);
-	const container = String(symbol.containerName ?? "");
-	// Metadata too long to be matched faithfully is never cut into a different identity: it matches nothing.
-	const oversize = name.length > MAX_NAME_LENGTH || container.length > MAX_CONTAINER_LENGTH;
+	const container = compactContainer(String(symbol.containerName ?? ""));
 	return {
-		name: oversize ? "" : name,
-		kind: oversize ? UNMATCHABLE_KIND : symbol.kind,
-		container: oversize ? "" : container,
+		name: compactName(String(symbol.name)),
+		kind: symbol.kind,
+		container: container ?? "",
 		path: symbol.location?.uri?.scheme === "file" ? symbol.location.uri.fsPath : "",
 		line: unresolved || !Number.isSafeInteger(range.start.line) ? 0 : range.start.line + 1,
 		column: unresolved || !Number.isSafeInteger(range.start.character) ? 0 : range.start.character + 1,
+		...(container === null ? { opaque: true as const } : {}),
 	};
+}
+
+/**
+ * A name too long to keep is cut down to what matching reads of it: its bare name and its generic arity (`bareName`,
+ * `genericArity`), which is the same identity, so a method with a hundred parameters (the signature a source generator's
+ * formatter shows) still matches and is no "unknown" entry. A bare name beyond the limit equals no name a token can carry
+ * (a token is far shorter), so it is kept cut and matches nothing.
+ */
+function compactName(name: string): string {
+	if (name.length <= MAX_NAME_LENGTH) return name;
+	const bare = bareName(name);
+	if (bare.length > MAX_NAME_LENGTH) return bare.slice(0, MAX_NAME_LENGTH);
+	const arity = genericArity(name);
+	return arity > 0 ? `${bare}<${",".repeat(arity - 1)}>` : bare;
+}
+
+/**
+ * A container too long to keep is rewritten to the shortest text that {@link containerInfo} reads the same (the same type-path
+ * alternatives and the same identity). `null` when no such text is within the limit: the entry is then opaque, since cutting
+ * the text would turn it into another container.
+ */
+function compactContainer(container: string): string | null {
+	if (container.length <= MAX_CONTAINER_LENGTH) return container;
+	const info = containerInfo(container);
+	const split = trailingGroup(container.trim());
+	const compact = split !== null && /[\s(]/.test(split.group) ? `${topLevelWords(split.head).map(bareName).join(" ")} (${split.group})` : (info.paths[0] ?? []).join(".");
+	if (compact.length > MAX_CONTAINER_LENGTH) return null;
+	const again = containerInfo(compact);
+	return again.key === info.key && JSON.stringify(again.paths) === JSON.stringify(info.paths) ? compact : null;
 }
 
 /** The part of `vscode.TypeHierarchyItem` this module reads. */
@@ -95,10 +124,9 @@ export interface ProviderHierarchyItem {
 export function hierarchyNode(item: ProviderHierarchyItem): HierarchyNode {
 	return { name: String(item.name), path: item.uri.scheme === "file" ? item.uri.fsPath : "", line: item.range.start.line + 1, endLine: item.range.end.line + 1, token: item };
 }
+/** Lengths above which an entry's name or container is rewritten to its compact form (and, failing that, the entry is opaque). */
 const MAX_NAME_LENGTH = 256;
-const MAX_CONTAINER_LENGTH = 512;
-/** The kind of an entry whose metadata was too long to match: it never matches, and its presence makes a lookup uncertain. */
-const UNMATCHABLE_KIND = -1;
+const MAX_CONTAINER_LENGTH = 2048;
 
 const TYPE_KINDS: Record<number, true> = { [SymbolKind.Class]: true, [SymbolKind.Interface]: true, [SymbolKind.Struct]: true, [SymbolKind.Enum]: true };
 /** Kinds a link may point at; files, packages, literals, type parameters and operators never are a symbol the model names. */
@@ -200,9 +228,8 @@ function genericArity(text: string): number {
 	return arity;
 }
 
-/** Whether a provider's entry could be a declaration named `last` (or its attribute form): cheap pre-filter for the adapter, which must not map unrelated fuzzy results. */
+/** Whether a provider's entry could be a declaration named `last` (or its attribute form): cheap pre-filter for the adapter, which must not map unrelated fuzzy results. The bare name is read from the whole name, however long: a method with a hundred parameters is named like its bare name. */
 export function isNameCandidate(name: string, last: string): boolean {
-	if (name.length > MAX_NAME_LENGTH) return true;
 	const bare = bareName(name);
 	return bare === last || bare === `${last}Attribute`;
 }
@@ -248,6 +275,18 @@ function qualifierVariants(wanted: readonly string[]): string[][] {
 	return variants;
 }
 
+/** Whether `entry` is a declaration the symbol's last segment names: a linkable kind with that name (an attribute also with the `Attribute` suffix, on a type), whatever its container. */
+function isNamed(symbol: CodeSymbol, entry: SymbolEntry): boolean {
+	const bare = bareName(entry.name);
+	if (LINKABLE_KINDS[entry.kind] !== true) return false;
+	return symbol.attribute ? entry.kind in TYPE_KINDS && (bare === symbol.last || bare === `${symbol.last}Attribute`) : bare === symbol.last;
+}
+
+/** Whether an opaque entry (see {@link SymbolEntry.opaque}) is named like the symbol: it could be the definition or a rival of it, and no one can tell. */
+export function isHiddenCandidate(symbol: CodeSymbol, entry: SymbolEntry): boolean {
+	return entry.opaque === true && isNamed(symbol, entry);
+}
+
 /**
  * The distinct declaration locations of `symbol` among `entries`, which are already limited to the session's folders. The last
  * segment must equal the entry's name exactly (case-sensitive; an attribute also matches `NameAttribute` on a type);
@@ -256,9 +295,8 @@ function qualifierVariants(wanted: readonly string[]): string[][] {
  * (`preferTypes: false` turns that off, for a member looked up on its own).
  */
 export function candidateEntries(symbol: CodeSymbol, entries: readonly SymbolEntry[], preferTypes = true): SymbolEntry[] {
-	const names = symbol.attribute ? [symbol.last, `${symbol.last}Attribute`] : [symbol.last];
 	const wanted = symbol.segments.slice(0, -1);
-	const named = entries.filter(entry => LINKABLE_KINDS[entry.kind] === true && names.includes(bareName(entry.name)) && !(symbol.attribute && !(entry.kind in TYPE_KINDS)));
+	const named = entries.filter(entry => entry.opaque !== true && isNamed(symbol, entry));
 	let matches = named;
 	if (wanted.length > 0) {
 		for (const variant of qualifierVariants(wanted)) {
@@ -467,6 +505,10 @@ export class SymbolLinkResolver {
 	#probeIndex = 0;
 	#probeStartedAt = 0;
 	#queueRetryDue = false;
+	/** A query timed out before any query of the window had answered: the provider is loading and not answering, not merely slow to start. */
+	#unresponsive = false;
+	/** The retry that is due comes from the file search's line, which does not wait for the symbol provider's. */
+	#filesDrained = false;
 	#queueRetryTimer: NodeJS.Timeout | undefined;
 	#lastRetry = Number.NEGATIVE_INFINITY;
 	/** A lookup ended `pending` since the last retry signal: some page holds a parked token that only a signal (or a minute) asks again. */
@@ -507,6 +549,9 @@ export class SymbolLinkResolver {
 
 	leaveBatch(): void { this.#batches--; }
 
+	/** How many of one batch's tokens are looked up at once: a batch takes no more of the provider's slots than its share, so no batch fills the line and a page cannot starve the others. */
+	get batchWidth(): number { return this.#maxConcurrent; }
+
 	/** Moves on whenever answers are invalidated, for any reason; a batch compares it before and after to drop buffered symbol answers. */
 	get generation(): number { return this.#generation; }
 
@@ -545,9 +590,19 @@ export class SymbolLinkResolver {
 		if (this.#lostSince !== undefined) this.#armLostTimer();
 	}
 
-	/** A batch left `token` unanswered for a reason only the batch knows (a refused batch, its deadline); see {@link GiveUpReporter}. */
-	batchMissed(token: string, reason: string): void {
-		this.#giveUps.missed("link", token, reason);
+	/** A batch left a token `pending` for lack of capacity (the batch cap, its deadline): not a failure and no try; the pages are told to ask again once the provider's queue has drained. */
+	batchDeferred(): void {
+		this.#pagesParked = true;
+		this.#queueRetryDue = true;
+		if (this.#running === 0) this.#scheduleQueueRetry();
+	}
+
+	/** The file search's line emptied after it had refused lookups: the pages that wait for them are told to ask again (at the usual rate), whatever the symbol provider is doing. */
+	filesDrained(): void {
+		this.#pagesParked = true;
+		this.#queueRetryDue = true;
+		this.#filesDrained = true;
+		this.#scheduleQueueRetry();
 	}
 
 	/** A batch had to leave `token` pending because files changed while it ran (`reason`): not a failure; the pages are told to ask again once the changes settle. */
@@ -621,15 +676,17 @@ export class SymbolLinkResolver {
 			}
 			return outcome;
 		};
+		// A provider that has answered nothing yet, has let a call time out and still holds every slot with calls unanswered is loading: more questions would only wait in line (and give up with the queue), so this one waits for the ready signal instead.
+		if (!this.#ready && this.#unresponsive && this.#running >= this.#maxConcurrent) { this.#park(symbol, scope); return done(pending, "parked (not ready)"); }
 		const gathered = await this.#gather(symbol, scope, generation, startedAt, stats);
 		if ("failed" in gathered) return done(gathered.failed.outcome, gathered.failed.verdict);
 		const { match } = gathered;
 		if (!this.#ready && stats.total === 0) { this.#park(symbol, scope); return done(pending, "parked (not ready)", match.locations); }
 		if (stats.total === 0) return done(none, "none", match.locations);
-		// An entry whose name or container was too long to match could be a rival (or the match) that is not seen.
-		const unmatchable = inScope(stats.entries).some(candidate => candidate.kind === UNMATCHABLE_KIND);
+		// An entry whose container was too long to read is named like the symbol but cannot be matched: it could be the match or a rival that is not seen, so the name is not linked. That is an answer (plain text), not a failure to ask again.
+		const hidden = inScope(stats.entries).some(candidate => isHiddenCandidate(symbol, candidate));
 		if (match.state === "ambiguous") return done({ status: "ambiguous", definitions: match.symbols }, "ambiguous", match.locations, gathered.via);
-		if (unmatchable) return done(unavailable, "unavailable: unmatchable entry", match.locations);
+		if (hidden) return done(none, "none (unmatchable entry)", match.locations);
 		if (match.state !== "unique") return done(none, "none", match.locations);
 		if (gathered.truncated) return done(unavailable, "unavailable: truncated", match.locations);
 		return done({ status: "found", target: symbolTarget(match.entry, scope.cwd) }, "found", match.locations, gathered.via === "" ? match.via ?? "" : gathered.via);
@@ -669,6 +726,7 @@ export class SymbolLinkResolver {
 	#failure(failed: "invalidated" | "queue-full" | "error" | "no-answer" | "timeout"): Failure {
 		if (failed === "invalidated") return { outcome: pending, verdict: PARKED_INVALIDATED };
 		const parked = failed === "queue-full" || failed === "timeout";
+		if (failed === "timeout" && !this.#ready) this.#unresponsive = true;
 		if (parked) this.#queueRetryDue = true;
 		return { outcome: parked ? pending : unavailable, verdict: parked ? `parked (${failed === "timeout" ? "timeout" : "queue"})` : `unavailable: ${failed}` };
 	}
@@ -789,7 +847,7 @@ export class SymbolLinkResolver {
 		const delay = Math.max(0, this.#lastRetry + this.#minRetryMs - this.#now());
 		this.#queueRetryTimer = setTimeout(() => {
 			this.#queueRetryTimer = undefined;
-			if (!this.#queueRetryDue || this.#running > 0) return;
+			if (!this.#queueRetryDue || (this.#running > 0 && !this.#filesDrained)) return;
 			this.#log.debug("code symbols: provider queue drained, asking parked tokens again");
 			this.#sendRetry();
 		}, delay);
@@ -800,6 +858,7 @@ export class SymbolLinkResolver {
 	#sendRetry(): void {
 		this.#pagesParked = false;
 		this.#queueRetryDue = false;
+		this.#filesDrained = false;
 		clearTimeout(this.#lostTimer);
 		this.#lostTimer = undefined;
 		this.#lostSince = undefined;
@@ -842,6 +901,7 @@ export class SymbolLinkResolver {
 		clearTimeout(this.#probeTimer);
 		this.#probeTimer = undefined;
 		this.#probeGaveUp = false;
+		this.#unresponsive = false;
 		this.#changeRetries = 0;
 		const parked = this.#parkedKeys.size;
 		this.#parkedKeys.clear();
@@ -893,6 +953,7 @@ export class SymbolLinkResolver {
 		this.#ready = false;
 		this.#notReadySince = undefined;
 		this.#probeGaveUp = false;
+		this.#unresponsive = false;
 		clearTimeout(this.#probeTimer);
 		this.#probeTimer = undefined;
 		this.#probeIndex = 0;
@@ -946,6 +1007,8 @@ const BATCH_DEADLINE_MS = 15_000;
 /**
  * Answer one batch of symbol questions from the page. The tokens are normalized again here; each one that is
  * not a symbol is `none`. Nothing returned is trusted by the open path: a click goes through the ordinary link request.
+ * A token the batch had no room or time for (the batch cap, the deadline) is `pending`, not `unavailable`: it was not tried, so it
+ * uses none of the page's retries and the resolver's retry signal asks it again.
  */
 export async function handleSymbolLinks(request: SymbolLinksRequest, host: SymbolLinksHost, resolver: SymbolLinkResolver, deadlineMs = BATCH_DEADLINE_MS): Promise<void> {
 	const reply = (results: SymbolLinkResult[], disabled?: true): void => {
@@ -954,19 +1017,19 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 	if (!host.enabled()) return reply(request.tokens.map(token => ({ token, status: "none" })), true);
 	// Host-side admission: only so many batches work at once, however many requests the page (or a forged one) sends.
 	if (!resolver.enterBatch()) {
-		for (const token of request.tokens) resolver.batchMissed(token, "too many batches at once (capped)");
-		return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+		resolver.batchDeferred();
+		return reply(request.tokens.map(token => ({ token, status: "pending" })));
 	}
 	try {
 		const roots = host.roots();
 		const generation = resolver.generation;
 		const fileGeneration = resolver.fileGeneration;
-		const results: SymbolLinkResult[] = request.tokens.map(token => ({ token, status: "unavailable" }));
+		const results: SymbolLinkResult[] = request.tokens.map(token => ({ token, status: "pending" }));
 		// Whether a result needed a symbol lookup: only those depend on the contents of files, not just on which files exist.
 		const symbolBased = request.tokens.map(() => false);
-		// Whether a token's lookups finished: one that did not reached the batch deadline (a lookup that ended without an answer has reported why itself).
+		// Whether a token's lookups finished: one that did not (not started, or still running at the batch deadline) stays `pending`.
 		const settled = request.tokens.map(() => false);
-		const tasks = request.tokens.map(async (token, index) => {
+		const lookup = async (token: string, index: number): Promise<void> => {
 			const scope = { cwd: host.cwd, roots };
 			// A bare file name is looked up as a file first; a span that is also a symbol (`Twin.run`) is looked up as one only when no file has that name. A file lookup that could not answer stays unanswered.
 			const file = parseBareFileName(token);
@@ -982,11 +1045,22 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 			}
 			results[index] = outcome.status === "found" ? { token, status: "found", target: outcome.target } : outcome.status === "ambiguous" ? { token, status: "ambiguous", definitions: outcome.definitions, ...(outcome.files === true ? { files: true as const } : {}) } : { token, status: outcome.status };
 			settled[index] = true;
-		});
+		};
+		// The batch's tokens are looked up a few at a time (the resolver's batch width): a page's burst of sixteen does not fill the provider's line,
+		// so batches of several pages and tabs take turns, and the tokens first in the page's queue (the ones on screen) are asked first.
+		let next = 0;
+		let expired = false;
+		const worker = async (): Promise<void> => {
+			while (!expired && next < request.tokens.length) {
+				const index = next++;
+				await lookup(request.tokens[index]!, index);
+			}
+		};
+		const workers = Array.from({ length: Math.min(resolver.batchWidth, request.tokens.length) }, worker);
 		let timer: NodeJS.Timeout | undefined;
 		const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, deadlineMs); });
-		try { await Promise.race([Promise.all(tasks), deadline]); }
-		finally { clearTimeout(timer); }
+		try { await Promise.race([Promise.all(workers), deadline]); }
+		finally { clearTimeout(timer); expired = true; }
 		// A setting turned off or a folder removed while the provider worked revokes what it found, and a change to any file
 		// since the batch began makes every symbol answer it buffered stale. A file answer is not: a file lookup that was running
 		// when files changed has proven each file it reports to still exist, and a file's content does not change which files exist.
@@ -1001,7 +1075,7 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 		const final = results.map((result, index): SymbolLinkResult => lost(index) ? { token: result.token, status: "pending" } : { ...result });
 		final.forEach((result, index) => {
 			if (lost(index)) resolver.batchLost(result.token, "invalidated while the batch ran");
-			else if (result.status === "unavailable" && !settled[index]) resolver.batchMissed(result.token, "batch deadline");
+			else if (!settled[index] && result.status === "pending") resolver.batchDeferred();
 			else if (result.status !== "unavailable" && result.status !== "pending") resolver.batchAnswered(result.token);
 		});
 		reply(final);

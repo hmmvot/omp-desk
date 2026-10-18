@@ -4,9 +4,10 @@ import type { Logger } from "../shared/logger.ts";
  * Makes a lookup that keeps failing visible without the Debug log level. The per-lookup lines are debug; a name whose
  * lookups end without an answer {@link GIVE_UP_ATTEMPTS} times in a row (the first ask and the page's two retries) is reported once,
  * at info, with the reasons, and then not again for {@link GIVE_UP_WINDOW_MS}. A name that gets an answer starts counting from zero.
- * A miss that only means "not yet" is not a try: the provider still loading, or files changing under the lookup. The host asks those
- * again with its retry signal without using the page's budget (docs/designs/2026-10-10-code-symbol-links.md, "Readiness and parking"),
- * and counting them reported a name as given up while it was only waiting for a language server.
+ * A miss that only means "not yet" is not a try: the provider still loading, files changing under the lookup, or no room in the
+ * provider's line (a full queue). The host asks those again with its retry signal without using the
+ * page's budget (docs/designs/2026-10-10-code-symbol-links.md, "Readiness and parking"), and counting them reported a name as given
+ * up while it was only waiting for a language server or its turn.
  */
 
 /** Consecutive lookups without an answer that make a name "given up": the page asks once and retries twice. */
@@ -25,6 +26,7 @@ interface Entry {
 /** The reasons of a miss that is a wait, not a failure: the lookup logs them itself and they never count towards a give-up. */
 const WAITING_REASONS: Record<string, true> = {
 	"provider not ready": true,
+	"queue full": true,
 	"invalidated": true,
 	"invalidated while the batch ran": true,
 	"files changed while the batch ran": true,
@@ -33,7 +35,7 @@ const WAITING_REASONS: Record<string, true> = {
 
 /** The short reason of a lookup verdict (`unavailable: invalidated` and `parked (invalidated)` are `invalidated`; `parked (queue)` is `queue full`). */
 export function giveUpReason(verdict: string): string {
-	if (verdict.startsWith("unavailable: ")) return verdict.slice("unavailable: ".length).replace("queue-full", "queue full");
+	if (verdict.startsWith("unavailable: ")) return verdict.slice("unavailable: ".length);
 	switch (verdict) {
 		case "parked (not ready)": return "provider not ready";
 		case "parked (invalidated)": return "invalidated";
