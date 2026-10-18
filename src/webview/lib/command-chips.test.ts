@@ -82,14 +82,11 @@ test("the chip is atomic for the existing selection and deletion rules, and Back
 	assert.equal(deletionRange(chips, 11, 11, "backward"), null, "text after the chip is the browser's");
 });
 
-test("while a turn runs, Desk's own commands and the skills are known: the host sends a skill as a `prompt`, other text is steered and never scanned by OMP", () => {
-	const busy = commandResolver(COMMANDS, true);
-	assert.equal(busy("compact"), null);
-	assert.equal(busy("skill:review"), "skill");
-	assert.equal(busy("clear"), "command");
-	assert.equal(busy("REWIND"), "command");
-	assert.deepEqual(findCommandChips("/skill:review x", busy).map(chip => chip.kind), ["skill"]);
-	assert.deepEqual(findCommandChips("see /skill:review now", busy).map(chip => chip.kind), ["skill"]);
-	assert.deepEqual(findCommandChips("/compact x", busy), []);
-	assert.deepEqual(findCommandChips("/clear x", busy).map(chip => chip.kind), ["command"]);
+test("the same catalogue gives the same chips whether or not a turn runs: the host sends a command or a skill as a prompt either way", () => {
+	assert.equal(resolve("compact"), "command");
+	assert.equal(resolve("skill:review"), "skill");
+	assert.equal(resolve("clear"), "command");
+	assert.equal(resolve("REWIND"), "command");
+	assert.deepEqual(findCommandChips("/compact x", resolve).map(chip => chip.kind), ["command"]);
+	assert.deepEqual(findCommandChips("see /skill:review now", resolve).map(chip => chip.kind), ["skill"]);
 });

@@ -14,14 +14,13 @@
  *   `<namespace>/<name>`) is a skill invocation as well, the first such token only, unless the draft starts with another
  *   slash command or with a local-execution sigil (`!`, `$ `, `$$ `);
  * - the skill must be one the session lists; an unknown name is ordinary text;
- * - the skill rule itself is shared with the host (`chat/skill-invocation.ts`), which delivers a message that invokes a skill
- *   while a turn runs as a `prompt` with `streamingBehavior` (the one path on which OMP expands it); every other message sent
- *   during a turn is a `steer` or `follow_up`, which OMP does not scan, so then only skills and Desk's own commands (answered by
- *   the host on every send path) stay chips.
+ * - the rule is shared with the host (`chat/prompt-routing.ts`), which sends a message that starts with a listed command or invokes a
+ *   listed skill as a `prompt` with `streamingBehavior` while a turn runs, as OMP's terminal UI does (a `steer` would queue it as
+ *   text), so a chip is drawn the same whether or not a turn is running.
  * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it.
  */
 import type { ChatSlashCommand } from "../../chat/model.ts";
-import { SKILL_PREFIX, SKILL_TOKEN, startsWithLocalExecution } from "../../chat/skill-invocation.ts";
+import { SKILL_PREFIX, SKILL_TOKEN, startsWithLocalExecution } from "../../chat/prompt-routing.ts";
 import { findReferences, type IsKnownReference, type ReferenceSpan } from "./image-references.ts";
 import { slashCatalogue } from "./slash-completion.ts";
 
@@ -48,17 +47,14 @@ const DESK_SOURCE = "OMP Desk";
 /**
  * The resolver of one catalogue: Desk's own commands and what the session advertises (denied identity-changing builtins are not in it,
  * so they stay plain text and are refused at send as before). Names and aliases match exactly, case included, as OMP's own lookup does,
- * except Desk's own commands, which Chat's interceptors match in any case. While `working` a message is steered or queued, which OMP
- * does not scan for commands, so only Desk's own commands and the skills are known then: the host sends a skill invocation as a
- * `prompt` with `streamingBehavior`, the one path OMP expands it on.
+ * except Desk's own commands, which Chat's interceptors match in any case.
  */
-export function commandResolver(commands: readonly ChatSlashCommand[], working: boolean = false): ResolveCommand {
+export function commandResolver(commands: readonly ChatSlashCommand[]): ResolveCommand {
 	const kinds = new Map<string, CommandKind>();
 	const own = new Map<string, CommandKind>();
 	for (const command of slashCatalogue(commands)) {
 		const desk = command.source === DESK_SOURCE;
 		const kind: CommandKind = command.source === "skill" ? "skill" : "command";
-		if (working && !desk && kind !== "skill") continue;
 		for (const name of [command.name, ...(command.aliases ?? [])]) {
 			if (!kinds.has(name)) kinds.set(name, kind);
 			if (desk) own.set(name.toLowerCase(), kind);

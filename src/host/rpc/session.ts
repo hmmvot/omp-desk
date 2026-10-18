@@ -68,7 +68,7 @@ import {
 	type ClearRefusal,
 } from "../../chat/clear.ts";
 import type { ForkSource } from "../../chat/fork.ts";
-import { invokesListedSkill } from "../../chat/skill-invocation.ts";
+import { routesAsPrompt } from "../../chat/prompt-routing.ts";
 import {
 	NAVIGATE_COMMAND,
 	NAVIGATE_ERROR_PATH,
@@ -968,15 +968,22 @@ export class RpcSession {
 	}
 
 	/**
-	 * OMP's `steer` and `follow_up` queue the text as it is, and only `prompt` expands a `/skill:<name>` invocation
-	 * (`dispatchRpcSkillPrompt`, which queues the expanded skill under the same `streamingBehavior`): a skill the session
-	 * lists therefore goes as a `prompt` whichever queue the user chose, and everything else keeps its own command.
+	 * OMP's `steer` and `follow_up` queue the text as it is (and refuse an extension command's), and only `prompt` acts on a
+	 * `/skill:<name>` invocation (`dispatchRpcSkillPrompt`, which queues the expanded skill under the same `streamingBehavior`) or a
+	 * leading slash command (`executeAcpBuiltinSlashCommand` runs a builtin at once, `session.prompt` runs an extension command at once
+	 * and queues a custom or file command's expansion). OMP's terminal UI sends everything typed during a turn through
+	 * `session.prompt(text, {streamingBehavior: "steer"})`, so a message that invokes a listed skill or starts with a listed command goes
+	 * as a `prompt` with the queue the user chose, refused like a prompt when its command is denied, and OMP decides what it does
+	 * mid-turn. Everything else keeps its own command.
 	 */
 	steer(request: MessageRequest): Promise<SendOutcome> {
 		return this.#once(request.requestId, async () => {
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
-			if (invokesListedSkill(request.text, this.#model.commands)) return this.#sendPrompt(request, "steer");
+			if (routesAsPrompt(request.text, this.#model.commands)) {
+				const verdict = classifySlashInput(request.text, this.#model.commands);
+				return verdict.denied ? { status: "refused", reason: "slash-denied", command: verdict.command } : this.#sendPrompt(request, "steer");
+			}
 			this.cancelDeferredClear();
 			return this.#sendUser(request.requestId, {
 				type: "steer",
@@ -990,7 +997,10 @@ export class RpcSession {
 		return this.#once(request.requestId, async () => {
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
-			if (invokesListedSkill(request.text, this.#model.commands)) return this.#sendPrompt(request, "followUp");
+			if (routesAsPrompt(request.text, this.#model.commands)) {
+				const verdict = classifySlashInput(request.text, this.#model.commands);
+				return verdict.denied ? { status: "refused", reason: "slash-denied", command: verdict.command } : this.#sendPrompt(request, "followUp");
+			}
 			this.cancelDeferredClear();
 			return this.#sendUser(request.requestId, {
 				type: "follow_up",

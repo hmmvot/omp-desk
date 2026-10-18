@@ -53,7 +53,6 @@ export interface CommandRow {
 	readonly group: CommandGroup;
 }
 
-const RUNNING_PLAIN = "OMP runs this command only between turns. Wait for the turn or stop it, then pick it again.";
 const FRESH_BUSY = "A response is running. Stop it first, then use /fresh.";
 
 /** Desk's own commands (`slash-completion.ts`): every one is answered by Desk before anything reaches OMP. */
@@ -178,10 +177,10 @@ export interface CommandContext {
 }
 
 /**
- * Why a row cannot be picked now, or `null`. Commands that only complete the draft need a composer that takes text;
- * commands that run need the same plus a turn that is not running, because while one runs the composer steers and
- * OMP's builtins, skills and extension commands are not run from a steered message. A GUI command follows what its
- * own host action requires.
+ * Why a row cannot be picked now, or `null`. A command needs a composer that takes text and a message that is not waiting for OMP.
+ * A turn that is running does not block one of OMP's own: the host sends it as a `prompt` with `streamingBehavior`, as OMP's terminal
+ * UI does, and OMP decides what it does mid-turn (`prompt-routing.ts`). Desk's own commands carry their own sentence for a running
+ * turn, and a GUI command follows what its own host action requires.
  */
 export function commandAvailability(row: CommandRow, context: CommandContext): string | null {
 	const route = row.gui?.route;
@@ -193,7 +192,7 @@ export function commandAvailability(row: CommandRow, context: CommandContext): s
 	if (context.promptBlocked !== null) return context.promptBlocked;
 	if (route?.kind === "text") return context.sendInFlight ? "Waiting for OMP to confirm the previous message." : context.turnRunning ? row.gui?.whileRunning ?? null : null;
 	if (row.takesArguments) return null;
-	return context.sendInFlight ? "Waiting for OMP to confirm the previous message." : context.turnRunning ? RUNNING_PLAIN : null;
+	return context.sendInFlight ? "Waiting for OMP to confirm the previous message." : null;
 }
 
 /** What picking a row does. */

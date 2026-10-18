@@ -1347,15 +1347,15 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-composer-commands').click()");
 			await ui.wait("document.querySelector('.omp-commands-popup')");
 			const state = (name: string) => ui.evaluate<{ disabled: boolean; reason: string }>(`(()=>{const row=[...document.querySelectorAll('.omp-commands-option')].find(row=>row.querySelector('strong').textContent===${JSON.stringify(name)});return{disabled:row.getAttribute('aria-disabled')==='true',reason:row.querySelector('.omp-commands-reason')?.textContent??''}})()`);
-			assert.equal((await state("/usage")).disabled, true);
-			assert.match((await state("/usage")).reason, /only between turns/);
+			assert.deepEqual(await state("/usage"), { disabled: false, reason: "" }, "an OMP command is sent as a prompt during a turn, as OMP's terminal UI does");
 			assert.match((await state("/new")).reason, /Stop it first/);
 			assert.match((await state("/clear")).reason, /abort it before resetting/);
 			assert.match((await state("/rewind")).reason, /./, "Rewind says why it cannot open during a turn");
 			for (const name of ["/skill:review", "/settings", "/compact", "/export", "/hotkeys", "/login", "/logout"]) assert.deepEqual(await state(name), { disabled: false, reason: "" }, name);
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/usage')).click()");
-			assert.ok(await ui.evaluate("Boolean(document.querySelector('.omp-commands-popup'))"), "a disabled row does nothing and the list stays open");
-			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt'||message.type==='omp:chat-steer').length"), 0);
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-steer'&&message.text==='/usage')");
+			await ui.evaluate("document.querySelector('.omp-composer-commands').click()");
+			await ui.wait("document.querySelector('.omp-commands-popup')");
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-steer'&&message.text==='/settings')");
 			await ui.evaluate("window.ui.push({working:false,phase:'stopped'})");
@@ -5580,7 +5580,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("while a turn runs a skill is still a chip, because the host sends it as a prompt OMP expands; other commands are chips only where Chat answers them itself", async () => {
+		await t.test("while a turn runs a command and a skill are chips as when idle, because the host sends both as a prompt (OMP's terminal UI does) and the text sent is unchanged", async () => {
 			await chipSetup("chips-working");
 			await setDraft("/skill:review x");
 			await waitChips(1);
@@ -5593,19 +5593,26 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await waitChips(1);
 			await setDraft("/compact x");
 			await waitDraft("window.composer.value()==='/compact x'");
-			await waitChips(0);
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Command compact", "a builtin is sent as a prompt during a turn too");
 			await setDraft("/clear x");
+			await waitDraft("window.composer.value()==='/clear x'");
 			await waitChips(1);
 			assert.equal((await commandChips())[0]!.label, "Command clear", "Chat answers its own commands whatever the turn is doing");
 			await setDraft("/CLEAR x");
 			await waitDraft("window.composer.value()==='/CLEAR x'");
 			await waitChips(1);
-			await setDraft("/skill:review x");
+			for (const text of ["/foo x", "/usr/bin/x now", "/Compact x"]) {
+				await setDraft(text);
+				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
+				await settleFrames();
+				assert.deepEqual(await commandChips(), [], `${text} stays text during a turn`);
+			}
+			await setDraft("/compact keep files");
 			await waitChips(1);
-			await ui.evaluate("window.ui.push({working:false})");
-			await setDraft("/compact x");
-			await waitChips(1);
-			assert.equal((await commandChips())[0]!.label, "Command compact", "the turn ended: the next message is a prompt again");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			assert.deepEqual(await ui.evaluate("(({type,text})=>({type,text}))(window.ui.sends()[0])"), { type: "omp:chat-steer", text: "/compact keep files" }, "the page still posts a steer with the draft unchanged; the host picks the command");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

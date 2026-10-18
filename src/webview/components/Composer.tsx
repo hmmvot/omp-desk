@@ -489,9 +489,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const codeHintId = useId();
 	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0 || attachedDocuments.length > 0);
 
-	// A command or a skill is a chip while the session's catalogue lists it and the next send would reach OMP as a `prompt` (while a
-	// turn runs the composer steers or follows up, which OMP does not scan), so those two are what the surface draws from besides the attachments.
-	const resolver = useMemo(() => commandResolver(snapshot.commands, busy), [snapshot.commands, busy]);
+	// A command or a skill is a chip while the session's catalogue lists it: the host sends it as a `prompt` whether or not a turn runs
+	// (`chat/prompt-routing.ts`), so the catalogue is what the surface draws from besides the attachments.
+	const resolver = useMemo(() => commandResolver(snapshot.commands), [snapshot.commands]);
 	const resolverRef = useRef(resolver);
 	const resolveCommand = useCallback((name: string) => resolverRef.current(name), []);
 	// A marker is a chip while its attachment is attached and plain text otherwise, so the surface draws again when the set of attachments or the catalogue changes.

@@ -4,6 +4,7 @@
  * (skills as `skill:<name>`, `source: "skill"`), so this is the check that the real wire shape reaches the chip scan, which
  * the page tests only exercise with a recorded copy of that payload.
  */
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { FrameLocator, Locator } from "@playwright/test";
@@ -102,4 +103,39 @@ test("a skill sent while a turn runs is expanded by OMP, steered or queued as a 
 		expect(literal, "no request carries the literal token as its message").toEqual([]);
 		await expect(stop, "the turns end").toHaveCount(0, { timeout: 150_000 });
 	}
+});
+
+test("OMP's commands sent while a turn runs are run by OMP as in its terminal UI: /export writes its file, /compact compacts the conversation, and both are chips meanwhile", async ({ desk, state }) => {
+	test.setTimeout(300_000);
+	const page = await desk.window("alpha-desk");
+	await desk.ready(page);
+	const chat = await desk.newChatSession(page, "alpha-desk");
+	await desk.send(chat, "first warmup");
+	await expect(chat.getByText("Mock reply to: first warmup")).toBeVisible({ timeout: 60_000 });
+	// Distinct words: OMP's loop guard interrupts a turn that repeats itself.
+	const words = Array.from({ length: 200 }, (_, i) => `w${i * 7919 % 1000}`).join(" ");
+	const stop = chat.getByRole("button", { name: "Stop the running turn" });
+
+	await desk.send(chat, `[slow] export ${words}`);
+	await expect(stop, "a turn is running").toBeVisible({ timeout: 60_000 });
+	const busy = desk.composerWhileBusy(chat);
+	await busy.click();
+	await busy.pressSequentially("/export mid-turn.html");
+	await expect(chips(chat), "the command is a chip during the turn").toHaveCount(1, { timeout: 30_000 });
+	await expect(chips(chat).first()).toHaveAttribute("data-kind", "command");
+	await busy.press("Enter");
+	await expect(chat.getByText("Session exported to: mid-turn.html"), "OMP ran /export at once").toBeVisible({ timeout: 60_000 });
+	expect(existsSync(join(state.base, "ws", "alpha-desk", "mid-turn.html")), "the export file exists").toBe(true);
+	await expect(stop, "the turn ended on its own").toHaveCount(0, { timeout: 150_000 });
+
+	await desk.send(chat, `[slow] compact ${words}`);
+	await expect(stop, "a turn is running").toBeVisible({ timeout: 60_000 });
+	await busy.click();
+	await busy.pressSequentially("/compact keep the notes");
+	await expect(chips(chat)).toHaveCount(1, { timeout: 30_000 });
+	await busy.press("Enter");
+	await expect.poll(async () => (await modelPrompts(state.mockUrl)).some(text => text.startsWith("Resume the user's latest intent")), { timeout: 150_000, message: "/compact compacted the conversation and resumed the turn" }).toBe(true);
+	const literal = (await modelPrompts(state.mockUrl)).filter(text => text.trimStart().startsWith("/compact keep the notes") || text.trimStart().startsWith("/export mid-turn.html"));
+	expect(literal, "no request carries a command as its message").toEqual([]);
+	await expect(stop, "the turns end").toHaveCount(0, { timeout: 150_000 });
 });

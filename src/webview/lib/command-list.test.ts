@@ -100,11 +100,12 @@ test("inserting a command keeps what the draft already says", () => {
 	assert.deepEqual(insertCommandIntoDraft("  look [Image #1]", "fix"), { text: "/fix look [Image #1]", caret: 5 });
 });
 
-test("availability: a GUI command follows its own requirements, a plain command runs only between turns", () => {
+test("availability: a GUI command follows its own requirements, an OMP command is not blocked by a running turn, Desk's own say why", () => {
 	const running = { ...OPEN, turnRunning: true };
 	const stopped = { ...OPEN, promptBlocked: "This session is not running.", sessionBlocked: "This session is not running." };
 	assert.equal(commandAvailability(rowOf("usage"), OPEN), null);
-	assert.match(commandAvailability(rowOf("usage"), running)!, /only between turns/);
+	assert.equal(commandAvailability(rowOf("usage"), running), null, "OMP's own commands are sent as prompts during a turn, as its terminal UI does");
+	assert.equal(commandAvailability(rowOf("usage"), { ...running, sendInFlight: true }), "Waiting for OMP to confirm the previous message.");
 	assert.equal(commandAvailability(rowOf("skill:review"), running), null, "completing the draft is allowed while a turn runs");
 	assert.equal(commandAvailability(rowOf("skill:review"), stopped), "This session is not running.");
 	assert.equal(commandAvailability(rowOf("settings"), running), null);
