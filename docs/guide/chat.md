@@ -168,7 +168,8 @@ These work in Chat.
 
 - Type `/review` or pick it in the Commands list. **Review Mode** offers **uncommitted changes**, a **branch diff** (then the base branch to compare against), a **specific commit** (then one of the latest commits), a **specific pull request** (the open pull requests, a search row, or `#123`) and **custom review instructions** (a multi-line box, prefilled with `Review the following:`; `Enter` submits, `Shift+Enter` adds a line). **Cancel**, or `Esc`, in any of these dialogs ends the command and sends nothing, and the message box is idle again at once.
 - `/review <PR link>` reviews that pull request without asking. `/review <text>` keeps the text as the focus of the review, and the custom-instructions choice is not offered.
-- Pull requests need the GitHub CLI (`gh`). Without it OMP's message (`GitHub CLI (gh) is not installed…`) appears as an error message of the window and nothing is sent.
+- Pull requests need the GitHub CLI (`gh`), signed in (`gh auth login`). Without it OMP's message (`GitHub CLI (gh) is not installed…`) appears as an error message of the window and nothing is sent; so does a pull request that cannot be fetched (it does not exist, or you cannot read it).
+- The pull-request list is the open pull requests of the repository the session's folder belongs to (its Git remote), up to 100 rows, with the **Search open pull requests…** row last: scroll to it, then type words to search or `#123` to review that pull request, open or not. Picking a row, or `/review <PR link>`, shows the review request in the transcript like any other mode.
 - A dialog may stay open as long as you like: the `/review` message is not reported as unconfirmed while OMP waits for your answer.
 - A `review` command of your own in OMP's commands folder replaces OMP's; its dialogs and prompts are then its own.
 

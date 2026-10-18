@@ -28,7 +28,7 @@ const dialog = (chat: FrameLocator, title: string): Locator => chat.locator(".om
 const UNCONFIRMED = /has not confirmed this message|may not have been delivered/;
 
 /** A repository on `feature` that is one commit ahead of `main` and has an uncommitted change. */
-function scratchRepository(state: RunState, name: string): string {
+function scratchRepository(state: RunState, name: string, remote?: string): string {
 	const folder = join(state.base, "ws", name);
 	rmSync(folder, { recursive: true, force: true });
 	mkdirSync(folder, { recursive: true });
@@ -38,6 +38,7 @@ function scratchRepository(state: RunState, name: string): string {
 	writeFileSync(join(folder, "notes.txt"), "one\n");
 	git(folder, "add", ".");
 	git(folder, "commit", "-m", "first");
+	if (remote !== undefined) git(folder, "remote", "add", "origin", remote);
 	git(folder, "switch", "-c", "feature");
 	writeFileSync(join(folder, "notes.txt"), "one\ntwo\n");
 	git(folder, "commit", "-am", "second on feature");
@@ -46,8 +47,8 @@ function scratchRepository(state: RunState, name: string): string {
 }
 
 /** Opens a window on a scratch repository with one Chat session and hands over its chat; closes the window afterwards. */
-async function inReviewChat(desk: Desk, state: RunState, name: string, body: (chat: FrameLocator, page: Page) => Promise<void>): Promise<void> {
-	const folder = scratchRepository(state, name);
+async function inReviewChat(desk: Desk, state: RunState, name: string, body: (chat: FrameLocator, page: Page) => Promise<void>, remote?: string): Promise<void> {
+	const folder = scratchRepository(state, name, remote);
 	const main = await desk.window("alpha-desk");
 	await desk.ready(main);
 	const page: Page = await desk.openWindow(folder, name);
@@ -187,6 +188,61 @@ test("a pull request without the GitHub CLI says so, and so does /review <PR lin
 		await expect(chat.getByText("Mock reply to: after")).toBeVisible({ timeout: 60_000 });
 		expect((await modelPrompts(state.mockUrl)).some(text => text.includes("Failed to fetch PR diff")), "OMP's failure text must not become a prompt").toBe(false);
 	});
+});
+
+/** Whether the GitHub CLI is installed and signed in here: the pull-request tests read a real public pull request through it, read-only. */
+function ghReady(): boolean {
+	try {
+		execFileSync("gh", ["auth", "status"], { stdio: "ignore", windowsHide: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** A merged pull request of a public repository, small and old enough never to change. */
+const PUBLIC_REPOSITORY = "cli/cli";
+const PUBLIC_PR = 1;
+
+test("/review <PR link> reviews that pull request, with the extra words as the focus", async ({ desk, state }) => {
+	test.setTimeout(240_000);
+	test.skip(!ghReady(), "needs the GitHub CLI signed in (gh auth login)");
+	await inReviewChat(desk, state, "review-pr-link", async chat => {
+		await desk.send(chat, `/review https://github.com/${PUBLIC_REPOSITORY}/pull/${PUBLIC_PR} focus on naming`);
+		await expect.poll(async () => (await modelPrompts(state.mockUrl)).some(text => text.includes("## Code Review Request") && text.includes(`PR ${PUBLIC_REPOSITORY}#${PUBLIC_PR}`) && text.includes("focus on naming")), { timeout: 120_000 }).toBe(true);
+		await expect(chat.getByText(/Mock reply to: ## Code Review Request/)).toBeVisible({ timeout: 60_000 });
+		await expect(chat.locator(".omp-user").last()).toContainText(`${PUBLIC_REPOSITORY}#${PUBLIC_PR}`);
+		await expect(chat.getByText(UNCONFIRMED)).toHaveCount(0);
+	});
+});
+
+test("the pull-request mode lists the repository's open pull requests, takes a #number and a picked row", async ({ desk, state }) => {
+	test.setTimeout(300_000);
+	test.skip(!ghReady(), "needs the GitHub CLI signed in (gh auth login)");
+	await inReviewChat(desk, state, "review-pr-mode", async chat => {
+		const before = (await modelPrompts(state.mockUrl)).length;
+		// A number skips the listing: the search row, then #1.
+		let picker = await openReviewMode(desk, chat, "/review");
+		await picker.getByRole("button", { name: /Review a specific PR/ }).click();
+		const list = dialog(chat, `Open pull requests in ${PUBLIC_REPOSITORY}`);
+		await expect(list).toBeVisible({ timeout: 90_000 });
+		await expect(list.locator(".omp-ask-option").nth(1)).toBeVisible();
+		await list.getByRole("button", { name: /Search/ }).click();
+		const search = dialog(chat, "Search open pull requests");
+		await expect(search).toBeVisible({ timeout: 30_000 });
+		await search.locator("textarea").fill(`#${PUBLIC_PR}`);
+		await search.getByRole("button", { name: "Submit" }).click();
+		await expect.poll(async () => (await modelPrompts(state.mockUrl)).slice(before).some(text => text.includes(`PR ${PUBLIC_REPOSITORY}#${PUBLIC_PR}`)), { timeout: 120_000 }).toBe(true);
+		await expect(chat.getByText(/Mock reply to: ## Code Review Request/).last()).toBeVisible({ timeout: 60_000 });
+		// A picked row: the first open pull request.
+		const seen = (await modelPrompts(state.mockUrl)).length;
+		picker = await openReviewMode(desk, chat, "/review");
+		await picker.getByRole("button", { name: /Review a specific PR/ }).click();
+		await expect(list).toBeVisible({ timeout: 90_000 });
+		await list.locator(".omp-ask-option").first().click();
+		await expect.poll(async () => (await modelPrompts(state.mockUrl)).slice(seen).some(text => text.includes("## Code Review Request") && new RegExp(`PR ${PUBLIC_REPOSITORY}#\\d+`).test(text)), { timeout: 120_000 }).toBe(true);
+		await expect(chat.getByText(UNCONFIRMED)).toHaveCount(0);
+	}, `https://github.com/${PUBLIC_REPOSITORY}.git`);
 });
 
 test("a dialog left open for longer than the command deadline and the idle watchdog costs neither the message nor the connection", async ({ desk, state }) => {
