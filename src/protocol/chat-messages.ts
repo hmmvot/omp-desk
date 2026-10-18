@@ -46,6 +46,7 @@ import { parseChatMessage, parseChatEntry, type AssistantMessage, type ChatEntry
 import { MAX_AGENT_IDENTITIES, parseAgentRoster, parseAgentActivity, parseSubagentFrame } from "../chat/agents.ts";
 import { parseLiveAgents } from "../chat/agent-liveness.ts";
 import { parseNativeEventFrame, type MaintenanceState, type RetryState } from "../chat/events.ts";
+import { parseChatGoal, parsePromptError, parseUsageLimit } from "../chat/host-signals.ts";
 import { parseTodoPhases } from "../chat/todos.ts";
 import type { EphemeralItem } from "../chat/projection.ts";
 import { MAX_EPHEMERAL_ITEMS, MAX_QUEUED_ITEMS, MAX_QUEUED_TEXT_LENGTH, MAX_QUEUED_TOTAL_BYTES, MAX_WIDGET_LINES, normalizeQueuedMessages, queuedJsonBytes } from "../chat/model.ts";
@@ -69,6 +70,7 @@ import type {
 	ChatSlashCommand,
 	ChatSnapshotPayload,
 	ChatStatePayload,
+	ChatUiOption,
 	ChatUiRequest,
 	ChatUiResponse,
 } from "../chat/model.ts";
@@ -123,6 +125,7 @@ const MAX_ID_LENGTH = 256;
 const MAX_LABEL_LENGTH = 64;
 const MAX_UI_OPTIONS = 200;
 const MAX_ASK_QUESTIONS = 64;
+const MAX_ASK_PREVIEW = 20_000;
 const MAX_ACTIVE_TOOLS = 256;
 const MAX_PENDING_ROWS = 1_024;
 const MAX_COMMANDS = 500;
@@ -617,6 +620,25 @@ function parseLiteState(value: unknown): ChatLiteState | null {
 			percent: usage.percent as number | null,
 		};
 	}
+	if (value.goal !== undefined) {
+		const goal = parseChatGoal(value.goal);
+		if (goal === null) return null;
+		state.goal = goal;
+	}
+	if (value.fastMode !== undefined) {
+		if (!isRecord(value.fastMode) || typeof value.fastMode.enabled !== "boolean" || typeof value.fastMode.active !== "boolean") return null;
+		state.fastMode = { enabled: value.fastMode.enabled, active: value.fastMode.active };
+	}
+	if (value.slowMode !== undefined) {
+		const slow = value.slowMode;
+		if (!isRecord(slow) || typeof slow.supported !== "boolean" || typeof slow.enabled !== "boolean" || (slow.scope !== undefined && slow.scope !== "session" && slow.scope !== "global")) return null;
+		state.slowMode = { supported: slow.supported, enabled: slow.enabled, ...(slow.scope === undefined ? {} : { scope: slow.scope }) };
+	}
+	if (value.usageLimit !== undefined) {
+		const usageLimit = parseUsageLimit(value.usageLimit);
+		if (usageLimit === null) return null;
+		state.usageLimit = usageLimit;
+	}
 	return state;
 }
 
@@ -681,12 +703,13 @@ export function parseChatUiRequest(value: unknown): ChatUiRequest | null {
 			for (const raw of value.questions) {
 				if (!isRecord(raw) || !isName(raw.id, MAX_ID_LENGTH) || !isText(raw.question, 8_000) || typeof raw.multi !== "boolean") return null;
 				if (!Array.isArray(raw.options) || raw.options.length > MAX_UI_OPTIONS) return null;
-				const options: { label: string; description?: string }[] = [];
+				const options: ChatUiOption[] = [];
 				for (const option of raw.options) {
 					if (!isRecord(option) || !isText(option.label, 2_000)) return null;
 					const description = optionalText(option.description, 4_000);
-					if (description === null) return null;
-					options.push(description === undefined ? { label: option.label } : { label: option.label, description });
+					const preview = optionalText(option.preview, MAX_ASK_PREVIEW);
+					if (description === null || preview === null) return null;
+					options.push({ label: option.label, ...(description === undefined ? {} : { description }), ...(preview === undefined ? {} : { preview }) });
 				}
 				const header = optionalText(raw.header, 500);
 				if (header === null) return null;
@@ -696,7 +719,9 @@ export function parseChatUiRequest(value: unknown): ChatUiRequest | null {
 				if (raw.recommended !== undefined) question.recommended = raw.recommended as number;
 				questions.push(question);
 			}
-			return { id, method: "ask", title, questions };
+			if (value.timeoutMs !== undefined && !(isCount(value.timeoutMs) && value.timeoutMs > 0)) return null;
+			if (value.expiresAt !== undefined && !(isCount(value.expiresAt) && value.timeoutMs !== undefined)) return null;
+			return { id, method: "ask", title, questions, ...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs }), ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }) };
 		}
 		default:
 			return null;
@@ -810,6 +835,11 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 			if (id === null) return null;
 			const frame: ChatEventFrame = { type: "prompt_result", status, agentInvoked: value.agentInvoked, sessionSettled: value.sessionSettled };
 			if (id !== undefined) frame.id = id;
+			if (value.error !== undefined) {
+				const error = parsePromptError(value.error);
+				if (error === null) return null;
+				frame.error = error;
+			}
 			return frame;
 		}
 		case "command_feedback":

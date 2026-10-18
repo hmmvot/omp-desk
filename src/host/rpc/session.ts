@@ -35,6 +35,7 @@ import {
 	dropPendingSavedElsewhere,
 	markPendingUnsaved,
 	normalizeUiRequest,
+	finalizeDroppedStream,
 	reduceChatFrame,
 	samePendingControl,
 	setChatPhase,
@@ -126,6 +127,7 @@ import {
 	type RpcWriteErrorCode,
 	type RpcToolDescriptor,
 } from "../../protocol/rpc.ts";
+import { droppedFrameAffectsState, droppedFrameNotice, droppedFrameType } from "../../protocol/frame-notices.ts";
 import { AGENT_LIVENESS_STATUS_KEY, AgentLivenessGuard } from "../../chat/agent-liveness.ts";
 import { HostToolCalls } from "../tools/host-tool-calls.ts";
 import { HostToolRegistration, toolNamesOf, type HostToolSendOutcome } from "../tools/host-tool-registration.ts";
@@ -2419,11 +2421,40 @@ export class RpcSession {
 			case "extension_ui_request":
 				this.#onUiRequest(frame);
 				return;
+			case "rpc_frame_error":
+				this.#onDroppedFrame(frame);
+				return;
 			default: {
 				const event = toChatEventFrame(frame, this.#timers.now());
 				if (event !== null) this.#applyFrame(event);
 			}
 		}
+	}
+
+	/**
+	 * OMP dropped an event that did not fit its transport limit: a notice names it, the log keeps the line, and a drop
+	 * that leaves the model behind the session is made up from the file (the same read an `agent_end` asks for).
+	 */
+	#onDroppedFrame(frame: Record<string, unknown>): void {
+		const type = droppedFrameType(frame);
+		const notice = droppedFrameNotice(frame);
+		this.#options.log?.warn(`OMP dropped ${type === null ? "an event" : `a "${type}" event`} that did not fit the connection; ${droppedFrameAffectsState(type) ? "reading the session file again" : "nothing to recover"}.`);
+		this.#applyFrame(notice);
+		if (!this.#live || !droppedFrameAffectsState(type)) return;
+		if (type === "message_end" && this.#model.stream !== null) {
+			this.#model = finalizeDroppedStream(this.#model, { now: this.#timers.now() });
+			this.#publish();
+		}
+		// The two frames below carry state only `get_state` holds, and a lost end of a pass would keep the Chat in "compacting" for good.
+		if (type === "auto_compaction_end") {
+			if (this.#model.maintenance?.status === "working") this.#model = { ...this.#model, maintenance: null };
+			this.#publish();
+			void this.#refreshState();
+		} else if (type === "queue_update") {
+			this.#queueRevision += 1;
+			void this.#refreshState();
+		}
+		this.#requestReconcile();
 	}
 
 	#onReady(frame: Record<string, unknown>): void {
@@ -2489,13 +2520,15 @@ export class RpcSession {
 			case "input":
 			case "ask":
 			case "editor": {
-				const request = normalizeUiRequest(frame);
-				if (request === null) {
+				const normalized = normalizeUiRequest(frame);
+				if (normalized === null) {
 					// Never leave OMP waiting on a dialog this extension cannot render.
 					this.#unrenderableDialogs += 1;
 					if (typeof id === "string") void this.#channel.writeLine(encodeUiResponse(id, { cancelled: true })).catch(() => undefined);
 					return;
 				}
+				// The page counts an `ask` timeout down to the moment OMP started it, which is the moment this frame arrived.
+				const request = normalized.method === "ask" && normalized.timeoutMs !== undefined ? { ...normalized, expiresAt: this.#timers.now() + normalized.timeoutMs } : normalized;
 				this.#model = applyChatUiRequest(this.#model, request);
 				this.#restartCommandDeadlines();
 				if (this.#live) this.#emit({ type: "ui-request", epoch: this.epoch, request });

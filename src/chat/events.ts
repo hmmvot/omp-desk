@@ -11,6 +11,11 @@ export interface RetryState {
 	attempt: number; maxAttempts: number; delayMs: number; errorMessage: string;
 	status: "waiting" | "recovered" | "failed";
 }
+
+/** The `source` of the notices that report an extension's failure and an event OMP dropped: the heading the page draws and the key the model groups repeats by. */
+export const EXTENSION_ERROR_NOTICE_SOURCE = "Extension error";
+export const DROPPED_FRAME_NOTICE_SOURCE = "Frame dropped";
+
 export type NativeEventFrame =
 	| { type: "auto_compaction_start"; action: string; reason: string }
 	| { type: "auto_compaction_end"; action: string; result?: unknown; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }

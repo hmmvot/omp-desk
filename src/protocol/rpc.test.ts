@@ -71,12 +71,14 @@ describe("toChatEventFrame", () => {
 	});
 
 	it("maps the prompt result and the slash catalogue, and ignores frames outside the allow-list", () => {
+		// The provider's text and the failure's class are kept (bounded); `retryable` defaults to false.
 		assert.deepEqual(toChatEventFrame({ type: "prompt_result", id: "vsc:1", status: "error", agentInvoked: false, sessionSettled: true, error: { message: "provider text" } }), {
 			type: "prompt_result",
 			id: "vsc:1",
 			status: "error",
 			agentInvoked: false,
 			sessionSettled: true,
+			error: { message: "provider text", retryable: false },
 		});
 		assert.deepEqual(toChatEventFrame({ type: "available_commands_update", commands: [{ name: "compact", description: "d", source: "builtin", input: {} }, 5] }), {
 			type: "available_commands_update",

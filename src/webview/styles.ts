@@ -62,6 +62,13 @@ ${ANSI_STYLES}
 .omp-composer-branch { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; color: var(--omp-muted); font-size: 11px; }
 .omp-composer-branch > .codicon { flex: 0 0 auto; }
 .omp-composer-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Goal, fast mode, slow mode and usage-limit chips beside the pickers: they shrink and cut their text before the pickers do. */
+.omp-signals { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
+.omp-signal { display: inline-flex; align-items: center; gap: 3px; min-width: 0; padding: 0 6px; border: 1px solid var(--omp-border); border-radius: 999px; line-height: 18px; color: var(--omp-muted); font-size: 11px; white-space: nowrap; }
+.omp-signal > .codicon { flex: 0 0 auto; font-size: 12px; }
+.omp-signal-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.omp-signal--warn { color: var(--vscode-foreground); }
+.omp-signal--warn > .codicon { color: var(--vscode-editorWarning-foreground); }
 .omp-composer-toolbar .omp-footer-trigger { height: 28px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); border-radius: var(--omp-radius); padding: 0 4px; background: transparent; color: var(--vscode-foreground); }
 .omp-footer-trigger { font: inherit; cursor: pointer; white-space: nowrap; }
 .omp-footer-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -821,6 +828,9 @@ ${ANSI_STYLES}
 .omp-ask-option-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .omp-ask-option-label { font-family: var(--vscode-font-family); font-size: inherit; overflow-wrap: anywhere; white-space: pre-wrap; }
 .omp-ask-option-desc { color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; white-space: pre-wrap; }
+/* The highlighted option's own Markdown preview, below the list: a quiet inset, scrolling rather than growing the dialog. */
+.omp-ask-preview { margin-top: 6px; padding: 4px 8px; border-left: 2px solid var(--omp-border); max-height: 30vh; overflow: auto; min-width: 0; color: var(--omp-muted); }
+.omp-ask-timer { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; color: var(--omp-muted); font-size: 11px; }
 
 /* Several questions: one tab per question plus Submit; tabs wrap so a narrow panel never scrolls sideways. */
 .omp-ask-dialog { min-width: 0; }
@@ -927,6 +937,7 @@ ${FIND_STYLES}
 .omp-native-message, .omp-native-summary { min-width: 0; overflow-wrap: anywhere; }
 .omp-native-message header { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .omp-native-message h4 { margin: 8px 0; }
+.omp-native-plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .omp-native-disclosure, .omp-native-child { margin: 6px 0; }
 .omp-native-disclosure > summary, .omp-native-child > summary { cursor: pointer; color: var(--omp-muted); }
 .omp-native-code, .omp-native-output, .omp-native-message pre { font-family: var(--omp-mono); font-size: var(--omp-mono-size); white-space: pre; overflow-wrap: normal; overflow-x: auto; overflow-y: hidden; max-width: 100%; }

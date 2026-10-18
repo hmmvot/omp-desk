@@ -8,6 +8,7 @@ import type { FooterMetadataMessage } from "../../shared/footer-metadata";
 import { newControlScope } from "../../protocol/messages";
 import { CLEAR_DEFERRED_SENTENCES } from "../../chat/clear";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
+import { HostSignalChips } from "./HostSignalChips";
 import { quotaUsedPercent } from "../../shared/context-indicator";
 
 const CONTROL_WAIT_TIMEOUT_MS = 35_000;
@@ -156,6 +157,7 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "thinking" || view.action === "set-thinking") ? "loading codicon-modifier-spin" : levelHeld ? "clock" : "chevron-down"}`} />
 					</button>
 					{metadata?.branch && <span className="omp-composer-branch" title={`Git branch of the session working directory: ${metadata.branch}`}><span aria-hidden="true" className="codicon codicon-git-branch" /><span className="omp-composer-branch-name">{metadata.branch}</span></span>}
+					<HostSignalChips state={snapshot.state} />
 				</div>
 				<div className="omp-composer-toolbar-actions">
 					<ContextUsageIndicator tokens={usage?.tokens} contextWindow={contextWindow} percent={usage?.percent}

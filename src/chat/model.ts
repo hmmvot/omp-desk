@@ -18,7 +18,8 @@ import { latestTodoFromEntries, parseTodoPhases, todoPhasesFromEntry, todoPhases
 import { reduceAgentFrame, reduceAgentLiveness, reduceAgentRoster, taskSpawnIdentity, withRegistryRows, type AgentActivity, type AgentIdentities, type AgentIdentity, type RunningAgent, type SpawnLookup, type SubagentFrame } from "./agents.ts";
 import type { LiveAgent } from "./agent-liveness.ts";
 import type { ClearDeferrable } from "./clear.ts";
-import type { MaintenanceState, NativeEventFrame, RetryState } from "./events.ts";
+import { DROPPED_FRAME_NOTICE_SOURCE, EXTENSION_ERROR_NOTICE_SOURCE, type MaintenanceState, type NativeEventFrame, type RetryState } from "./events.ts";
+import { footerGoal, type ChatFastMode, type ChatGoal, type ChatPromptError, type ChatSlowMode, type ChatUsageLimit } from "./host-signals.ts";
 import { positionTranscript, type EphemeralItem, type TranscriptPosition } from "./projection.ts";
 import type { ActiveTool, PendingRow } from "./pending.ts";
 import { transcriptWindow, type TranscriptWindow } from "./transcript-window.ts";
@@ -83,6 +84,11 @@ export interface ChatLiteState {
 	queuedMessages?: ChatQueuedMessages;
 	sessionName?: string;
 	contextUsage?: { tokens: number | null; contextWindow: number | null; percent: number | null };
+	/** The goal of goal mode while it is on or paused (`get_state.goal`, kept current by `goal_updated`); absent otherwise. */
+	goal?: ChatGoal;
+	fastMode?: ChatFastMode;
+	slowMode?: ChatSlowMode;
+	usageLimit?: ChatUsageLimit;
 }
 
 /** A model the user chose that OMP has not been told about yet. */
@@ -132,6 +138,8 @@ export interface ExtensionNotice {
 export interface ChatUiOption {
 	label: string;
 	description?: string;
+	/** An `ask` option's own Markdown preview (a mock-up, a snippet), shown while the option is highlighted. */
+	preview?: string;
 }
 
 /** One question of the native `ask` tool, as the rich RPC dialog (`set_ask_dialog`) carries it. */
@@ -163,7 +171,7 @@ export type ChatUiRequest =
 	| { id: string; method: "confirm"; title: string; message: string }
 	| { id: string; method: "input"; title: string; placeholder?: string }
 	| { id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean }
-	| { id: string; method: "ask"; title: string; questions: readonly ChatAskQuestion[] };
+	| { id: string; method: "ask"; title: string; questions: readonly ChatAskQuestion[]; timeoutMs?: number; expiresAt?: number };
 
 /** What the page sends back for a dialog. An `ask` is answered once, with one answer per question in request order. */
 export type ChatUiResponse =
@@ -187,6 +195,8 @@ export interface ChatPromptResult {
 	status: "completed" | "aborted" | "error";
 	agentInvoked: boolean;
 	sessionSettled: boolean;
+	/** Why the prompt failed, when OMP said (`status: "error"`). */
+	error?: ChatPromptError;
 }
 
 export interface DisplayTurn { id: number; startedAt: number | null; completedAt: number | null; memberKeys: readonly string[]; complete: boolean }
@@ -959,6 +969,11 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 				const previous = model.ephemeral.at(-1);
 				if (previous?.kind === "notice" && isObject(previous.payload) && previous.payload.source === COMPACTION_FAILED_SOURCE) return model;
 			}
+			// An extension that fails on every event, or a flood of one oversized frame type, says it once in a row.
+			if (frame.source === EXTENSION_ERROR_NOTICE_SOURCE || frame.source === DROPPED_FRAME_NOTICE_SOURCE) {
+				const previous = model.ephemeral.at(-1);
+				if (previous?.kind === "notice" && isObject(previous.payload) && previous.payload.source === frame.source && previous.payload.message === frame.message) return model;
+			}
 			return appendEphemeral(model, frame.type, frame, now);
 		case "ttsr_triggered": {
 			const last = positionTranscript(model.entries, model.durableCount, model.pending, model.ephemeral, model.stream && model.streamId && model.streamPosition ? { message: model.stream, messageId: model.streamId, position: model.streamPosition } : null, model.durablePositions).at(-1);
@@ -970,8 +985,16 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		}
 		case "irc_message":
 			return observeIrc(model, frame.message, clock);
-		case "goal_updated":
-			return appendEphemeral({ ...model, goal: frame.goal }, "goal_updated", frame, now);
+		case "goal_updated": {
+			// The footer chip follows the goal the way OMP's status line does (goal mode on, or paused); the notice row always records the change.
+			const goal = footerGoal(frame.goal, frame.state);
+			let state = model.state;
+			if (state !== null) {
+				const { goal: _previous, ...withoutGoal } = state;
+				state = goal === null ? withoutGoal : { ...withoutGoal, goal };
+			}
+			return appendEphemeral({ ...model, goal: frame.goal, state }, "goal_updated", frame, now);
+		}
 		case "config_warnings_changed":
 		case "advisor_cost_changed":
 		case "advisor_yielded":
@@ -1040,6 +1063,7 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 					status: frame.status,
 					agentInvoked: frame.agentInvoked,
 					sessionSettled: frame.sessionSettled,
+					...(frame.error === undefined ? {} : { error: frame.error }),
 				},
 				settled: frame.sessionSettled && !model.asyncPaused ? true : model.settled,
 				working: frame.sessionSettled && !model.asyncPaused ? false : model.working,
@@ -1129,6 +1153,17 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 function statusLineOf(entries: ReadonlyMap<string, string>): string | null {
 	if (entries.size === 0) return null;
 	return clampText([...entries.values()].join(" · "), MAX_STATUS_TEXT);
+}
+
+/**
+ * OMP dropped the `message_end` of the reply being streamed (it did not fit the transport): the last streamed
+ * snapshot becomes the pending row the lost frame would have made, and the file read that follows replaces it with the
+ * saved entry. Without this the half-finished reply would stay in the transcript as the live one.
+ */
+export function finalizeDroppedStream(model: ChatModel, clock: ChatClock = {}): ChatModel {
+	if (model.stream === null || model.streamId === null) return model;
+	// The streamed snapshot's `stopReason` is provisional (`stop` until the real end): the outcome of the turn stays what it was.
+	return { ...reduceMessageEnd(model, model.streamId, model.stream, clock), lastAgentOutcome: model.lastAgentOutcome };
 }
 
 function reduceMessageEnd(model: ChatModel, messageId: string, message: ChatMessage, clock: ChatClock): ChatModel {
@@ -1341,6 +1376,9 @@ export function markPendingUnsaved(model: ChatModel): ChatModel {
 
 const MAX_UI_OPTIONS = 200;
 const MAX_ASK_QUESTIONS = 64;
+const MAX_ASK_PREVIEW = 20_000;
+const MAX_ASK_PREVIEW_TOTAL = 128 * 1024;
+const MAX_ASK_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Bound an `ask` frame. Ids and option labels are answer keys the child compares by identity, so one that
@@ -1351,6 +1389,7 @@ const MAX_ASK_QUESTIONS = 64;
 function normalizeAskRequest(id: string, frame: Record<string, unknown>): ChatUiRequest | null {
 	if (!Array.isArray(frame.questions) || frame.questions.length === 0 || frame.questions.length > MAX_ASK_QUESTIONS) return null;
 	const questions: ChatAskQuestion[] = [];
+	let previewBudget = MAX_ASK_PREVIEW_TOTAL;
 	const seen = new Set<string>();
 	for (const raw of frame.questions) {
 		if (!isObject(raw) || typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > 256 || clampText(raw.id, 256) !== raw.id || typeof raw.question !== "string") return null;
@@ -1362,7 +1401,10 @@ function normalizeAskRequest(id: string, frame: Record<string, unknown>): ChatUi
 			if (!isObject(option) || typeof option.label !== "string" || option.label.length > 2_000 || clampText(option.label, 2_000) !== option.label || labels.has(option.label)) return null;
 			labels.add(option.label);
 			const description = typeof option.description === "string" && option.description.trim().length > 0 ? clampText(option.description.trim(), 2_000) : undefined;
-			options.push(description === undefined ? { label: option.label } : { label: option.label, description });
+			// A preview is the option's own Markdown (a mock-up, a snippet): kept as written, apart from control sequences and size; the whole dialog keeps at most MAX_ASK_PREVIEW_TOTAL of them, the rest show without one.
+			const preview = typeof option.preview === "string" && option.preview.trim().length > 0 && previewBudget > 0 ? clampText(option.preview, Math.min(MAX_ASK_PREVIEW, previewBudget)) : undefined;
+			if (preview !== undefined) previewBudget -= preview.length;
+			options.push({ label: option.label, ...(description === undefined ? {} : { description }), ...(preview === undefined ? {} : { preview }) });
 		}
 		const question: ChatAskQuestion = { id: raw.id, question: clampText(raw.question, 4_000), options, multi: raw.multi === true };
 		if (typeof raw.header === "string" && raw.header.trim().length > 0) question.header = clampText(raw.header.trim(), 200);
@@ -1371,7 +1413,9 @@ function normalizeAskRequest(id: string, frame: Record<string, unknown>): ChatUi
 	}
 	const first = questions[0]!;
 	const title = clampText(questions.length === 1 ? first.question : `${first.question} (+${questions.length - 1} more)`, 500);
-	return { id, method: "ask", title, questions };
+	// OMP answers the recommended option of every question when this runs out, then closes the dialog with a `cancel`.
+	const timeoutMs = typeof frame.timeout === "number" && Number.isSafeInteger(frame.timeout) && frame.timeout > 0 && frame.timeout <= MAX_ASK_TIMEOUT_MS ? frame.timeout : undefined;
+	return { id, method: "ask", title, questions, ...(timeoutMs === undefined ? {} : { timeoutMs }) };
 }
 
 /** Whether `answers` settles `request` the way the child accepts it: one per question in order, known labels once each, one choice for a single-select. */

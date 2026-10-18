@@ -73,7 +73,11 @@ export interface AskOptionRowProps {
 	marker: string;
 	label: string;
 	description?: string;
+	/** The option has a preview, shown below the list while the row is highlighted. */
+	hasPreview?: boolean;
 	disabled?: boolean;
+	/** The pointer entered or the keyboard focused the row. */
+	onHighlight?(): void;
 	onClick(): void;
 }
 
@@ -81,14 +85,17 @@ export interface AskOptionRowProps {
  * One answer row. The label takes the whole row width and wraps inside it; the description sits below it, muted,
  * at the label's indent.
  */
-export function AskOptionRow({ role, checked, marker, label, description, disabled, onClick }: AskOptionRowProps): ReactNode {
+export function AskOptionRow({ role, checked, marker, label, description, hasPreview, disabled, onHighlight, onClick }: AskOptionRowProps): ReactNode {
 	return (
 		<button
 			type="button"
 			className={`omp-ask-option${checked === true ? " omp-ask-option--checked" : ""}`}
 			role={role}
 			aria-checked={role === undefined ? undefined : checked === true}
+			data-has-preview={hasPreview === true ? "true" : undefined}
 			disabled={disabled}
+			onFocus={onHighlight}
+			onMouseEnter={onHighlight}
 			onClick={onClick}
 		>
 			<span className={`omp-ask-option-marker codicon codicon-${marker}`} aria-hidden="true" />
@@ -97,6 +104,34 @@ export function AskOptionRow({ role, checked, marker, label, description, disabl
 				{description !== undefined && description.length > 0 && <span className="omp-ask-option-desc">{description}</span>}
 			</span>
 		</button>
+	);
+}
+
+/** Whole seconds left before OMP answers an `ask` for the user; never more than the timeout itself, so a skewed clock cannot overstate it. */
+export function askSecondsLeft(timeoutMs: number, expiresAt: number | undefined, now: number): number {
+	const left = expiresAt === undefined ? timeoutMs : Math.min(timeoutMs, expiresAt - now);
+	return Math.max(0, Math.ceil(left / 1000));
+}
+
+function formatCountdown(seconds: number): string {
+	if (seconds < 60) return `${seconds} s`;
+	const minutes = Math.floor(seconds / 60);
+	return minutes < 60 ? `${minutes} min ${String(seconds % 60).padStart(2, "0")} s` : `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min`;
+}
+
+/** The countdown to OMP's own timeout: it answers the recommended option of every question and closes the dialog. */
+function AskCountdown({ timeoutMs, expiresAt }: { timeoutMs: number; expiresAt: number | undefined }): ReactNode {
+	const [mountedAt] = useState(() => Date.now());
+	const [now, setNow] = useState(mountedAt);
+	useEffect(() => {
+		const timer = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(timer);
+	}, []);
+	const seconds = askSecondsLeft(timeoutMs, expiresAt ?? mountedAt + timeoutMs, now);
+	return (
+		<div className="omp-ask-timer" role="timer" title="When the time runs out, OMP answers the recommended option of every question">
+			<span className="codicon codicon-clock" aria-hidden="true" /> Answers itself in {formatCountdown(seconds)}
+		</div>
 	);
 }
 
@@ -147,6 +182,8 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 	/** Open "Other" editors by question; the text survives a tab switch. */
 	const [drafts, setDrafts] = useState<readonly (string | null)[]>(() => questions.map(() => null));
 	const [active, setActive] = useState(0);
+	/** The highlighted option of each question, for its preview; `undefined` until the pointer or the keyboard picks one. */
+	const [cursors, setCursors] = useState<readonly (number | undefined)[]>(() => questions.map(() => undefined));
 	const baseId = useId();
 	const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 	const panelRef = useRef<HTMLDivElement | null>(null);
@@ -240,6 +277,10 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 		update(index, { selected: question.multi ? state.selected : [], custom: clear ? undefined : state.custom });
 	};
 
+	const highlight = (at: number, option: number): void => {
+		setCursors(existing => (existing[at] === option ? existing : existing.map((cursor, position) => (position === at ? option : cursor))));
+	};
+
 	const go = (index: number, fromKeyboard: boolean): void => {
 		if (index < 0 || index >= tabCount) return;
 		focusTabNext.current = fromKeyboard;
@@ -276,12 +317,16 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 	const question = questions[index]!;
 	const state = states[index]!;
 	const draft = drafts[index];
+	// The option the pointer or the keyboard is on (the recommended one, else the first, until one is): its preview is the one shown, as in the terminal UI.
+	const previewAt = Math.min(cursors[index] ?? question.recommended ?? 0, Math.max(0, question.options.length - 1));
+	const preview = onReview ? undefined : question.options[previewAt]?.preview;
 	const unanswered = states.filter(existing => !isAnswered(existing)).length;
 	const tabId = (at: number): string => `${baseId}-tab-${at}`;
 	const panelId = `${baseId}-panel`;
 
 	return (
 		<div className="omp-ask-dialog" onKeyDown={onKeyDown}>
+			{request.timeoutMs !== undefined && <AskCountdown timeoutMs={request.timeoutMs} expiresAt={request.expiresAt} />}
 			{hasTabs && (
 				<div className="omp-ask-tabs" role="tablist" aria-label="Questions">
 					{questions.map((tabQuestion, at) => {
@@ -375,6 +420,8 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 									marker={question.multi ? (state.selected.includes(option.label) ? "check" : "blank") : state.selected.includes(option.label) ? "circle-large-filled" : "circle-large-outline"}
 									label={displayLabel(question, at)}
 									description={option.description}
+									hasPreview={option.preview !== undefined}
+									onHighlight={() => highlight(index, at)}
 									onClick={() => pick(index, option.label)}
 								/>
 							))}
@@ -395,6 +442,11 @@ export function AskDialog({ request, onRespond }: { request: AskRequest; onRespo
 								/>
 							)}
 						</div>
+						{preview !== undefined && (
+							<div className="omp-ask-preview" role="group" aria-label={`Preview of ${question.options[previewAt]?.label ?? "the option"}`}>
+								<Markdown text={preview} />
+							</div>
+						)}
 						{hasTabs && (
 							<div className="omp-composer-actions">
 								<button type="button" className="omp-btn omp-btn--primary" onClick={() => go(index + 1, false)}>

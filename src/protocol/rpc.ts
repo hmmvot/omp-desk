@@ -12,6 +12,8 @@
 import { parseChatMessage } from "../chat/messages.ts";
 import { parseSubagentFrame } from "../chat/agents.ts";
 import { parseNativeEventFrame } from "../chat/events.ts";
+import { footerGoal, parseFastMode, parsePromptError, parseSlowMode, parseUsageLimit } from "../chat/host-signals.ts";
+import { droppedFrameNotice, extensionErrorNotice } from "./frame-notices.ts";
 import type { ChatEventFrame, ChatLiteModel, ChatLiteState, ChatSlashCommand } from "../chat/model.ts";
 import { normalizeQueuedMessages } from "../chat/model.ts";
 import type { AssistantMessage } from "../chat/messages.ts";
@@ -449,6 +451,15 @@ export function parseStateData(data: unknown): ParsedState | null {
 				}
 			: {}),
 	};
+	const goalState = isRecord(data.goal) ? data.goal : null;
+	const goal = footerGoal(goalState?.goal, goalState);
+	const fastMode = parseFastMode(data);
+	const slowMode = parseSlowMode(data);
+	const usageLimit = parseUsageLimit(data.usageLimit);
+	if (goal !== null) lite.goal = goal;
+	if (fastMode !== null) lite.fastMode = fastMode;
+	if (slowMode !== null) lite.slowMode = slowMode;
+	if (usageLimit !== null) lite.usageLimit = usageLimit;
 	return {
 		lite,
 		sessionFile: str(data.sessionFile) ?? null,
@@ -542,15 +553,22 @@ export function toChatEventFrame(frame: Record<string, unknown>, now = 0): ChatE
 				result: frame.result,
 				...(typeof frame.isError === "boolean" ? { isError: frame.isError } : {}),
 			};
-		case "prompt_result":
+		case "prompt_result": {
 			if (!isPromptResultFrame(frame)) return null;
+			const error = frame.status === "error" ? parsePromptError(frame.error) : null;
 			return {
 				type: "prompt_result",
 				...(typeof frame.id === "string" ? { id: frame.id } : {}),
 				status: frame.status,
 				agentInvoked: frame.agentInvoked === true,
 				sessionSettled: frame.sessionSettled === true,
+				...(error === null ? {} : { error }),
 			};
+		}
+		case "extension_error":
+			return extensionErrorNotice(frame);
+		case "rpc_frame_error":
+			return droppedFrameNotice(frame);
 		case "thinking_level_changed":
 			return { type: "thinking_level_changed", thinkingLevel: typeof frame.thinkingLevel === "string" ? frame.thinkingLevel : null };
 		case "config_update":

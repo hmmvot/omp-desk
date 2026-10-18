@@ -2,6 +2,7 @@ import { useId, useMemo } from "react";
 import type { ChatEntry, ChatMessage, CustomMessage, ExecutionMessage, SummaryMessage } from "../../chat/messages.ts";
 import { advisorNotes, entryMessage, userSkill, type AdvisorNote } from "../../chat/messages.ts";
 import { isRecord } from "../../shared/guards.ts";
+import { DROPPED_FRAME_NOTICE_SOURCE, EXTENSION_ERROR_NOTICE_SOURCE } from "../../chat/events.ts";
 import { TODO_STATUS_WORD } from "../../chat/hud-summary.ts";
 import { fmtDuration, fmtTokens } from "../../shared/format.ts";
 import { splitUserText } from "../lib/file-block-rows.ts";
@@ -73,7 +74,12 @@ function CustomMessageView({ message, irc }: { message: CustomMessage; irc?: Irc
 				const rules = recordRows(data, "rules");
 				return <section className="omp-native-message omp-warning"><header><strong>TTSR triggered</strong> · {rules.length} rules</header><ul>{rules.map((rule, index) => <li key={index}><strong>{stringField(rule, "name") ?? stringField(rule, "id") ?? "Rule"}</strong>{stringField(rule, "description") && <p>{stringField(rule, "description")}</p>}</li>)}</ul></section>;
 			}
-			case "notice": return <section className={`omp-native-message omp-${data.level ?? "info"}`}><header><strong>{stringField(data, "source") ?? "Notice"}</strong></header><Markdown text={stringField(data, "message") ?? ""} /></section>;
+			case "notice": {
+				const source = stringField(data, "source");
+				// Text an extension or OMP's transport chose: shown as written (a path with `_` is not emphasis), never as Markdown.
+				if (source === EXTENSION_ERROR_NOTICE_SOURCE || source === DROPPED_FRAME_NOTICE_SOURCE) return <section className={`omp-native-message omp-${data.level ?? "error"}`} role="status" data-notice-source={source}><header><strong>{source}</strong></header><p className="omp-native-plain">{stringField(data, "message") ?? ""}</p></section>;
+				return <section className={`omp-native-message omp-${data.level ?? "info"}`}><header><strong>{source ?? "Notice"}</strong></header><Markdown text={stringField(data, "message") ?? ""} /></section>;
+			}
 			case "retry": return <section className={`omp-native-event ${data.status === "failed" ? "omp-error" : "omp-native-muted"}`}><strong>Retry {numberField(data, "attempt")}/{numberField(data, "maxAttempts")} · {data.status === "waiting" ? `waiting ${fmtDuration(numberField(data, "delayMs") ?? 0)}` : stringField(data, "status")}</strong>{stringField(data, "errorMessage") && <NativeDisclosure title="Retry reason"><Markdown text={stringField(data, "errorMessage")!} /></NativeDisclosure>}</section>;
 			case "goal_updated": {
 				const goal = isRecord(data.goal) ? data.goal : null;
