@@ -16,7 +16,7 @@ import type { ChatEntry } from "../chat/messages.ts";
 import { CLEAR_MARKER_TYPE } from "../chat/clear.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview } from "../chat/rewind.ts";
 import { composeFileBlocks, fileMarker, splitFileBlocks } from "../shared/file-blocks.ts";
-import { REWIND_ARGUMENTS_SENTENCE } from "../protocol/rpc.ts";
+import { REWIND_ARGUMENTS_SENTENCE, parseCommands } from "../protocol/rpc.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
 	"C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -5473,6 +5473,46 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			} finally {
 				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
 			}
+		});
+
+		await t.test("the catalogue a real OMP 18.11.1 session advertises (86 skills as `skill:<name>`, nested names, builtins with aliases) draws every skill and command as a chip", async () => {
+			const wire: unknown[] = JSON.parse(readFileSync(new URL("./test-support/available-commands-18.11.1.json", import.meta.url), "utf8"));
+			const real = JSON.stringify(parseCommands(wire));
+			await reset("chips-real-catalogue");
+			// The draft was restored before the session listed its commands: no chip until the catalogue arrives.
+			await ui.evaluate("window.composer.focus()");
+			await setDraft("/skill:backlog first look");
+			await settleFrames();
+			assert.deepEqual(await commandChips(), []);
+			await ui.evaluate(`window.ui.push({commands:${real}})`);
+			await waitChips(1);
+			assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [["skill", "/skill:backlog "]]);
+			for (const [draft, kind, text] of [
+				["/skill:agents/tracker-cli check it", "skill", "/skill:agents/tracker-cli "],
+				["/skill:brainstorm", "skill", ""],
+				["/compact keep files", "command", "/compact "],
+				["/review focus", "command", "/review "],
+				["/security scan", "command", "/security "],
+				["/model gpt", "command", "/model "],
+				["read it with /skill:create-plan now", "skill", "/skill:create-plan "],
+			] as const) {
+				await setDraft(draft);
+				await waitDraft(`window.composer.value()===${JSON.stringify(draft)}`);
+				await settleFrames();
+				assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), text === "" ? [] : [[kind, text]], draft);
+			}
+			// Picked from the list, typed by hand: the same chip.
+			await setDraft("");
+			await ui.call("Input.insertText", { text: "/skill:back" });
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await press("Tab", "Tab", 9);
+			await waitDraft("window.composer.value()==='/skill:backlog '");
+			await waitChips(1);
+			await setDraft("");
+			await ui.call("Input.insertText", { text: "/skill:brainstorm " });
+			await waitChips(1);
+			assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [["skill", "/skill:brainstorm "]]);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("the chip follows the theme in both colour schemes", async () => {
