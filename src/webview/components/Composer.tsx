@@ -69,7 +69,7 @@ import { activeDocuments, documentChars, documentExtension, documentIcon, docume
 import { readLinkedFiles } from "../lib/read-linked";
 import { AskDialog, AskOptionRow } from "./AskDialog";
 import { DraftEditor } from "./DraftEditor";
-import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
+import type { ChatModel, ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
 import { findQuoteRuns, isQuoteLineAt } from "../lib/quote-lines";
@@ -163,6 +163,16 @@ type Accepted =
 
 /** Why a file cannot be attached or read where the extension host's own connection is missing (the fallback route, decision 23). */
 const NEEDS_HOST = "Attaching files needs the editor's connection to the extension host; reload the window.";
+
+/**
+ * Whether the session has already answered the send that `before` was taken for: a turn began or ended, the command said what it
+ * did, or its `prompt_result` arrived. These are the facts that reset the composer's progress latch, so a latch set only after
+ * them would never be reset. A command that asks first (`/review` opens a picker inside its `prompt`, which OMP acknowledges only
+ * when the command returns) has its result in before its acknowledgement reaches the page.
+ */
+function outcomeSince(now: ChatModel, before: ChatModel): boolean {
+	return now.working !== before.working || now.phase !== before.phase || now.commandFeedback !== before.commandFeedback || now.lastPromptResult !== before.lastPromptResult;
+}
 
 /** Whether `text` starts with the `/skill:<name>` of an installed skill: a skill invocation, which may carry files. */
 function startsInstalledSkill(commands: readonly { readonly name: string; readonly source?: string }[], text: string): boolean {
@@ -1065,6 +1075,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			// The model's own `working`, read now: the delivery follows the turn the
 			// session is in at this instant, not the one this render saw.
 			const running = client.getSnapshot().working;
+			const before = client.getSnapshot();
 			pendingOriginalRef.current = { text, images: wire };
 			onSubmitted?.();
 			const result = await (!running
@@ -1090,7 +1101,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			setSendError(null);
 			const unsaved = linked.filter(file => texts.get(file.number)?.dirty === true).map(file => `${file.name} has unsaved changes in the editor; the saved version was sent.`);
 			setSendNotice(unsaved.length > 0 ? unsaved.join(" ") : null);
-			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null) setSubmitted(true);
+			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null && !outcomeSince(client.getSnapshot(), before)) setSubmitted(true);
 			// Admission may finish after typing, attaching, or restoring another draft. Never erase that work.
 			if (draftRevisionRef.current !== revision) return;
 			historyRef.current = null;
@@ -1152,10 +1163,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		void (async () => {
 			onSubmitted?.();
 			const running = client.getSnapshot().working;
+			const before = client.getSnapshot();
 			const result = await (running ? client.sendSteer(plan.text) : client.sendPrompt(plan.text));
 			if (!mountedRef.current) return;
 			if (!result.ok) { setSendError(result.reason); return; }
-			if (!running && result.explained !== true && nativeSettingsCommand(plan.text) === null) setSubmitted(true);
+			if (!running && result.explained !== true && nativeSettingsCommand(plan.text) === null && !outcomeSince(client.getSnapshot(), before)) setSubmitted(true);
 		})();
 	}, [canPrompt, client, onRewind, onSubmitted, request, writeDraft]);
 

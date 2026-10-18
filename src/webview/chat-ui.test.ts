@@ -1872,6 +1872,28 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
 		});
 
+		await t.test("a command that asks and then ends without a turn leaves no working animation, whichever of its prompt result and its send acknowledgement the page gets first", async () => {
+			const frames = "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))";
+			for (const [name, resultFirst] of [["review-end-result-first", true], ["review-end-ack-first", false]] as const) {
+				await reset(name);
+				await ui.evaluate("window.ui.admission(false);window.composer.focus()");
+				await ui.call("Input.insertText", { text: "/review" });
+				await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+				await ui.wait("window.ui.sends().length===1");
+				await ui.evaluate("window.ui.push({uiRequests:[{id:'rv-end',method:'select',title:'Review Mode',options:[{label:'1. Review against a base branch (PR Style)'},{label:'2. Review uncommitted changes'}]}]})");
+				await ui.wait("document.querySelectorAll('.omp-ask-options button').length===2");
+				const acknowledge = "window.ui.sendReply(undefined,'accepted')";
+				const finish = "window.ui.push({uiRequests:[]});window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:{type:'prompt_result',id:'vsc:'+window.ui.sends().at(-1).requestId,status:'completed',agentInvoked:false,sessionSettled:true}})";
+				await ui.evaluate(resultFirst ? finish : acknowledge);
+				await ui.evaluate(frames);
+				await ui.evaluate(resultFirst ? acknowledge : finish);
+				await ui.wait("document.querySelector('.omp-ask')===null");
+				await ui.evaluate(frames);
+				assert.equal(await ui.evaluate("document.querySelector('.omp-turn-progress')!==null"), false, `${name}: the progress bar stays on although no turn runs`);
+			}
+			await ui.evaluate("window.ui.admission(true)");
+		});
+
 		await t.test("transcript displays native content but never internal entries, fields or role echoes", async () => {
 			await reset("native-visibility", "detailed", true);
 			await ui.evaluate(`(()=>{

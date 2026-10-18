@@ -125,13 +125,20 @@ test("extra instructions after /review are kept and the menu leaves out the cust
 	});
 });
 
-test("cancelling the Review Mode dialog starts no turn and leaves the Chat usable", async ({ desk, state }) => {
+test("cancelling the Review Mode dialog starts no turn, returns the composer to idle at once and leaves the Chat usable", async ({ desk, state }) => {
 	test.setTimeout(240_000);
 	await inReviewChat(desk, state, "review-cancel", async chat => {
 		const before = (await modelPrompts(state.mockUrl)).length;
 		const picker = await openReviewMode(desk, chat, "/review");
-		await chat.getByRole("button", { name: "Cancel" }).click();
-		await expect(picker).toHaveCount(0);
+		// The progress bar is the composer's "a turn is running" animation: it must be gone a moment after the cancel, every time.
+		const progress = chat.locator(".omp-turn-progress");
+		for (let round = 1; round <= 3; round++) {
+			await chat.getByRole("button", { name: "Cancel" }).click();
+			await expect(picker).toHaveCount(0);
+			await expect(progress, `round ${round}: the working animation stays after the picker is cancelled`).toHaveCount(0, { timeout: 5_000 });
+			await expect(chat.getByRole("button", { name: "Stop the running turn" })).toHaveCount(0);
+			if (round < 3) await openReviewMode(desk, chat, "/review");
+		}
 		await desk.send(chat, "still here");
 		await expect(chat.getByText("Mock reply to: still here")).toBeVisible({ timeout: 60_000 });
 		const prompts = (await modelPrompts(state.mockUrl)).slice(before);
