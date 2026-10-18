@@ -1093,7 +1093,7 @@ describe("TerminalPipeline redraw after restore", () => {
 	});
 });
 
-describe("TerminalPipeline host paste (Add Selection/File to Session)", () => {
+describe("TerminalPipeline host paste (Add File to Session)", () => {
 	const REFERENCE = "@src/a.ts [lines 12-30]";
 	const PASTE = `\u001b[200~ ${REFERENCE} \u001b[201~`;
 

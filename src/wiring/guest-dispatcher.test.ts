@@ -229,6 +229,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		acceptTerminalCopy: async (tab, reply) => { terminalCopies.push({ tab, reply }); },
 		recents,
 		controlRequest: async (...args) => { controlRequests.push(args); },
+		openKeyConflict: async command => { calls.push(`openKeyConflict:${command}`); },
 		log: recordingLogger(lines),
 		info: message => { infos.push(message); },
 		warn: message => { warnings.push(message); },
@@ -978,6 +979,18 @@ describe("the Go to File from a chat page", () => {
 		await w.dispatcher.searchFileFromChat();
 		assert.deepEqual(shell.posted, []);
 		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen"], ["workbench.action.quickOpen"]]);
+	});
+});
+
+describe("omp:open-key-conflict", () => {
+	it("hands the empty state's command to the window, from the panel that serves the slot only, and refuses a command the empty state does not show", async () => {
+		const w = world();
+		const live = w.editor();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-key-conflict", command: "ompDesk.toggleThinking" });
+		assert.deepEqual(w.calls.filter(call => call.startsWith("openKeyConflict")), ["openKeyConflict:ompDesk.toggleThinking"]);
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-key-conflict", command: "workbench.action.quit" });
+		await w.dispatcher.handleMessage(index, SLOT, {} as never, { type: "omp:open-key-conflict", command: "ompDesk.stopTurn" });
+		assert.equal(w.calls.filter(call => call.startsWith("openKeyConflict")).length, 1);
 	});
 });
 

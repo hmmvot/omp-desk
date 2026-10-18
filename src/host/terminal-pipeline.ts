@@ -639,7 +639,7 @@ export class TerminalPipeline {
 	/**
 	 * Paste `text` into the program as one bracketed paste, without Enter.
 	 *
-	 * Used by "OMP Desk: Add Selection to Session" and "OMP Desk: Add File to Session" for a native
+	 * Used by "OMP Desk: Add File to Session" for a native
 	 * editor. It writes as the visible input owner, exactly like a paste in the pane, and
 	 * only while the program itself has enabled bracketed paste: the native TUI does so
 	 * for its prompt input and resets it on exit, so a shell prompt or a program that is

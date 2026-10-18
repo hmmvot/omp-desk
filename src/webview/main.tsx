@@ -15,6 +15,7 @@ import { injectGuestStyles } from "./styles";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachCodeTheme } from "./lib/code-theme-store";
+import { attachKeyHints } from "./lib/key-hints-store";
 import { attachInsertedText } from "./lib/insert-text";
 import { restoreFocusTakenByHost } from "./lib/frame-focus";
 import { installFocusTrace } from "./lib/focus-trace";
@@ -34,6 +35,7 @@ function boot(): void {
 	client.attach(guestTransport);
 	attachSessionView(guestTransport);
 	attachCodeTheme(guestTransport);
+	attachKeyHints(guestTransport);
 	// `omp:insert-text` (an editor reference) is attached here, not in a React effect: the host posts it as
 	// soon as it has seen the announcement below, which can be before the page has mounted.
 	attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);

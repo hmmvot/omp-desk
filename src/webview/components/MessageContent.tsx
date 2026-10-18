@@ -32,7 +32,7 @@ function UserText({ text, quotable, emphasis }: { text: string; quotable: boolea
 	return <><Markdown text={prose} quotable={quotable} emphasis={emphasis} /><FileBlockRows blocks={blocks} /></>;
 }
 
-/** A thinking block: closed unless the transcript's thinking toggle (`Ctrl+T`) shows thinking. */
+/** A thinking block: closed unless the transcript's thinking toggle (`Ctrl+Alt+T`) shows thinking. */
 function ThinkingDisclosure({ children }: { children: ReactNode }) {
 	const toggles = useSyncExternalStore(subscribeTranscriptToggles, getTranscriptToggles);
 	return <NativeDisclosure title="Thinking" className="omp-thinking" initiallyOpen={toggles.thinking} forceOpen={{ open: toggles.thinking, generation: toggles.generation }}><AssistantReplyContext.Provider value={false}>{children}</AssistantReplyContext.Provider></NativeDisclosure>;

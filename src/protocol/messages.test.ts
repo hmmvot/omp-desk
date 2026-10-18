@@ -213,6 +213,16 @@ describe("an attach: omp:attach-uris, omp:pick-files and omp:attached-files", ()
 		assert.equal(parseGuestWebviewMessage({ type: "omp:pick-files" }), null);
 	});
 
+	it("accepts a request to open Keyboard Shortcuts for one command of the empty state and nothing else", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:open-key-conflict", command: "ompDesk.toggleThinking" }), { type: "omp:open-key-conflict", command: "ompDesk.toggleThinking" });
+		for (const message of [
+			{ type: "omp:open-key-conflict", command: "workbench.action.quit" },
+			{ type: "omp:open-key-conflict", command: "ompDesk.toggleThinking", query: "alt+t" },
+			{ type: "omp:open-key-conflict" },
+			{ type: "omp:open-key-conflict", command: 7 },
+		]) assert.equal(parseGuestWebviewMessage(message), null, JSON.stringify(message));
+	});
+
 	it("accepts the host's answer as images of canonical base64 and documents that carry a size and a reference, and no text", () => {
 		const answer = { type: "omp:attached-files", requestId: 4, items: [image, document], refusals: ["plan.pdf is not a text file (its bytes are not UTF-8)."] };
 		assert.deepEqual(parseGuestHostMessage(answer), answer);

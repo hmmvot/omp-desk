@@ -1,6 +1,7 @@
 /**
- * Text the extension host adds to the composer draft: `omp:insert-text` (the `@path` references of "OMP Desk: Add Selection/File
- * to Session") and `omp:insert-quote` (the quotes of "OMP Desk: Quote Selection to Session", handed to the quote sink).
+ * Text the extension host adds to the composer draft: `omp:insert-text` (the `@path` references of "OMP Desk: Add File to Session",
+ * and the `path:N` line reference of "OMP Desk: Quote Selection to Session" with nothing selected) and `omp:insert-quote` (the quotes
+ * of "OMP Desk: Quote Selection to Session", handed to the quote sink).
  *
  * Two small pieces live here so they can be tested without a DOM:
  *

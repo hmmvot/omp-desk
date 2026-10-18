@@ -169,6 +169,31 @@ describe("parseChatHostMessage", () => {
 		assert.equal(parseChatHostMessage({ ...preferences, toolsMode: "everything" }), null);
 	});
 
+	it("carries the effective key of each empty-state command with its conflicts, drops undeclared fields, and refuses the rest whole", () => {
+		const keys = { type: "omp:chat-keys", keys: [
+			{ command: "ompDesk.toggleThinking", key: "Alt+T", conflicts: [{ by: "IntelliJ IDEA Keymap", command: "git.sync" }], more: 2 },
+			{ command: "ompDesk.stopTurn", key: null, conflicts: [], more: 0 },
+		] };
+		assert.deepEqual(parseChatHostMessage({ ...keys, extra: 1 }), keys);
+		assert.deepEqual(parseChatHostMessage({ type: "omp:chat-keys", keys: [] }), { type: "omp:chat-keys", keys: [] });
+		const [first] = keys.keys;
+		const bad = (patch: Record<string, unknown>) => ({ ...keys, keys: [{ ...first, ...patch }] });
+		for (const message of [
+			{ ...keys, keys: "Alt+T" },
+			bad({ command: "workbench.action.quit" }),
+			bad({ key: 7 }),
+			bad({ key: "Alt+\nT" }),
+			bad({ key: "" }),
+			bad({ conflicts: [{ by: "x", command: "y" }, { by: "x", command: "y" }, { by: "x", command: "y" }, { by: "x", command: "y" }] }),
+			bad({ conflicts: [{ by: 3, command: "y" }] }),
+			bad({ conflicts: [{ by: "x", command: "y\u001b" }] }),
+			bad({ more: -1 }),
+			{ ...keys, keys: [first, first] },
+		]) {
+			assert.equal(parseChatHostMessage(message), null, JSON.stringify(message).slice(0, 100));
+		}
+	});
+
 	it("requires a target id to withdraw a dialog", () => {
 		assert.equal(parseChatHostMessage({ type: "omp:chat-ui-cancel", epoch: EPOCH }), null);
 	});

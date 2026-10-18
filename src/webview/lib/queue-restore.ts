@@ -21,7 +21,7 @@ export interface RestoredImage {
 	data: string;
 }
 
-/** A file a restored message names by reference rather than by content: the host re-validated its path (Ctrl+R's other conversations). */
+/** A file a restored message names by reference rather than by content: the host re-validated its path (the history search's other conversations). */
 export interface RestoredLinked {
 	number: number;
 	name: string;

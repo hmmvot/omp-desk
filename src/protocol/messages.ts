@@ -38,6 +38,7 @@ import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
 import { MAX_QUOTE_VERSION_LENGTH, QUOTE_VERSION_SEPARATOR } from "../shared/quote-location.ts";
+import { isEmptyStateKeyCommand, type EmptyStateKeyCommand } from "../shared/key-hints.ts";
 import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
@@ -1174,6 +1175,16 @@ export type GuestChatCommand = "compact" | "shake" | "cycle-model" | "cycle-thin
 
 const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", shake: "shake", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share", "provider-login": "provider-login", "provider-logout": "provider-logout", "keyboard-shortcuts": "keyboard-shortcuts", "source-control": "source-control", "tools-view": "tools-view" };
 
+/**
+ * The page asks the host to open Keyboard Shortcuts filtered to the key of one empty-state command that has a conflict marker. The
+ * page names only the command; the host finds its current key in its own list (`omp:chat-keys`) and opens nothing for an id that
+ * is not in it, so the page cannot choose the query.
+ */
+export interface GuestOpenKeyConflictMessage {
+	type: "omp:open-key-conflict";
+	command: EmptyStateKeyCommand;
+}
+
 /** `StopReason` of the newest assistant reply, as the wire package defines it. */
 export type GuestTurnOutcome = "stop" | "length" | "toolUse" | "error" | "aborted";
 
@@ -1208,7 +1219,8 @@ export type GuestWebviewMessage =
 	| GuestOpenMermaidMessage
 	| GuestOpenArtifactMessage
 	| GuestSelectionReplyMessage
-	| GuestChatCommandMessage;
+	| GuestChatCommandMessage
+	| GuestOpenKeyConflictMessage;
 
 
 /**
@@ -1676,6 +1688,10 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 		case "omp:open-recent": {
 			if (!isRequestId(value.requestId) || !isRequestId(value.index) || value.index >= RECENT_SESSIONS_LIMIT) return null;
 			return { type: "omp:open-recent", requestId: value.requestId, index: value.index };
+		}
+		case "omp:open-key-conflict": {
+			if (Object.keys(value).length !== 2 || !isEmptyStateKeyCommand(value.command)) return null;
+			return { type: "omp:open-key-conflict", command: value.command };
 		}
 		case "omp:control-request": {
 			// Neither field authorizes anything: the scope only tells a later report

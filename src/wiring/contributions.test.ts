@@ -441,6 +441,20 @@ describe("commands", () => {
 		assert.equal(declared.get("ompDesk.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
 
+	it("bind the empty state's keys the way the guide and the page's defaults say: Ctrl+Alt+T, Ctrl+Alt+Y and Ctrl+/ inside a Chat only, nothing on Ctrl+T or Ctrl+R, no Add Selection to Session", () => {
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
+		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key).map(binding => [binding.command, binding.when]);
+		assert.deepEqual(bound("ctrl+alt+t"), [["ompDesk.toggleThinking", chatOnly]]);
+		assert.deepEqual(bound("ctrl+alt+y"), [["ompDesk.searchPromptHistory", chatOnly]]);
+		assert.deepEqual(bound("ctrl+/"), [["ompDesk.showChatKeyboardShortcuts", chatOnly]]);
+		assert.deepEqual(bound("ctrl+t"), [], "Ctrl+T is the IntelliJ IDEA Keymap's Git sync");
+		assert.deepEqual(bound("ctrl+r"), [], "Ctrl+R is the IntelliJ IDEA Keymap's Replace");
+		assert.deepEqual(bound("alt+shift+k"), []);
+		assert.equal(declared.has("ompDesk.sendSelection"), false);
+		assert.deepEqual(menus.filter(({ entry }) => entry.command === "ompDesk.sendSelection"), []);
+		assert.equal(declared.has("ompDesk.sendFile"), true, "Add File to Session stays");
+	});
+
 	it("bind Ctrl+F (Cmd+F on macOS) to Find in Chat inside a Chat only, under the one condition, with no other binding on the key, and register the command to post the action", () => {
 		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
 		assert.deepEqual(contributes.keybindings.filter(binding => binding.key === "ctrl+f").map(binding => [binding.command, binding.when]), [["ompDesk.findInChat", chatOnly]],
@@ -452,16 +466,17 @@ describe("commands", () => {
 		assert.match(source, /registerDeskCommand\("ompDesk\.findInChat", \(\) => findInChat\(\)\)/);
 	});
 
-	it("declare Quote Selection with Alt+Q inside a Chat, and Quote Selection to Session with Alt+Q in a text editor with a selection, no third binding on the key, and a transcript context menu item gated by the key the page sets", () => {
+	it("declare Quote Selection with Alt+Q inside a Chat, and Quote Selection to Session with Alt+Q in a text editor with or without a selection, no third binding on the key, and a transcript context menu item gated by the key the page sets", () => {
 		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
 		const bound = contributes.keybindings.filter(binding => binding.key === "alt+q");
 		assert.deepEqual(bound.map(binding => [binding.command, binding.when]), [
 			["ompDesk.quoteChatSelection", chatOnly],
-			["ompDesk.quoteEditorSelection", "editorTextFocus && editorHasSelection"],
+			["ompDesk.quoteEditorSelection", "editorTextFocus"],
 		]);
 		assert.equal(declared.get("ompDesk.quoteEditorSelection")?.title, "Quote Selection to Session");
+		assert.equal((declared.get("ompDesk.quoteEditorSelection") as { enablement?: string } | undefined)?.enablement, undefined, "the command also works with nothing selected");
 		const editorEntries = menus.filter(({ menu, entry }) => menu === "editor/context" && entry.command === "ompDesk.quoteEditorSelection");
-		assert.deepEqual(editorEntries.map(({ entry }) => entry.when), ["editorHasSelection"]);
+		assert.deepEqual(editorEntries.map(({ entry }) => entry.when), ["editorTextFocus"]);
 		assert.equal(declared.get("ompDesk.quoteChatSelection")?.title, "Quote Selection");
 		const entries = menus.filter(({ menu, entry }) => menu === "webview/context" && entry.command === "ompDesk.quoteChatSelection");
 		assert.equal(entries.length, 1);
@@ -699,9 +714,9 @@ describe("the namespace (ADR-0068)", () => {
 		assert.ok(legacy.every(id => LEGACY_COMMAND_IDS.includes(id)));
 	});
 
-	it("keeps one alias for each of the 92 commands that existed before the rename (0.3.1's 87 plus five added on the way to 0.4.0), none of them contributed, each aimed at a contributed command", () => {
-		assert.equal(LEGACY_COMMAND_IDS.length, 92);
-		assert.equal(new Set(LEGACY_COMMAND_IDS).size, 92);
+	it("keeps one alias for each of the 91 commands that existed before the rename and still exist (0.3.1's 87 plus five added on the way to 0.4.0, less the removed Add Selection to Session), none of them contributed, each aimed at a contributed command", () => {
+		assert.equal(LEGACY_COMMAND_IDS.length, 91);
+		assert.equal(new Set(LEGACY_COMMAND_IDS).size, 91);
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));

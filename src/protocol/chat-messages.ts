@@ -24,6 +24,7 @@
  * | `omp:chat-subagent-chunk` | one chunk of a subagent transcript the page asked for |
  * | `omp:chat-display-preferences` | tool-call detail and accessibility settings |
  * | `omp:chat-code-theme` | the token rules of the colour themes that may be active (the page picks by its theme id), for fenced code; none means plain code |
+ * | `omp:chat-keys` | the key each Desk command of the empty state effectively has (the user's own rebinding or removal applied) and the other commands that may take it; epoch-free, window-wide |
  * | `omp:chat-operation` | the action the user asked for on this tab that is still being processed (kind, step id, elapsed time, request id), or none, with the end of the last one; epoch-free presentation only |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
@@ -75,6 +76,7 @@ import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
+import { isEmptyStateKeyCommand, MAX_KEY_CONFLICTS, MAX_KEY_HINTS, MAX_KEY_LENGTH, MAX_KEY_SOURCE_LENGTH, type ChatKeyConflict, type ChatKeyHint } from "../shared/key-hints.ts";
 
 // Bounds
 
@@ -227,6 +229,16 @@ export interface ChatCodeThemeMessage {
 	themes: CodeTheme[];
 }
 
+/**
+ * The effective keys of the Desk commands the empty state shows, with the commands that may take them. Not bound to a conversation
+ * epoch: the keys belong to the window and its profile, so the host sends them to a page when the page announces itself and again
+ * whenever the user's keybindings or the installed extensions change them. Nothing is sent before the host has read them.
+ */
+export interface ChatKeysMessage {
+	type: "omp:chat-keys";
+	keys: ChatKeyHint[];
+}
+
 /** One pending user message, named by the queue it waits in and its exact queue-chip text (what OMP matches on). */
 export interface ChatQueuedRef {
 	queue: "steering" | "followUp";
@@ -336,6 +348,7 @@ export interface ChatOperationMessage {
 export type ChatHostMessage =
 	| ChatDisplayPreferencesMessage
 	| ChatCodeThemeMessage
+	| ChatKeysMessage
 	| ChatOperationMessage
 	| ChatStateMessage
 	| ChatSnapshotMessage
@@ -463,6 +476,9 @@ function isText(value: unknown, max: number): value is string {
 function isName(value: unknown, max: number): value is string {
 	return isText(value, max) && value.length > 0;
 }
+
+/** Any C0 control character or DEL: never part of a key, an extension's name or a command id. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 function optionalText(value: unknown, max: number): string | undefined | null {
 	if (value === undefined) return undefined;
@@ -1095,6 +1111,25 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 		case "omp:chat-code-theme": {
 			const themes = parseCodeThemes(value.themes);
 			return themes === null ? null : { type: value.type, themes };
+		}
+		case "omp:chat-keys": {
+			if (!Array.isArray(value.keys) || value.keys.length > MAX_KEY_HINTS) return null;
+			const keys: ChatKeyHint[] = [];
+			const seen = new Set<string>();
+			for (const raw of value.keys) {
+				if (!isRecord(raw) || !isEmptyStateKeyCommand(raw.command) || seen.has(raw.command)) return null;
+				if (!(raw.key === null || (isName(raw.key, MAX_KEY_LENGTH) && !CONTROL_CHARACTER.test(raw.key)))) return null;
+				if (!Array.isArray(raw.conflicts) || raw.conflicts.length > MAX_KEY_CONFLICTS || !isCount(raw.more) || raw.more > 10_000) return null;
+				const conflicts: ChatKeyConflict[] = [];
+				for (const conflict of raw.conflicts) {
+					if (!isRecord(conflict) || !isName(conflict.by, MAX_KEY_SOURCE_LENGTH) || !isName(conflict.command, MAX_KEY_SOURCE_LENGTH)) return null;
+					if (CONTROL_CHARACTER.test(conflict.by) || CONTROL_CHARACTER.test(conflict.command)) return null;
+					conflicts.push({ by: conflict.by, command: conflict.command });
+				}
+				seen.add(raw.command);
+				keys.push({ command: raw.command, key: raw.key, conflicts, more: raw.more });
+			}
+			return { type: value.type, keys };
 		}
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);

@@ -1,30 +1,27 @@
 /**
- * "OMP Desk: Add Selection to Session" and "OMP Desk: Add File to Session": the pure rules.
+ * "OMP Desk: Add File to Session" and "OMP Desk: Quote Selection to Session" (the quote of a selection, or the reference to the
+ * caret's line when nothing is selected): the pure rules.
  *
- * What is sent is a **reference**, never file contents: OMP reads a mention itself, from the
- * session's working directory, when the prompt is submitted. Three facts about the installed
- * OMP (18.6.3, `pi-coding-agent src/utils/file-mentions.ts`) decide the text:
+ * What Add File sends is a **reference**, never file contents: OMP reads a mention itself, from the session's working directory,
+ * when the prompt is submitted. Three facts about the installed OMP (18.6.3, `pi-coding-agent src/utils/file-mentions.ts`) decide
+ * the text:
  *
- * - a mention is `@path` (or `@"quoted path"`), read after whitespace or an opening
- *   bracket/quote, resolved with `resolveReadPath(path, sessionCwd)` and, when it does not resolve
- *   to an existing file or directory, left as ordinary prose. There is **no line-range syntax**:
- *   `@src/a.ts:12-30` resolves to a file literally named `a.ts:12-30`, finds nothing, and the file
- *   is not read at all. A range therefore travels as a note beside the mention:
- *   `@src/a.ts [lines 12-30]`. Square brackets, not parentheses, on purpose: on submit the native
- *   TUI rewrites emoticons at a token boundary (`expandEmoticons`, `pi-tui/src/prompt/emoji-autocomplete.ts`),
- *   and `(line 8)` ends in the emoticon `8)`; no bracketed note contains one;
- * - the base is the session's cwd, not the VS Code workspace folder, which is why the path is
- *   made relative with {@link mentionPath} against the *target session's* cwd (and stays
- *   absolute, forward-slashed, when the file is outside it);
- * - the native TUI inserts a bracketed paste verbatim at the caret and never submits it, except
- *   that a paste above ten lines or 1,000 characters opens its large-paste menu, so one insertion
- *   is bounded by {@link MAX_INSERT_TEXT_LENGTH} and is a single line.
+ * - a mention is `@path` (or `@"quoted path"`), read after whitespace or an opening bracket/quote, resolved with
+ *   `resolveReadPath(path, sessionCwd)` and, when it does not resolve to an existing file or directory, left as ordinary prose.
+ *   There is **no line-range syntax**: `@src/a.ts:12-30` resolves to a file literally named `a.ts:12-30`, finds nothing, and the
+ *   file is not read at all. That is why a quote and a line reference name their location as inline code (`src/a.ts:42`), never
+ *   as a mention;
+ * - the base is the session's cwd, not the VS Code workspace folder, which is why the path is made relative with
+ *   {@link mentionPath} against the *target session's* cwd (and stays absolute, forward-slashed, when the file is outside it);
+ * - the native TUI inserts a bracketed paste verbatim at the caret and never submits it, except that a paste above ten lines or
+ *   1,000 characters opens its large-paste menu, so one insertion is bounded by {@link MAX_INSERT_TEXT_LENGTH} and is a single line.
  *
  * No `vscode` import: everything here is exercised by plain `node --test`.
  *
  * Runner: `node --test src/wiring/editor-context.test.ts`
  */
 import type { SessionItemState } from "../views/session-tree.ts";
+import { codeSpan } from "../shared/code-span.ts";
 import { MAX_EDITOR_QUOTES, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH, mentionTokenForPath } from "../protocol/messages.ts";
 import type { GuestEditorQuote } from "../protocol/messages.ts";
 import { quoteSizeRefusal } from "../shared/quote-limit.ts";
@@ -56,31 +53,9 @@ export function selectionLines(start: PositionLike, end: PositionLike): LineRang
 	return { start: first + 1, end: covered + 1 };
 }
 
-/** Sort and merge overlapping or adjacent ranges. */
-export function mergeRanges(ranges: readonly LineRange[]): LineRange[] {
-	const sorted = [...ranges].sort((a, b) => a.start - b.start || a.end - b.end);
-	const merged: LineRange[] = [];
-	for (const range of sorted) {
-		const last = merged[merged.length - 1];
-		if (last !== undefined && range.start <= last.end + 1) merged[merged.length - 1] = { start: last.start, end: Math.max(last.end, range.end) };
-		else merged.push({ start: range.start, end: range.end });
-	}
-	return merged;
-}
-
-/** `[line 7]`, `[lines 12-30]` or `[lines 12-30, 45]`; empty without ranges. */
-export function lineNote(ranges: readonly LineRange[]): string {
-	const merged = mergeRanges(ranges);
-	if (merged.length === 0) return "";
-	const parts = merged.map(range => (range.start === range.end ? `${range.start}` : `${range.start}-${range.end}`));
-	const single = merged.length === 1 && merged[0]?.start === merged[0]?.end;
-	return `[${single ? "line" : "lines"} ${parts.join(", ")}]`;
-}
-
-/** One file (or folder) to mention, and the lines of it the user selected, if any. */
+/** One file (or folder) to mention. */
 export interface ReferenceSource {
 	readonly fsPath: string;
-	readonly ranges?: readonly LineRange[];
 }
 
 export type Refusal = { readonly ok: false; readonly reason: string };
@@ -96,8 +71,7 @@ export function formatReference(source: ReferenceSource, cwd: string): { readonl
 	const path = mentionPath(source.fsPath, cwd);
 	if (path.length === 0 || UNSAFE_PATH.test(path)) return { ok: false, reason: `“${source.fsPath}” has a character a prompt cannot carry.` };
 	if (path.includes('"') && path.includes("'")) return { ok: false, reason: `“${source.fsPath}” contains both quote kinds, which OMP's @ mentions cannot express.` };
-	const note = lineNote(source.ranges ?? []);
-	return { ok: true, reference: note.length === 0 ? mentionTokenForPath(path) : `${mentionTokenForPath(path)} ${note}` };
+	return { ok: true, reference: mentionTokenForPath(path) };
 }
 
 export interface Insertion {
@@ -201,6 +175,41 @@ export function composeEditorQuotes(source: EditorQuoteSource, cwd: string): Edi
 	const tooLong = quoteSizeRefusal(total);
 	if (tooLong !== null) return { ok: false, reason: tooLong };
 	return { ok: true, quotes, summary: quotes.length === 1 ? (locations[0] ?? `${source.fileName || "the selection"}`) : `${quotes.length} selections` };
+}
+
+/**
+ * The document and line `Alt+Q` points at when nothing is selected: the primary caret's line of the active editor. `fsPath` and
+ * `version` are the quote's ({@link EditorQuoteSource}): `null` when the document has no location, and the words naming a Git
+ * version for a side of a diff; `line` is one-based.
+ */
+export interface LineReferenceSource {
+	readonly fsPath: string | null;
+	readonly version: string | null;
+	readonly line: number;
+}
+
+export const NO_LOCATION_REASON = "This document has no file location to reference. Select text to quote it instead.";
+
+export interface LineReference {
+	readonly ok: true;
+	/** What goes into the draft: the location as inline code, `` `src/app.ts:42` ``, one line, never an `@` mention. */
+	readonly text: string;
+	/** What the status bar names: the location. */
+	readonly summary: string;
+}
+
+/**
+ * The reference to one line for the target session's `cwd`: the quote's own location (`quoteLocation`: relative inside `cwd`, else
+ * absolute; ` @ <version>` for a Git version) as an inline code span. Refused when the document has no location, or when the text
+ * would not fit the one-line insertion that carries it (`MAX_INSERT_TEXT_LENGTH`, less the space before and after).
+ */
+export function composeLineReference(source: LineReferenceSource, cwd: string): LineReference | Refusal {
+	if (source.fsPath === null) return { ok: false, reason: NO_LOCATION_REASON };
+	const located = quoteLocation(source.fsPath, cwd, { start: source.line, end: source.line }, source.version);
+	if (!located.ok) return located;
+	const text = codeSpan(located.location);
+	if (text.length > MAX_INSERT_TEXT_LENGTH - 2) return { ok: false, reason: `The path of “${source.fsPath}” is too long to reference.` };
+	return { ok: true, text, summary: located.location };
 }
 
 export type InsertAvailability = "live" | "resume";

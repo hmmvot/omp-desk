@@ -1,7 +1,7 @@
 import type { ToolsMode } from "../../chat/tools-mode.ts";
 
 /**
- * The transcript's two global display defaults: the TUI's `Ctrl+T` (show every thinking block) and the tool display
+ * The transcript's two global display defaults: the thinking toggle (Desk's `Ctrl+Alt+T`, the TUI's `Ctrl+T`: show every thinking block) and the tool display
  * mode (`Ctrl+O` expands every tool call, `Ctrl+Shift+O` opens every group with its calls collapsed). The host owns
  * them — one remembered value per VS Code profile, changed by the `ompDesk.toggleThinking`,
  * `ompDesk.toggleToolOutput` and `ompDesk.toggleToolGroups` commands — and pushes them with the display preferences.

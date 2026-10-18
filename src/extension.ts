@@ -131,14 +131,14 @@ import {
   candidateDescription as sendCandidateDescription,
   composeEditorQuotes,
   composeInsertion,
+  composeLineReference,
   folderName as sessionFolderName,
   insertAvailability,
   newSessionFolder,
   pickerEntries,
-  selectionLines,
   visibleQuoteTarget,
 } from "./wiring/editor-context";
-import type { EditorQuoteSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
+import type { EditorQuoteSource, LineReferenceSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
 import { quoteSourceOf } from "./wiring/quote-source";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
@@ -176,6 +176,7 @@ import { registerInventoryViews, type InventoryHandle } from "./wiring/inventory
 import { registerContextView, type ContextHandle } from "./wiring/context-wiring";
 import { registerUsageStatus, type UsageStatusHandle } from "./wiring/usage-status-wiring";
 import { registerCodeTheme } from "./wiring/code-theme-wiring";
+import { registerKeyHints, type KeyHintsHandle } from "./wiring/key-hints-wiring";
 import type { ContextSession, ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
@@ -813,6 +814,8 @@ interface WindowState {
   contextView: ContextHandle | null;
   /** The provider-usage status bar item; `null` before it registers. */
   usageStatus: UsageStatusHandle | null;
+  /** The effective keys of the empty state and what may take them; `null` before they register. */
+  keyHints: KeyHintsHandle | null;
   /** The Sessions view's background processes: its reader, poll and stop commands. */
   sessionProcesses: SessionProcesses | null;
   /**
@@ -1170,6 +1173,10 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
       },
       info: showInfo,
     }),
+    openKeyConflict: async command => {
+      const query = windowState().keyHints?.queryOf(command) ?? null;
+      if (query !== null) await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", query);
+    },
     pushSessionView,
     noteReadyDocument,
     activateNativeEditor,
@@ -1344,6 +1351,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     inventoryViews: null,
     contextView: null,
     usageStatus: null,
+    keyHints: null,
     sessionProcesses: null,
     sessionActions: registerSessionActions(sessionActionsDeps()),
     launcherProvider: undefined,
@@ -1884,6 +1892,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const agentDebugger = activateAgentDebugger(context, { log });
   // The candidate colour themes of Chat's fenced code; registered with the context, re-sent to pages when they change.
   const codeThemes = registerCodeTheme(context, { log, changed: () => s.sessionRuntime.conversations.refreshCodeThemes() });
+  // The keys the empty Chat shows: the user's own keybindings and other extensions' conflicts, re-sent to pages when they change.
+  const keyHints = registerKeyHints(context, { log, changed: () => s.sessionRuntime.conversations.refreshKeyHints() });
+  s.keyHints = keyHints;
+  context.subscriptions.push({ dispose: () => { s.keyHints = null; } });
   const chat = new ChatRuntime({
     hostNonce: createToken(),
     hostTools: agentDebugger,
@@ -1892,6 +1904,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onEvent: (tabId, event) => handleChatEvent(context, index, tabId, event),
     readDisplayPreferences: readChatDisplayPreferences,
     readCodeThemes: () => codeThemes.current(),
+    readKeyHints: () => keyHints.current(),
     // Terminal-UI builtins typed into Chat are answered, not sent (ADR-0052); the list is the installed OMP's.
     slashRegistry: () => currentSlashRegistry(context),
     runDeskAction: async (action, tabId) => {
@@ -2211,7 +2224,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.shareConversation", () => runActiveChatAction(context, index, "share")),
     registerDeskCommand("ompDesk.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
     registerDeskCommand("ompDesk.rewindConversation", () => rewindConversation()),
-    registerDeskCommand("ompDesk.sendSelection", () => addSelectionToSession(context, index)),
     registerDeskCommand("ompDesk.quoteEditorSelection", () => quoteEditorSelectionToSession(context, index)),
     registerDeskCommand("ompDesk.searchFileFromChat", () => s.guestDispatcher.searchFileFromChat()),
     registerDeskCommand("ompDesk.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
@@ -6031,7 +6043,7 @@ function rememberPrompt(text: string, tabId: string): void {
 }
 
 /**
- * The TUI's `Ctrl+R`: a QuickPick of past prompts, this conversation's first (newest first), then the ones sent
+ * The history search (`Ctrl+Alt+Y`; the TUI's `Ctrl+R`): a QuickPick of past prompts, this conversation's first (newest first), then the ones sent
  * from other Chats. The pick is added to the draft, never sent.
  */
 async function searchPromptHistory(): Promise<void> {
@@ -6154,11 +6166,12 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
   }
 }
 
-// "OMP Desk: Add Selection to Session", "OMP Desk: Add File to Session" and "OMP Desk: Quote Selection to Session"
-// What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `wiring/editor-context` for the
-// chosen session's cwd, or (Quote Selection to Session) the selected text with its location as a quote the
-// page places like a Chat quote. The target of Add to Session is always the user's choice from a picker, most recently focused
-// editor first; a quote skips the picker when a Chat of this window is visible and goes into that composer. Nothing is ever submitted, and the destination is revealed and focused.
+// "OMP Desk: Add File to Session" and "OMP Desk: Quote Selection to Session"
+// What Add File adds is a reference (`@src/a.ts`), composed by `wiring/editor-context` for the chosen session's cwd. Quote
+// Selection to Session sends the selected text with its location as a quote the page places like a Chat quote, or, with nothing
+// selected, the location of the caret's line as inline code. The target of Add File is always the user's choice from a picker, most
+// recently focused editor first; a quote or a line reference skips the picker when a Chat of this window is visible and goes into that
+// composer. Nothing is ever submitted, and the destination is revealed and focused.
 
 /** How long a session being opened may take to be able to receive the text. */
 const INSERT_TARGET_TIMEOUT_MS = 30_000;
@@ -6167,20 +6180,6 @@ const INSERT_POLL_MS = 100;
 type SendTarget =
   | { readonly kind: "session"; readonly candidate: SendCandidate }
   | { readonly kind: "new"; readonly folder: string };
-
-async function addSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  if (editor === undefined || editor.document.uri.scheme !== "file") {
-    showWarning("Open a file on disk and select the text to add.");
-    return;
-  }
-  const ranges = editor.selections.filter(selection => !selection.isEmpty).map(selection => selectionLines(selection.start, selection.end));
-  if (ranges.length === 0) {
-    showWarning("Select some text first, or use “OMP Desk: Add File to Session”.");
-    return;
-  }
-  await addToSession(context, index, [{ fsPath: editor.document.uri.fsPath, ranges }], editor.document.isDirty);
-}
 
 /** An Explorer click (with its multi-selection), an editor or tab menu, or — from the palette — the active editor's file. */
 async function addFilesToSession(context: vscode.ExtensionContext, index: SessionIndex, clicked: unknown, selected: unknown): Promise<void> {
@@ -6280,10 +6279,18 @@ async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIn
   return await promise;
 }
 
-/** What goes to the chosen session: `@path` references (Add to Session) or a quote of editor text (Quote Selection to Session). */
+/** What goes to the chosen session: `@path` references (Add File to Session), a quote of editor text, or the reference to a caret's line (both Alt+Q). */
 type InsertionRequest =
   | { readonly kind: "references"; readonly sources: readonly ReferenceSource[] }
-  | { readonly kind: "quote"; readonly source: EditorQuoteSource };
+  | { readonly kind: "quote"; readonly source: EditorQuoteSource }
+  | { readonly kind: "line"; readonly source: LineReferenceSource };
+
+/** How the status bar and the warnings word what went where. */
+const SEND_WORDS = {
+  references: { past: "added", Past: "Added", to: "to" },
+  quote: { past: "quoted", Past: "Quoted", to: "into" },
+  line: { past: "referenced", Past: "Referenced", to: "in" },
+} as const;
 
 /** The request written for one session's working directory: the page message, and the text a terminal would be pasted (`null`: it takes none). */
 function composeRequest(request: InsertionRequest, cwd: string):
@@ -6292,6 +6299,10 @@ function composeRequest(request: InsertionRequest, cwd: string):
   if (request.kind === "references") {
     const composed = composeInsertion(request.sources, cwd);
     return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-text", text: composed.text }, pasteText: composed.text } : composed;
+  }
+  if (request.kind === "line") {
+    const composed = composeLineReference(request.source, cwd);
+    return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-text", text: composed.text }, pasteText: null } : composed;
   }
   const composed = composeEditorQuotes(request.source, cwd);
   return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
@@ -6305,20 +6316,31 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
 
 /**
  * "OMP Desk: Quote Selection to Session" (`Alt+Q` in a text editor): every non-empty selection of the active editor becomes a quote
- * in the chosen Chat session's draft. The target rule is Add Selection to Session's; the page places the quote the way it places a
- * Chat quote (docs/designs/2026-10-15-quote-chat-selection.md, decision 9). The active editor of a diff is the side that has the
- * focus; a side that is a Git revision quotes with the version it is (decision 10, `src/wiring/quote-source.ts`).
+ * in the chosen Chat session's draft; the page places the quote the way it places a Chat quote
+ * (docs/designs/2026-10-15-quote-chat-selection.md, decision 9). With nothing selected the primary caret's line is referenced instead
+ * (docs/designs/2026-10-18-chat-keys-and-empty-state.md, decision 3): `path:N` as inline code, inserted at the caret of the draft, by
+ * the quote's own location rule and target rule. The active editor of a diff is the side that has the focus; a side that is a Git
+ * revision names the version it is (decision 10 of the quote design, `src/wiring/quote-source.ts`).
  */
 async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   if (editor === undefined) {
-    showWarning("Open a text editor and select the text to quote.");
+    showWarning("Open a text editor to quote from or to point at a line.");
     return;
   }
   const { document } = editor;
   const selections = editor.selections.filter(selection => !selection.isEmpty);
   if (selections.length === 0) {
-    showWarning("Select some text first.");
+    const where = await quoteSourceOf(document, [editor.selection]);
+    const source: LineReferenceSource = { fsPath: where.fsPath, version: where.version, line: editor.selection.active.line + 1 };
+    log.debug(`line reference: ${document.uri.scheme} document, ${source.fsPath === null ? "no path" : source.version === null ? "file on disk" : `version ${source.version}`}`);
+    // A document with no location, or a path that cannot be written, is refused before a session is chosen or started.
+    const early = composeLineReference(source, "");
+    if (!early.ok) {
+      showWarning(early.reason);
+      return;
+    }
+    await sendToSession(context, index, { kind: "line", source }, source.fsPath, document.isDirty);
     return;
   }
   const source = await quoteSourceOf(document, selections);
@@ -6334,10 +6356,11 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
 
 async function sendToSession(context: vscode.ExtensionContext, index: SessionIndex, request: InsertionRequest, firstFsPath: string | null, unsaved: boolean): Promise<void> {
   const s = windowState();
-  const quoting = request.kind === "quote";
-  // A quote goes straight into the Chat the user can see in this window; the picker only asks when none is shown.
-  const visibleChat = quoting ? visibleQuoteTarget(sendCandidates(context, index), s.editorRecency.order()) : null;
-  const target = visibleChat !== null ? { kind: "session" as const, candidate: visibleChat } : await pickSendTarget(context, index, firstFsPath, unsaved, quoting);
+  const chatOnly = request.kind !== "references";
+  const words = SEND_WORDS[request.kind];
+  // A quote or a line reference goes straight into the Chat the user can see in this window; the picker only asks when none is shown.
+  const visibleChat = chatOnly ? visibleQuoteTarget(sendCandidates(context, index), s.editorRecency.order()) : null;
+  const target = visibleChat !== null ? { kind: "session" as const, candidate: visibleChat } : await pickSendTarget(context, index, firstFsPath, unsaved, chatOnly);
   if (target === null) return;
   let tabId: string;
   let cwd: string;
@@ -6347,7 +6370,7 @@ async function sendToSession(context: vscode.ExtensionContext, index: SessionInd
     if (folders === undefined) return;
     // Refuse what cannot be written before anything is added or started.
     const probe = composeRequest(request, target.folder);
-    if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${quoting ? "quoted" : "added"}.`); return; }
+    if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${words.past}.`); return; }
     // Choosing "New session in <folder>" for a folder the launcher already shows (open in this
     // window or pinned) just starts there; for any other folder it is the explicit act of pinning
     // it (a session is never started in a folder the launcher does not show); the picker row says so.
@@ -6369,12 +6392,12 @@ async function sendToSession(context: vscode.ExtensionContext, index: SessionInd
     }
     tabId = entry.tabId;
     refreshLauncher();
-    await openTab(context, index, tabId, "started", "explicit", quoting ? "chat" : undefined);
+    await openTab(context, index, tabId, "started", "explicit", chatOnly ? "chat" : undefined);
   } else {
     tabId = target.candidate.tabId;
     cwd = target.candidate.cwd;
     const probe = composeRequest(request, cwd);
-    if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${quoting ? "quoted" : "added"}.`); return; }
+    if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${words.past}.`); return; }
     // Reveals a running session's editor, reopens a closed one and starts a stopped one, all through the
     // path the Sessions view's Open uses (ownership is rechecked there).
     // The references are inserted into an editor of this window, so a stopped session is launched here, not in
@@ -6383,8 +6406,8 @@ async function sendToSession(context: vscode.ExtensionContext, index: SessionInd
   }
   const delivered = await deliverInsertion(tabId, request, cwd);
   if (!delivered.ok) {
-    log.warn(`tab ${tabId}: editor ${quoting ? "quote" : "references"} was not ${quoting ? "quoted" : "added"} (${delivered.reason})`);
-    void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was ${quoting ? "quoted" : "added"}.`, ...(request.kind === "references" ? ["Copy reference"] : [])).then(choice => {
+    log.warn(`tab ${tabId}: editor ${request.kind} was not ${words.past} (${delivered.reason})`);
+    void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was ${words.past}.`, ...(request.kind === "references" ? ["Copy reference"] : [])).then(choice => {
       if (choice === "Copy reference" && request.kind === "references") {
         const composed = composeInsertion(request.sources, cwd);
         if (composed.ok) void vscode.env.clipboard.writeText(composed.text);
@@ -6392,13 +6415,13 @@ async function sendToSession(context: vscode.ExtensionContext, index: SessionInd
     });
     return;
   }
-  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : `${request.source.selections.length} editor quote(s)`}`);
+  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : request.kind === "quote" ? `${request.source.selections.length} editor quote(s)` : "a line reference"}`);
   const notes: string[] = [];
-  if (unsaved) notes.push(quoting ? "the file has unsaved changes: the location is the saved file's" : "unsaved changes are not included");
+  if (unsaved) notes.push(chatOnly ? "the file has unsaved changes: the location is the saved file's" : "unsaved changes are not included");
   if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);
-  // OMP expands @mentions only in a prompt sent while it is idle, not in a steering or queued follow-up message. A quote holds no mention.
-  if (!quoting && s.turnActivities.get(tabId)?.streaming === true) notes.push("the session is busy: send it once the turn ends so the files are read");
-  vscode.window.setStatusBarMessage(`${quoting ? "Quoted" : "Added"} ${delivered.summary} ${quoting ? "into" : "to"} «${delivered.title}»${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`, notes.length > 0 ? 10_000 : 6_000);
+  // OMP expands @mentions only in a prompt sent while it is idle, not in a steering or queued follow-up message. A quote and a line reference hold no mention.
+  if (request.kind === "references" && s.turnActivities.get(tabId)?.streaming === true) notes.push("the session is busy: send it once the turn ends so the files are read");
+  vscode.window.setStatusBarMessage(`${words.Past} ${delivered.summary} ${words.to} «${delivered.title}»${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`, notes.length > 0 ? 10_000 : 6_000);
 }
 
 /**
@@ -6436,7 +6459,7 @@ async function deliverInsertion(
         }
         waiting = "the chat page did not become ready";
       } else if (composed.pasteText === null) {
-        return { ok: false, reason: "A quote goes into a Chat session; this one shows its terminal." };
+        return { ok: false, reason: "A quote or a line reference goes into a Chat session; this one shows its terminal." };
       } else if (state.pipeline !== null && state.shellSlot === null) {
         const outcome = await state.pipeline.pasteText(composed.pasteText);
         if (outcome === "pasted") {
@@ -6683,7 +6706,7 @@ function readChatDisplayPreferences(): ChatDisplayPreferences {
 }
 
 /**
- * The TUI's `Ctrl+T` / `Ctrl+O` and Desk's `Ctrl+Shift+O`: one remembered default for every Chat in this VS Code profile.
+ * The thinking toggle (`Ctrl+Alt+T` in Desk; the TUI's `Ctrl+T`), `Ctrl+O` and Desk's `Ctrl+Shift+O`: one remembered default for every Chat in this VS Code profile.
  * The tool key keeps its name from when it held a boolean; its stored form is in `toolsModeFromStored`.
  */
 const THINKING_EXPANDED_KEY = "omp.chat.thinkingExpanded";
@@ -6692,7 +6715,9 @@ const TOOLS_EXPANDED_KEY = "omp.chat.toolsExpanded";
 async function toggleThinkingDefault(): Promise<void> {
   const s = windowState();
   if (activeChatTab() === null || s.context === undefined) return;
-  await s.context.globalState.update(THINKING_EXPANDED_KEY, s.context.globalState.get<unknown>(THINKING_EXPANDED_KEY) !== true);
+  const expanded = s.context.globalState.get<unknown>(THINKING_EXPANDED_KEY) !== true;
+  await s.context.globalState.update(THINKING_EXPANDED_KEY, expanded);
+  log.info(`thinking blocks: ${expanded ? "shown" : "hidden"} by default`);
   s.sessionRuntime.conversations.refreshDisplayPreferences();
 }
 

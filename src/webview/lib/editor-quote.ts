@@ -11,6 +11,7 @@
  *   language and whose fence is longer than any backtick run that could close it early.
  */
 import type { GuestEditorQuote } from "../../protocol/messages.ts";
+import { codeSpan } from "../../shared/code-span.ts";
 import { fenceFor } from "./code-fence.ts";
 import { languageForPath, languageId } from "./code-languages.ts";
 import type { QuoteRequest } from "./quote-sink.ts";
@@ -26,15 +27,6 @@ export function isProse(quote: Pick<GuestEditorQuote, "fileName" | "languageId">
 /** The fence's info string: the file's language, else the editor's own language id when it is one of ours, else none. */
 export function infoString(quote: Pick<GuestEditorQuote, "fileName" | "languageId">): string {
 	return languageForPath(quote.fileName) ?? languageId(quote.languageId) ?? "";
-}
-
-/** `text` as an inline code span: its delimiter is longer than any backtick run inside, and a backtick at an edge is padded. */
-export function codeSpan(text: string): string {
-	let longest = 0;
-	for (const run of text.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
-	const delimiter = "`".repeat(longest + 1);
-	const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
-	return `${delimiter}${pad}${text}${pad}${delimiter}`;
 }
 
 /** The Markdown of one editor quote, before the `> ` prefixes. */

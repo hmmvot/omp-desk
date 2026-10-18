@@ -26,6 +26,8 @@ const browserPath = [process.env.OMP_TEST_CHROMIUM,
 ].find((candidate): candidate is string => candidate !== undefined && existsSync(candidate));
 /** Motion as an unconfigured user has it, independent of the machine running the suite. */
 const MOTION_ALLOWED = [{ name: "prefers-reduced-motion", value: "no-preference" }];
+/** The `<kbd>` texts of the empty chat, in DOM order, with the manifest's default keys. */
+const EMPTY_STATE_KBDS = ["/", "@", "Ctrl+V", "Shift", "↑", "Ctrl+Alt+Y", "Enter", "Alt+Enter", "Alt+↑", "Esc", "Ctrl+F", "Alt+Q", "Esc Esc", "Ctrl+Alt+T", "Ctrl+O", "Alt+Q", "Ctrl+Shift+L", "Ctrl+Alt+Q", "Ctrl+Alt+N"];
 
 class Cdp {
 	#next = 0;
@@ -117,6 +119,7 @@ import { injectGuestStyles } from "./styles";
 import { injectShellStyles } from "./lib/terminal-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachCodeTheme } from "./lib/code-theme-store";
+import { attachKeyHints } from "./lib/key-hints-store";
 import { attachInsertedText } from "./lib/insert-text";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { installFocusTrace } from "./lib/focus-trace";
@@ -131,6 +134,7 @@ window.requestQuote = requestQuote;
 window.captureQuote = () => captureSelection(window.getSelection(), document.querySelector(".omp-transcript"));
 attachSessionView(guestTransport);
 attachCodeTheme(guestTransport);
+attachKeyHints(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
 const epoch = { nonce: "host-ui-test", counter: 1 };
 const original = { provider: "one", id: "old", name: "Original", contextWindow: 1000000 };
@@ -1386,6 +1390,27 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const rowsOfToolbar = await ui.evaluate<number>("new Set([...document.querySelectorAll('.omp-composer-toolbar-actions button')].filter(node=>node.getBoundingClientRect().width>2).map(node=>Math.round(node.getBoundingClientRect().top))).size");
 			assert.equal(rowsOfToolbar, 1, "the toolbar's action buttons, Commands included, share one row at 360px");
 			await ui.call("Emulation.clearDeviceMetricsOverride");
+		});
+
+		await t.test("the keyboard button sits before Commands, names the effective key, posts the shortcuts command, and shares the row at 360px", async () => {
+			await reset("keyboard-button");
+			const sentOfType = (type: string) => ui.evaluate<unknown[]>(`window.sent.filter(message=>message.type===${JSON.stringify(type)})`);
+			const facts = () => ui.evaluate<{ order: string[]; label: string | null; title: string; icon: boolean; disabled: boolean; size: number[] }>("(()=>{const button=document.querySelector('.omp-composer-toolbar-actions .omp-composer-keyboard'),box=button.getBoundingClientRect();return{order:[...document.querySelectorAll('.omp-composer-toolbar-actions .omp-btn')].map(node=>node.classList.contains('omp-composer-keyboard')?'keyboard':node.classList.contains('omp-composer-commands')?'commands':'other'),label:button.getAttribute('aria-label'),title:button.title,icon:button.querySelector('.codicon.codicon-keyboard[aria-hidden]')!==null,disabled:button.disabled,size:[box.width,box.height]}})()");
+			const first = await facts();
+			assert.deepEqual(first.order.slice(0, 2), ["keyboard", "commands"]);
+			assert.deepEqual({ label: first.label, title: first.title, icon: first.icon, disabled: first.disabled, size: first.size }, { label: "Keyboard shortcuts", title: "Keyboard shortcuts (Ctrl+/)", icon: true, disabled: false, size: [28, 28] });
+			await ui.evaluate("window.ui.receive({type:'omp:chat-keys',keys:[{command:'ompDesk.showChatKeyboardShortcuts',key:'Ctrl+Alt+/',conflicts:[],more:0}]})");
+			await ui.wait("document.querySelector('.omp-composer-keyboard').title==='Keyboard shortcuts (Ctrl+Alt+/)'");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-keys',keys:[{command:'ompDesk.showChatKeyboardShortcuts',key:null,conflicts:[],more:0}]})");
+			await ui.wait("document.querySelector('.omp-composer-keyboard').title==='Keyboard shortcuts'");
+			await ui.evaluate("document.querySelector('.omp-composer-keyboard').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-command')");
+			assert.deepEqual(await sentOfType("omp:chat-command"), [{ type: "omp:chat-command", command: "keyboard-shortcuts" }]);
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 360, height: 700, deviceScaleFactor: 1, mobile: false });
+			await ui.settleGeometry(".omp-composer");
+			assert.equal(await ui.evaluate("new Set([...document.querySelectorAll('.omp-composer-toolbar-actions button')].filter(node=>node.getBoundingClientRect().width>2).map(node=>Math.round(node.getBoundingClientRect().top))).size"), 1, "Keyboard, Commands and the prompt actions share one row at 360px");
+			await ui.call("Emulation.clearDeviceMetricsOverride");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("optional-empty and hint-only Enter send; required-empty stays open across Escape and every submit route", async () => {
@@ -5526,7 +5551,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ctrlZ();
 			await waitDraft("window.composer.value()===''");
 			await waitChips(0);
-			// The history search (Ctrl+R) hands the picked prompt to the page.
+			// The history search (Ctrl+Alt+Y) hands the picked prompt to the page.
 			await ui.evaluate("window.ui.receive({type:'omp:recall-prompt',text:'/skill:other b.ts',documents:[],notes:[]})");
 			await waitDraft("window.composer.value()==='/skill:other b.ts'");
 			await waitChips(1);
@@ -7093,7 +7118,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const start = await ui.evaluate<{ head: string; keys: string[]; recents: number }>("({head:document.querySelector('.omp-empty-head').textContent,keys:[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent),recents:document.querySelectorAll('.omp-empty-recent button').length})");
 			assert.match(start.head, /alpha-desk/);
 			assert.match(start.head, /Original · low/);
-			assert.deepEqual(start.keys, ["/", "@", "Shift+drag", "Alt+Enter", "Esc Esc"]);
+			assert.deepEqual(start.keys, EMPTY_STATE_KBDS);
 			assert.equal(start.recents, 0, "hints alone until the host answers");
 			// Answers the latest request in one step, so a timer cannot slip a newer request between reading its id and replying.
 			const answer = (items: string, offset = 0) => ui.evaluate<number>(`(()=>{const request=window.sent.filter(message=>message.type==='omp:recent-sessions-request').at(-1);window.ui.receive({type:'omp:recent-sessions',requestId:request.requestId+${offset},items:${items}});return request.requestId})()`);
@@ -7105,7 +7130,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelectorAll('.omp-empty-recent button').length===2");
 			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-recent button')].map(row=>[row.querySelector('.omp-empty-recent-title').textContent,row.querySelector('.omp-empty-recent-age').textContent])"), [["Replace the whitespace split in the tokenizer", "2h"], ["How does the parser work?", "1d"]]);
 			// The rows take the click: nothing of the centred frame is above them.
-			assert.equal(await ui.evaluate("(()=>{const row=document.querySelector('.omp-empty-recent button').getBoundingClientRect();return document.querySelector('.omp-empty-recent button').contains(document.elementFromPoint(row.left+row.width/2,row.top+row.height/2))})()"), true);
+			assert.equal(await ui.evaluate("(()=>{const button=document.querySelector('.omp-empty-recent button');button.scrollIntoView({block:'center'});const row=button.getBoundingClientRect();return button.contains(document.elementFromPoint(row.left+row.width/2,row.top+row.height/2))})()"), true, "the row can be scrolled to when the groups take the height, and then takes the click");
 			await ui.evaluate("document.querySelector('.omp-empty-recent button').click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:open-recent')");
 			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:open-recent').at(-1)"), { type: "omp:open-recent", requestId: first, index: 0 });
@@ -7141,10 +7166,126 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			];
 			window.ui.push({header:{id:'hidden-h',cwd:'D:/work/alpha-desk/',timestamp:'${stamp}'},entries:window.setupEntries,durableCount:5,working:false,settled:true})`);
 			await ui.wait("document.querySelector('.omp-empty-state')");
-			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent)"), ["/", "@", "Shift+drag", "Alt+Enter", "Esc Esc"]);
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent)"), EMPTY_STATE_KBDS);
 			assert.match(await ui.evaluate<string>("document.querySelector('.omp-empty-head').textContent"), /alpha-desk/);
 			await ui.evaluate(`window.ui.push({entries:[...window.setupEntries,{type:'message',id:'u1',parentId:'xd0',timestamp:'${stamp}',message:{role:'user',timestamp:1,content:'First prompt'}}],durableCount:6})`);
 			await ui.wait("!document.querySelector('.omp-empty-state') && document.querySelector('.omp-transcript')?.textContent.includes('First prompt')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const emptyChat = async (name: string): Promise<void> => {
+			await reset(name);
+			await ui.evaluate("window.ui.push({header:{id:'keys-h',cwd:'D:/work/omp-vscode/',timestamp:'2026-10-13T10:00:00.000Z'},entries:[],durableCount:0,working:false,settled:true})");
+			await ui.wait("document.querySelector('.omp-empty-state') && window.sent.some(message=>message.type==='omp:recent-sessions-request')");
+		};
+		const emptyKeys = () => ui.evaluate<string[]>("[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent)");
+		const sentOfType = (type: string) => ui.evaluate<unknown[]>(`window.sent.filter(message=>message.type===${JSON.stringify(type)})`);
+
+		await t.test("the empty chat groups its key hints in four titled groups, one hint per line, and puts the shortcuts link before the recent sessions", async () => {
+			await emptyChat("empty-state-groups");
+			await ui.evaluate("(()=>{const request=window.sent.filter(message=>message.type==='omp:recent-sessions-request').at(-1);window.ui.receive({type:'omp:recent-sessions',requestId:request.requestId,items:[{title:'Fix the tokenizer',updatedAt:Date.now()-3600000},{title:'Review the parser',updatedAt:Date.now()-7200000}]})})()");
+			await ui.wait("document.querySelectorAll('.omp-empty-recent button').length===2");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-group')].map(group=>({title:group.querySelector('h3').textContent,rows:[...group.querySelectorAll('dl.omp-empty-keys > .omp-empty-key')].map(row=>[[...row.querySelectorAll('dt kbd')].map(node=>node.textContent),row.querySelector('dd').textContent])}))"), [
+				{ title: "Start", rows: [[["/"], "commands and skills"], [["@"], "attach a file"], [["Ctrl+V", "Shift"], "an attachment"], [["↑"], "an earlier prompt"], [["Ctrl+Alt+Y"], "search prompts"]] },
+				{ title: "While the agent works", rows: [[["Enter"], "steer"], [["Alt+Enter"], "queue"], [["Alt+↑"], "take a queued message back"], [["Esc"], "stop"]] },
+				{ title: "In the conversation", rows: [[["Ctrl+F"], "find"], [["Alt+Q"], "quote"], [["Esc Esc"], "rewind"], [["Ctrl+Alt+T", "Ctrl+O"], "thinking / tool calls"]] },
+				{ title: "From the editor and anywhere", rows: [[["Alt+Q"], "quote or line reference"], [["Ctrl+Shift+L"], "composer"], [["Ctrl+Alt+Q"], "go to session"], [["Ctrl+Alt+N"], "new session"]] },
+			]);
+			assert.deepEqual(await emptyKeys(), EMPTY_STATE_KBDS);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty-key dt').textContent"), "/");
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-empty-key dt')][2].textContent"), "Ctrl+V or Shift+drag");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty-conflict, .omp-empty-key-conflict')"), null, "no marker without a conflict");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty-shortcuts').textContent"), "All keyboard shortcuts (Ctrl+/)");
+			assert.equal(await ui.evaluate("(()=>{const link=document.querySelector('.omp-empty-shortcuts'),recent=[...document.querySelectorAll('.omp-empty-state h3')].find(node=>node.textContent==='Recent in this folder'),last=[...document.querySelectorAll('.omp-empty-group')].at(-1);return Boolean(last.compareDocumentPosition(link)&Node.DOCUMENT_POSITION_FOLLOWING)&&Boolean(link.compareDocumentPosition(recent)&Node.DOCUMENT_POSITION_FOLLOWING)})()"), true, "groups, then the link, then the recents");
+			assert.deepEqual(await ui.evaluate("({frame:getComputedStyle(document.querySelector('.omp-empty-state')).pointerEvents,body:getComputedStyle(document.querySelector('.omp-empty-state-body')).pointerEvents,link:getComputedStyle(document.querySelector('.omp-empty-shortcuts')).pointerEvents})"), { frame: "none", body: "none", link: "auto" });
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the empty chat's groups sit in two columns on a wide panel and in one on a narrow one, with nothing overflowing", async () => {
+			await emptyChat("empty-state-columns");
+			const layout = () => ui.evaluate<{ columns: number; tops: number[]; lefts: number[]; overflow: boolean; clipped: boolean; centred: boolean }>(`(()=>{
+			 const groups=[...document.querySelectorAll('.omp-empty-group')].map(node=>node.getBoundingClientRect()),body=document.querySelector('.omp-empty-state-body').getBoundingClientRect(),container=document.querySelector('.omp-empty-groups');
+			 return{columns:getComputedStyle(container).gridTemplateColumns.split(' ').length,tops:groups.map(rect=>Math.round(rect.top)),lefts:groups.map(rect=>Math.round(rect.left)),overflow:document.documentElement.scrollWidth>innerWidth,
+			  clipped:[...document.querySelectorAll('.omp-empty-keys dd')].some(node=>node.getBoundingClientRect().right>innerWidth+0.5),centred:Math.abs(body.left+body.width/2-innerWidth/2)<2}})()`);
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 1, mobile: false });
+			await ui.settleGeometry(".omp-empty-state-body");
+			const wide = await layout();
+			assert.equal(wide.columns, 2);
+			assert.equal(wide.tops[0], wide.tops[1], "the first two groups share a row");
+			assert.equal(wide.tops[2], wide.tops[3], "so do the last two");
+			assert.ok(wide.tops[2] > wide.tops[0], "the second row is below the first");
+			assert.equal(wide.lefts[0], wide.lefts[2]);
+			assert.ok(wide.lefts[1] > wide.lefts[0] + 200, "the second column is beside the first");
+			assert.equal(wide.overflow || wide.clipped, false);
+			assert.equal(wide.centred, true, "the frame stays centred");
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 360, height: 700, deviceScaleFactor: 1, mobile: false });
+			await ui.settleGeometry(".omp-empty-state-body");
+			const narrow = await layout();
+			assert.equal(narrow.columns, 1);
+			assert.equal(new Set(narrow.lefts).size, 1, "one column");
+			assert.deepEqual([...narrow.tops].sort((a, b) => a - b), narrow.tops, "the groups stack in order");
+			assert.equal(new Set(narrow.tops).size, 4);
+			assert.equal(narrow.overflow || narrow.clipped, false);
+			await ui.call("Emulation.clearDeviceMetricsOverride");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a host key list replaces the default key, a removed key shows none, a conflict gets a warning button with its tooltip that opens the key's conflict, and the next list can clear it", async () => {
+			await emptyChat("empty-state-host-keys");
+			const hint = (command: string, key: string | null, conflicts: Array<{ by: string; command: string }> = [], more = 0) => ({ command, key, conflicts, more });
+			const send = (hints: unknown[]) => ui.evaluate(`window.ui.receive({type:'omp:chat-keys',keys:${JSON.stringify(hints)}})`);
+			const markers = () => ui.evaluate<Array<{ before: string; tip: string | null; label: string | null; icon: boolean }>>("[...document.querySelectorAll('.omp-empty-key-conflict')].map(button=>({before:button.previousElementSibling.textContent,tip:button.title,label:button.getAttribute('aria-label'),icon:button.querySelector('.codicon.codicon-warning')!==null}))");
+			await send([hint("ompDesk.toggleThinking", "Ctrl+Alt+Shift+T"), hint("ompDesk.toggleToolOutput", null)]);
+			await ui.wait("[...document.querySelectorAll('.omp-empty-key kbd')].some(node=>node.textContent==='Ctrl+Alt+Shift+T')");
+			const replaced = [...EMPTY_STATE_KBDS];
+			replaced[replaced.indexOf("Ctrl+Alt+T")] = "Ctrl+Alt+Shift+T";
+			replaced[replaced.indexOf("Ctrl+O")] = "none";
+			assert.deepEqual(await emptyKeys(), replaced);
+			assert.equal(await ui.evaluate("document.querySelector('kbd.omp-empty-key--none').textContent"), "none");
+			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('kbd.omp-empty-key--none')).color!==getComputedStyle(document.querySelector('.omp-empty-key kbd')).color"), true, "none is muted");
+			assert.deepEqual(await markers(), []);
+			const taken = { by: "IntelliJ IDEA Keymap", command: "git.sync" };
+			await send([hint("ompDesk.toggleThinking", "Ctrl+Alt+Shift+T", [taken, { by: "your keybindings.json", command: "editor.action.foo" }], 2)]);
+			await ui.wait("document.querySelector('.omp-empty-key-conflict')");
+			const tip = "Ctrl+Alt+Shift+T may be taken by IntelliJ IDEA Keymap: git.sync\nCtrl+Alt+Shift+T may be taken by your keybindings.json: editor.action.foo\nand 2 more";
+			assert.deepEqual(await markers(), [{ before: "Ctrl+Alt+Shift+T", tip, label: tip, icon: true }], "only the conflicted key has a marker, right after its kbd");
+			assert.deepEqual(await ui.evaluate("(()=>{const button=document.querySelector('.omp-empty-key-conflict'),style=getComputedStyle(button),box=button.getBoundingClientRect(),top=document.elementFromPoint(box.x+box.width/2,box.y+box.height/2);return{type:button.type,events:style.pointerEvents,focusable:button.tabIndex>=0,warning:style.color!==getComputedStyle(document.querySelector('.omp-empty-keys dd')).color,clickable:button.contains(top)}})()"), { type: "button", events: "auto", focusable: true, warning: true, clickable: true });
+			await ui.evaluate("document.querySelector('.omp-empty-key-conflict').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:open-key-conflict')");
+			assert.deepEqual(await sentOfType("omp:open-key-conflict"), [{ type: "omp:open-key-conflict", command: "ompDesk.toggleThinking" }]);
+			// A single conflict has no "and N more" line.
+			await send([hint("ompDesk.findInChat", "Ctrl+F", [{ by: "Some Extension", command: "some.find" }])]);
+			await ui.wait("document.querySelector('.omp-empty-key-conflict')?.title==='Ctrl+F may be taken by Some Extension: some.find'");
+			assert.equal((await markers()).length, 1);
+			// A list without conflicts removes the marker, and a command the list no longer names is back to its default.
+			await send([hint("ompDesk.findInChat", "Ctrl+F")]);
+			await ui.wait("!document.querySelector('.omp-empty-key-conflict')");
+			assert.deepEqual(await emptyKeys(), EMPTY_STATE_KBDS);
+			await ui.evaluate("window.ui.receive({type:'omp:chat-keys',keys:[]})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a garbage omp:chat-keys leaves the shown keys unchanged", async () => {
+			await emptyChat("empty-state-garbage-keys");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-keys',keys:[{command:'ompDesk.toggleThinking',key:'Ctrl+Alt+Shift+T',conflicts:[],more:0}]})");
+			await ui.wait("[...document.querySelectorAll('.omp-empty-key kbd')].some(node=>node.textContent==='Ctrl+Alt+Shift+T')");
+			const shown = await emptyKeys();
+			for (const keys of ["'nope'", "[{command:'evil.command',key:'A',conflicts:[],more:0}]", "[{command:'ompDesk.toggleThinking',key:7,conflicts:[],more:0}]", "[{command:'ompDesk.toggleThinking',key:'F1',conflicts:[{by:3,command:'x'}],more:0}]", "[{command:'ompDesk.toggleThinking',key:'F1',conflicts:[],more:-1}]"]) {
+				await ui.evaluate(`window.ui.receive({type:'omp:chat-keys',keys:${keys}})`);
+				await settleFrames();
+				assert.deepEqual(await emptyKeys(), shown, keys);
+			}
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty-key-conflict')"), null);
+		});
+
+		await t.test("the shortcuts link names the effective key and asks the host for Keyboard Shortcuts", async () => {
+			await emptyChat("empty-state-shortcuts-link");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty-shortcuts').tagName"), "BUTTON");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-keys',keys:[{command:'ompDesk.showChatKeyboardShortcuts',key:'Ctrl+K Ctrl+S',conflicts:[],more:0}]})");
+			await ui.wait("document.querySelector('.omp-empty-shortcuts').textContent==='All keyboard shortcuts (Ctrl+K Ctrl+S)'");
+			await ui.evaluate("document.querySelector('.omp-empty-shortcuts').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-command')");
+			assert.deepEqual(await sentOfType("omp:chat-command"), [{ type: "omp:chat-command", command: "keyboard-shortcuts" }]);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

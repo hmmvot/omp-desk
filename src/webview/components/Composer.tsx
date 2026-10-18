@@ -110,6 +110,7 @@ import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";
 import { ChatFooter } from "./ChatFooter";
 import { CommandsMenu } from "./CommandsMenu";
+import { KeyboardShortcutsButton } from "./KeyboardShortcutsButton";
 import { insertCommandIntoDraft, pickPlan, type CommandContext, type CommandRow } from "../lib/command-list";
 import { rewindBlockedReason } from "../../chat/rewind-mode";
 
@@ -1237,9 +1238,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		return subscribeRestoredDraft(apply);
 	}, [publishDocuments, publishRecoverable, writeDraft]);
 
-	// "OMP Desk: Add Selection/File to Session": the `@path` references the extension host composed in
-	// an editor are inserted at the caret (over a selection) as one undo step, and at the end of the
-	// draft while no field is mounted. They are never submitted, and an IME composition is not
+	// "OMP Desk: Add File to Session" (the `@path` references) and "OMP Desk: Quote Selection to Session" with nothing selected (the
+	// `path:N` line reference): the text the extension host composed in an editor is inserted at the caret (over a selection) as one
+	// undo step, and at the end of the draft while no field is mounted. It is never submitted, and an IME composition is not
 	// interrupted. One that arrived before this composer mounted is delivered first (`lib/insert-text`).
 	useEffect(() => subscribeInsertedText(reference => {
 		const place = (): void => {
@@ -1453,7 +1454,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		else remove();
 	}, [composingRef]);
 
-	// A prompt picked in the host's history search (`Ctrl+R`) joins the draft like an edited queued message.
+	// A prompt picked in the host's history search (`Ctrl+Alt+Y`) joins the draft like an edited queued message.
 	useEffect(() => guestTransport.subscribe(message => {
 		if (message.type === "omp:recall-prompt") offerQueuedForEditing([{ text: message.text, images: [], documents: message.documents, notes: message.notes }]);
 		if (message.type === "omp:attached-files") {
@@ -1921,7 +1922,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />
 			</>}
 			<ChatFooter client={client} snapshot={snapshot}
-				commandsAction={<CommandsMenu commands={snapshot.commands} context={commandContext} disabled={captureLocked} onPick={runCommand} />}
+				commandsAction={<><KeyboardShortcutsButton /><CommandsMenu commands={snapshot.commands} context={commandContext} disabled={captureLocked} onPick={runCommand} /></>}
 				trailingActions={dialog === null ? promptActions : undefined} />
 		</div>
 	);

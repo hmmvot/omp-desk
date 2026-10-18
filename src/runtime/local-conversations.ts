@@ -132,6 +132,10 @@ export class LocalConversations implements ConversationPort {
 		this.#chat.refreshCodeThemes();
 	}
 
+	refreshKeyHints(): void {
+		this.#chat.refreshKeyHints();
+	}
+
 	dispose(): void {
 		this.#chat.dispose();
 	}

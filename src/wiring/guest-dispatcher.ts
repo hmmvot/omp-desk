@@ -53,6 +53,7 @@ import type {
 } from "../protocol/messages.ts";
 import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { splitFileBlocks } from "../shared/file-blocks.ts";
+import type { EmptyStateKeyCommand } from "../shared/key-hints.ts";
 import type { Logger } from "../shared/logger.ts";
 import { fileSearchValue, normalizeSymbolQuery } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
@@ -165,6 +166,8 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	hasUnsavedChanges(fsPath: string): boolean;
 	/** The recent sessions of the page's own folder an empty chat lists, and the open of one of them. */
 	recents: RecentSessions;
+	/** Open Keyboard Shortcuts filtered to the current key of one empty-state command; does nothing for a command with no key or none known yet. */
+	openKeyConflict(command: EmptyStateKeyCommand): Promise<void>;
 }
 
 /** The editor's document and session view: what a page's announcement and a mode request drive. */
@@ -712,6 +715,11 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 				const state = deps.tab(tabId);
 				if (state?.panel !== panel) return;
 				await deps.recents.open(index, { slot, panel, document: state.document }, parsed);
+				return;
+			}
+			case "omp:open-key-conflict": {
+				if (deps.tab(tabId)?.panel !== panel) return;
+				await deps.openKeyConflict(parsed.command);
 				return;
 			}
 			case "omp:control-request":

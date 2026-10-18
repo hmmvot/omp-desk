@@ -8,7 +8,7 @@
  * command and returns its result. The first use of each alias in an extension host names both ids in one warning
  * with an **Open keybindings.json** action; every use is logged.
  *
- * - The table is the set of commands contributed before the rename (92: the 87 of the released 0.3.1 plus five added on the way to 0.4.0), plus the commands VS Code generates
+ * - The table is the set of commands contributed before the rename (91: the 87 of the released 0.3.1 plus five added on the way to 0.4.0, less `omp.sendSelection`, whose command was removed in 0.4.7), plus the commands VS Code generates
  *   from the container and view ids. A command added after the rename has no alias.
  * - An id another extension contributes (the namespace is Oh My Pi's, and its own integration may use it) is
  *   neither registered nor mirrored: the old name belongs to its owner now.
@@ -20,7 +20,7 @@
  */
 import type { Logger } from "../shared/logger.ts";
 
-/** Every command id contributed before the rename (0.3.1's 87 plus five added on the way to 0.4.0), frozen: the new id of one is `ompDesk.` plus the rest. */
+/** Every command id contributed before the rename (0.3.1's 87 plus five added on the way to 0.4.0, less the removed `omp.sendSelection`), frozen: the new id of one is `ompDesk.` plus the rest. */
 export const LEGACY_COMMAND_IDS: readonly string[] = [
 	"omp.openModels", "omp.openAgents", "omp.newSession", "omp.addWorkspaceFolder", "omp.chooseSessionsLayout",
 	"omp.chooseSessionsLayout.flat", "omp.chooseSessionsLayout.folders", "omp.chooseSessionsLayout.terminals",
@@ -38,7 +38,7 @@ export const LEGACY_COMMAND_IDS: readonly string[] = [
 	"omp.compactConversation", "omp.shakeConversation", "omp.cycleModel", "omp.cycleThinkingLevel",
 	"omp.exportConversationHtml", "omp.shareConversation", "omp.showChatKeyboardShortcuts", "omp.rewindConversation",
 	"omp.openTerminal", "omp.reconnectTerminal", "omp.renameSession", "omp.closeSession", "omp.reloadSession",
-	"omp.sendSelection", "omp.sendFile", "omp.openStats", "omp.refreshProcesses", "omp.stopProcess",
+	"omp.sendFile", "omp.openStats", "omp.refreshProcesses", "omp.stopProcess",
 	"omp.stopOrphanedProcesses", "omp.killAll", "omp.killSession", "omp.refreshSkills", "omp.skills.showGlobal",
 	"omp.skills.showSession", "omp.refreshTools", "omp.tools.showGlobal", "omp.tools.showSession", "omp.refreshMcp",
 	"omp.mcp.showGlobal", "omp.mcp.showSession", "omp.refreshExtensions", "omp.extensions.showGlobal",

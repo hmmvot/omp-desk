@@ -96,3 +96,7 @@ None new: the work reuses [ADR-0039](../decisions/0039-refuse-only-on-a-verified
 - Reviewer: architect
 - Outcome: changes required (resolved) — the architect found seven must-fix items (boot-time subscription for `omp:insert-text`, ready tracking for a passive-then-active page, bracketed note format, panel-less sessions offered, repeated reveal, mention expansion limits, unsaved files) and eleven minors. All were addressed in this change and the architect then confirmed the fixes in a short re-check, with no material findings left (non-blocking nits applied; orchestration tests for the passive-ready, panel-less and reveal-once fixes are not written).
 - Notes: see Risks and Open Questions for the limits that remain documented rather than removed.
+
+## Amendment (2026-10-18): Add Selection to Session removed
+
+`OMP: Add Selection to Session` (`omp.sendSelection`, later `ompDesk.sendSelection`), its `Alt+Shift+K` key, its menu entry and the `[lines a-b]` note were removed in 0.4.7 ([design](2026-10-18-chat-keys-and-empty-state.md), decision 2; [ADR-0068](../decisions/0068-rename-contributed-ids-to-ompdesk-and-migrate-settings-at-activation.md) amendment). **Add File to Session** stays as designed above. A selection's lines now travel with **Quote Selection to Session** (`Alt+Q`), and a caret's line as `path:N` inline code; neither is an `@` mention.

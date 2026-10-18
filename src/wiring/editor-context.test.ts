@@ -1,5 +1,5 @@
 /**
- * "OMP Desk: Add Selection to Session" / "OMP Desk: Add File to Session": the reference text, the paste bytes
+ * "OMP Desk: Add File to Session" and the location of "OMP Desk: Quote Selection to Session": the reference text, the paste bytes
  * and which sessions the picker offers.
  *
  * Runner: `node --test src/wiring/editor-context.test.ts`
@@ -13,9 +13,9 @@ import {
 	candidateDescription,
 	composeEditorQuotes,
 	composeInsertion,
+	composeLineReference,
 	formatReference,
 	insertAvailability,
-	lineNote,
 	newSessionFolder,
 	orderCandidates,
 	pickerEntries,
@@ -48,37 +48,51 @@ describe("selection line ranges", () => {
 	});
 });
 
-describe("line notes", () => {
-	it("name one line, one range, or several merged ranges", () => {
-		assert.equal(lineNote([]), "");
-		assert.equal(lineNote([{ start: 7, end: 7 }]), "[line 7]");
-		assert.equal(lineNote([{ start: 12, end: 30 }]), "[lines 12-30]");
-		assert.equal(lineNote([{ start: 45, end: 45 }, { start: 12, end: 30 }, { start: 28, end: 33 }]), "[lines 12-33, 45]");
-		assert.equal(lineNote([{ start: 3, end: 3 }, { start: 4, end: 5 }]), "[lines 3-5]", "adjacent ranges merge");
+describe("the line reference of an Alt+Q with nothing selected", () => {
+	const at = (fsPath: string | null, line: number, version: string | null = null) => ({ fsPath, version, line });
+
+	it("is the quote's location as inline code, relative inside the session's folder and absolute outside it", () => {
+		assert.deepEqual(composeLineReference(at("D:\\Work\\Repo\\src\\app.ts", 42), CWD), { ok: true, text: "`src/app.ts:42`", summary: "src/app.ts:42" });
+		assert.deepEqual(composeLineReference(at("D:\\Other\\b.ts", 7), CWD), { ok: true, text: "`D:/Other/b.ts:7`", summary: "D:/Other/b.ts:7" });
+		assert.deepEqual(composeLineReference(at("D:\\Work\\Repo\\pkg\\x\\a.ts", 3), "D:\\Work\\Repo\\pkg"), { ok: true, text: "`x/a.ts:3`", summary: "x/a.ts:3" });
 	});
 
-	it("never contains an emoticon at a token boundary, which the native TUI would rewrite when the prompt is submitted", () => {
-		// `expandEmoticons` rewrites `8)`, `B)`, `:)`, `;)`… after whitespace or an opening bracket. A closing
-		// parenthesis after the last number is exactly `8)` for line 8; a closing bracket is not in its table.
-		for (let line = 1; line <= 120; line++) {
-			for (const note of [lineNote([{ start: line, end: line }]), lineNote([{ start: 2, end: 2 }, { start: line + 5, end: line + 5 }]), lineNote([{ start: line, end: line + 8 }])]) {
-				assert.doesNotMatch(note, /[()]|[:;]/, note);
-				assert.match(note, /^\[lines? [0-9, -]+\]$/, note);
-			}
-		}
+	it("is never an @ mention, whatever the path", () => {
+		const reference = composeLineReference(at("D:\\Work\\Repo\\my notes\\a b.md", 2), CWD);
+		assert.deepEqual(reference, { ok: true, text: "`my notes/a b.md:2`", summary: "my notes/a b.md:2" });
+		assert.ok(reference.ok && !reference.text.startsWith("@") && !reference.text.includes(" @"));
+	});
+
+	it("names the version of a side of a Git diff, as a quote does", () => {
+		assert.deepEqual(composeLineReference(at("D:\\Work\\Repo\\src\\app.ts", 4, "HEAD (3f2a9c1)"), CWD), { ok: true, text: "`src/app.ts:4 @ HEAD (3f2a9c1)`", summary: "src/app.ts:4 @ HEAD (3f2a9c1)" });
+		assert.deepEqual(composeLineReference(at("D:\\Work\\Repo\\src\\app.ts", 4, "index"), CWD), { ok: true, text: "`src/app.ts:4 @ index`", summary: "src/app.ts:4 @ index" });
+	});
+
+	it("pads or lengthens the code span for a path with a backtick", () => {
+		assert.deepEqual(composeLineReference(at("D:\\Work\\Repo\\a`b.ts", 1), CWD), { ok: true, text: "``a`b.ts:1``", summary: "a`b.ts:1" });
+	});
+
+	it("refuses a document that has no location, with a reason that says what to do", () => {
+		const refused = composeLineReference(at(null, 1), CWD);
+		assert.equal(refused.ok, false);
+		assert.match(refused.ok ? "" : refused.reason, /no file location.*Select text to quote/);
+	});
+
+	it("refuses a path with a control character and a path too long for one insertion", () => {
+		assert.equal(composeLineReference(at("/r/a\u001b[201~b.ts", 1), "/r").ok, false);
+		const long = composeLineReference(at(`/r/${"d".repeat(MAX_FILE_PATH_LENGTH - 8)}/${"e".repeat(MAX_INSERT_TEXT_LENGTH)}.ts`, 1), "/r");
+		assert.equal(long.ok, false);
 	});
 });
 
 describe("reference formatting", () => {
-	it("makes a workspace file a relative @path with the range as a note, never a :12-30 suffix", () => {
-		const result = formatReference({ fsPath: "D:\\Work\\Repo\\src\\a.ts", ranges: [{ start: 12, end: 30 }] }, CWD);
-		assert.deepEqual(result, { ok: true, reference: "@src/a.ts [lines 12-30]" });
+	it("makes a workspace file a relative @path, never a :12-30 suffix", () => {
 		assert.deepEqual(formatReference({ fsPath: "D:\\Work\\Repo\\src\\a.ts" }, CWD), { ok: true, reference: "@src/a.ts" });
 	});
 
 	it("keeps a file outside the session's directory absolute with forward slashes so it still resolves", () => {
 		assert.deepEqual(formatReference({ fsPath: "D:\\Other\\b.ts" }, CWD), { ok: true, reference: "@D:/Other/b.ts" });
-		assert.deepEqual(formatReference({ fsPath: "/home/me/repo2/a.ts", ranges: [{ start: 1, end: 2 }] }, "/home/me/repo"), { ok: true, reference: "@/home/me/repo2/a.ts [lines 1-2]" });
+		assert.deepEqual(formatReference({ fsPath: "/home/me/repo2/a.ts" }, "/home/me/repo"), { ok: true, reference: "@/home/me/repo2/a.ts" });
 	});
 
 	it("is relative to the target session's directory, not to the workspace", () => {
@@ -86,7 +100,7 @@ describe("reference formatting", () => {
 	});
 
 	it("quotes a path the bare form would not parse back to itself", () => {
-		assert.deepEqual(formatReference({ fsPath: "D:\\Work\\Repo\\my notes\\a b.md", ranges: [{ start: 2, end: 2 }] }, CWD), { ok: true, reference: '@"my notes/a b.md" [line 2]' });
+		assert.deepEqual(formatReference({ fsPath: "D:\\Work\\Repo\\my notes\\a b.md" }, CWD), { ok: true, reference: '@"my notes/a b.md"' });
 		assert.deepEqual(formatReference({ fsPath: "D:\\Work\\Repo\\say \"hi\".txt" }, CWD), { ok: true, reference: "@'say \"hi\".txt'" });
 	});
 
@@ -108,8 +122,8 @@ describe("composing one insertion", () => {
 	});
 
 	it("names a single reference in full for the status message", () => {
-		const result = composeInsertion([{ fsPath: "D:\\Work\\Repo\\src\\a.ts", ranges: [{ start: 12, end: 30 }] }], CWD);
-		assert.deepEqual(result, { ok: true, text: "@src/a.ts [lines 12-30]", summary: "@src/a.ts [lines 12-30]", count: 1 });
+		const result = composeInsertion([{ fsPath: "D:\\Work\\Repo\\src\\a.ts" }], CWD);
+		assert.deepEqual(result, { ok: true, text: "@src/a.ts", summary: "@src/a.ts", count: 1 });
 	});
 
 	it("refuses the whole insertion when one path cannot be mentioned, or when it is too long for one paste", () => {

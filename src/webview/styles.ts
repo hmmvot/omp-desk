@@ -202,17 +202,33 @@ ${ANSI_STYLES}
 
 .omp-empty { color: var(--omp-muted); font-style: italic; padding: 4px 0; }
 /* The empty conversation: folder and model, the key hints and up to three recent sessions, centered in the transcript area. The frame takes no clicks except on the recent rows. */
-.omp-empty-state { position: absolute; inset: 0; display: flex; align-items: center; align-items: safe center; justify-content: center; padding: 0 24px 40px; pointer-events: none; }
+.omp-empty-state { position: absolute; inset: 0; display: flex; align-items: center; align-items: safe center; justify-content: center; padding: 0 24px 40px; overflow-y: auto; pointer-events: none; }
 .omp-empty-state-body { width: min(520px, 100%); }
+.omp-empty-groups { display: grid; grid-template-columns: minmax(0, 1fr); column-gap: 36px; }
+.omp-empty-group { min-width: 0; }
+@media (min-width: 700px) {
+	.omp-empty-state-body { width: min(780px, 100%); }
+	.omp-empty-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .omp-empty-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--omp-muted); }
 .omp-empty-head .codicon { font-size: 20px; }
 .omp-empty-head b { font-size: 15px; font-weight: 600; color: var(--vscode-foreground); }
 .omp-empty-head small { font-size: 12px; }
 .omp-empty-state h3 { margin: 18px 0 6px; font-size: 11px; font-weight: 400; letter-spacing: 0.04em; text-transform: uppercase; color: var(--omp-muted); }
-.omp-empty-keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: center; margin: 0; font-size: 12px; color: var(--omp-muted); }
+.omp-empty-keys { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; align-items: center; margin: 0; font-size: 12px; color: var(--omp-muted); }
 .omp-empty-key { display: contents; }
 .omp-empty-keys dt, .omp-empty-keys dd { margin: 0; }
+.omp-empty-keys dt { white-space: nowrap; }
 .omp-empty-keys kbd { display: inline-block; padding: 0 6px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); font: inherit; font-size: 11px; color: var(--vscode-foreground); }
+.omp-empty-keys kbd.omp-empty-key--none { border-style: dashed; color: var(--omp-muted); }
+/* A key another binding may take: the marker is a button (it opens Keyboard Shortcuts at that key), so it takes clicks the frame does not. */
+.omp-empty-key-conflict { display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; margin: 0 0 0 3px; padding: 1px; border: 0; border-radius: var(--omp-radius); background: none; color: var(--vscode-editorWarning-foreground, var(--vscode-list-warningForeground, #cca700)); font: inherit; cursor: pointer; pointer-events: auto; }
+.omp-empty-key-conflict .codicon { font-size: 14px; }
+.omp-empty-key-conflict:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.omp-empty-key-conflict:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.omp-empty-shortcuts { display: inline-block; margin: 14px 0 0; padding: 0; border: 0; background: none; color: var(--vscode-textLink-foreground); font: inherit; font-size: 12px; cursor: pointer; pointer-events: auto; }
+.omp-empty-shortcuts:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); text-decoration: underline; }
+.omp-empty-shortcuts:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .omp-empty-recent { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .omp-empty-recent button { display: flex; align-items: center; gap: 8px; width: calc(100% + 16px); margin: 0 -8px; padding: 4px 8px; border: 0; border-radius: var(--omp-radius); background: none; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; pointer-events: auto; }
 .omp-empty-recent button:hover { background: var(--vscode-list-hoverBackground); }
@@ -603,7 +619,7 @@ ${ANSI_STYLES}
 .omp-composer-toolbar .omp-composer-attach { width: 28px; height: 28px; padding: 0; justify-content: center; flex: 0 0 auto; }
 /* Commands: the button is a toolbar icon; its list opens upward over the whole card width (capped), anchored to the card, never to the button, so it cannot overflow a narrow panel. */
 .omp-commands { display: flex; flex: 0 0 auto; }
-.omp-composer-toolbar .omp-composer-commands { width: 28px; height: 28px; padding: 0; justify-content: center; flex: 0 0 auto; }
+.omp-composer-toolbar .omp-composer-commands, .omp-composer-toolbar .omp-composer-keyboard { width: 28px; height: 28px; padding: 0; justify-content: center; flex: 0 0 auto; }
 .omp-commands-popup { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 50; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; width: min(460px, 100%); padding: 8px; border: 1px solid var(--vscode-editorWidget-border, var(--omp-border)); border-radius: var(--omp-radius-card); background: var(--vscode-editorSuggestWidget-background, var(--vscode-editorWidget-background)); color: var(--vscode-editorSuggestWidget-foreground, var(--vscode-foreground)); box-shadow: 0 2px 8px var(--vscode-widget-shadow); font-size: 12px; }
 .vscode-high-contrast .omp-commands-popup, .vscode-high-contrast-light .omp-commands-popup { border-color: var(--vscode-contrastBorder); box-shadow: none; }
 .omp-commands-search { flex: 0 0 auto; min-width: 0; }
@@ -628,7 +644,7 @@ ${ANSI_STYLES}
 .omp-composer-toolbar .omp-footer-trigger:hover:not(:disabled), .omp-composer-toolbar .omp-context-trigger:hover, .omp-composer-toolbar .omp-composer-attach:hover:not(:disabled), .omp-composer-toolbar-actions .omp-btn:not(.omp-btn--primary):hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
 .omp-composer-toolbar .omp-footer-trigger { padding: 0 6px; }
 .omp-composer-toolbar .omp-footer-trigger-label { font-size: 12px; }
-.vscode-high-contrast .omp-composer-toolbar .omp-footer-trigger, .vscode-high-contrast .omp-composer-toolbar .omp-context-trigger, .vscode-high-contrast .omp-composer-toolbar .omp-composer-attach, .vscode-high-contrast .omp-composer-toolbar .omp-composer-commands, .vscode-high-contrast-light .omp-composer-toolbar .omp-footer-trigger, .vscode-high-contrast-light .omp-composer-toolbar .omp-context-trigger, .vscode-high-contrast-light .omp-composer-toolbar .omp-composer-attach, .vscode-high-contrast-light .omp-composer-toolbar .omp-composer-commands { border-color: var(--vscode-contrastBorder); }
+.vscode-high-contrast .omp-composer-toolbar .omp-footer-trigger, .vscode-high-contrast .omp-composer-toolbar .omp-context-trigger, .vscode-high-contrast .omp-composer-toolbar .omp-composer-attach, .vscode-high-contrast .omp-composer-toolbar .omp-composer-commands, .vscode-high-contrast .omp-composer-toolbar .omp-composer-keyboard, .vscode-high-contrast-light .omp-composer-toolbar .omp-footer-trigger, .vscode-high-contrast-light .omp-composer-toolbar .omp-context-trigger, .vscode-high-contrast-light .omp-composer-toolbar .omp-composer-attach, .vscode-high-contrast-light .omp-composer-toolbar .omp-composer-commands, .vscode-high-contrast-light .omp-composer-toolbar .omp-composer-keyboard { border-color: var(--vscode-contrastBorder); }
 .omp-composer-toolbar-actions .omp-btn--primary { border-radius: 14px; }
 @media (min-width: 461px) { .omp-composer-toolbar-actions .omp-btn--primary { padding: 3px 14px; } }
 /* A disabled Send is a neutral pill, not the primary colour washed out. */

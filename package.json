@@ -710,7 +710,6 @@
       },
       {
         "command": "ompDesk.quoteEditorSelection",
-        "enablement": "editorHasSelection",
         "title": "Quote Selection to Session",
         "category": "OMP Desk",
         "icon": "$(quote)"
@@ -841,12 +840,6 @@
         "command": "ompDesk.clearSession",
         "title": "Clear Context…",
         "category": "OMP Desk"
-      },
-      {
-        "command": "ompDesk.sendSelection",
-        "title": "Add Selection to Session",
-        "category": "OMP Desk",
-        "icon": "$(comment-discussion)"
       },
       {
         "command": "ompDesk.sendFile",
@@ -1150,13 +1143,8 @@
       ],
       "editor/context": [
         {
-          "command": "ompDesk.sendSelection",
-          "when": "editorHasSelection && resourceScheme == file",
-          "group": "9_omp@1"
-        },
-        {
           "command": "ompDesk.quoteEditorSelection",
-          "when": "editorHasSelection",
+          "when": "editorTextFocus",
           "group": "9_omp@3"
         },
         {
@@ -1652,16 +1640,21 @@
       {
         "command": "ompDesk.quoteEditorSelection",
         "key": "alt+q",
-        "when": "editorTextFocus && editorHasSelection"
+        "when": "editorTextFocus"
       },
       {
         "command": "ompDesk.searchPromptHistory",
-        "key": "ctrl+r",
+        "key": "ctrl+alt+y",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
       },
       {
         "command": "ompDesk.toggleThinking",
-        "key": "ctrl+t",
+        "key": "ctrl+alt+t",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
+      },
+      {
+        "command": "ompDesk.showChatKeyboardShortcuts",
+        "key": "ctrl+/",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
       },
       {
@@ -1689,11 +1682,6 @@
         "command": "ompDesk.moveFileToNewWindow",
         "key": "ctrl+shift+m",
         "mac": "cmd+shift+m"
-      },
-      {
-        "command": "ompDesk.sendSelection",
-        "key": "alt+shift+k",
-        "when": "editorTextFocus && editorHasSelection && resourceScheme == file"
       }
     ]
   },

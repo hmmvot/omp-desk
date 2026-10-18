@@ -368,6 +368,7 @@ export interface ConversationPort {
 	clearConversation(conversation: string, report: (text: string, outcome: "done" | "refused" | "deferred") => void): Promise<void>;
 	refreshDisplayPreferences(): void;
 	refreshCodeThemes(): void;
+	refreshKeyHints(): void;
 	dispose(): void;
 
 	// The live Chat session of a conversation, by value. Every operation below names the incarnation the caller read
