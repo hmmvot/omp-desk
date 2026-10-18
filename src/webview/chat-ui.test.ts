@@ -7929,6 +7929,91 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("the current match's thinking block and tool output reopen when its row comes back after scrolling away, unless the reader collapsed them by hand; the next jump opens them again", async () => {
+			await reset("find-remount");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 const entries=[];
+			 for(let index=0;index<600;index++){
+			  if(index%2===0)entries.push(row('u'+index,{role:'user',timestamp:1000+index,content:'Prompt '+index}));
+			  else if(index===21)entries.push(row('a21',{role:'assistant',model:'m',timestamp:1021,stopReason:'stop',content:[{type:'thinking',thinking:'Pondering the zebrafish at length'},{type:'text',text:'Reply 21 plain'}]}));
+			  else if(index===101){
+			   entries.push(row('a101',{role:'assistant',model:'m',timestamp:1101,stopReason:'toolUse',content:[{type:'toolCall',id:'t1',name:'bash',arguments:{command:'echo hi'}}]}));
+			   entries.push(row('r101',{role:'toolResult',toolCallId:'t1',toolName:'bash',timestamp:1102,isError:false,content:[{type:'text',text:'the zebrafish output line'}]}));
+			  }
+			  else entries.push(row('a'+index,{role:'assistant',model:'m',timestamp:1000+index,stopReason:'stop',content:[{type:'text',text:'Reply '+index+'\\n\\n'+'Plain filler prose for the reply. '.repeat(6)}]}));
+			 }
+			 window.ui.push({entries,durableCount:entries.length,working:false,settled:true,olderCount:0});
+			})()`);
+			await ui.wait("document.querySelector('.omp-transcript').scrollHeight>5000 && document.querySelector('[data-find-id=\"a599\"]')");
+			await ui.settleGeometry(".omp-transcript");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find')");
+			await ui.call("Input.insertText", { text: "zebrafish" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 2'");
+			const thinkingOpen = "Boolean(document.querySelector('[data-find-id=\"a21\"] details.omp-thinking[open] .omp-md'))";
+			const outputOpen = "Boolean(document.querySelector('[data-find-id=\"call:t1\"] .omp-tool-body'))";
+			const mounted = (id: string): string => `Boolean(document.querySelector('[data-find-id=${JSON.stringify(id)}]'))`;
+			/** Wheels down until the row is unmounted, then back up until it is mounted again: the way a reader scrolls it out of the list and back. */
+			const awayAndBack = async (id: string): Promise<void> => {
+				const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const r=document.querySelector('.omp-transcript').getBoundingClientRect();return{x:r.left+100,y:r.top+100}})()");
+				const wheel = async (deltaY: number): Promise<void> => {
+					await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...point, deltaX: 0, deltaY });
+					// Native wheel intent uses the platform clock, outside the fixture's fake interval clock.
+					await ui.evaluate("(()=>{const {promise,resolve}=Promise.withResolvers();setTimeout(resolve,650);return promise})()");
+					await ui.settleGeometry(".omp-transcript");
+				};
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+				await wheel(9000);
+				await ui.wait(`!${mounted(id)}`);
+				await wheel(-9000);
+				await ui.wait(mounted(id));
+				await ui.settleGeometry(".omp-transcript");
+				await settleFrames();
+			};
+
+			// The newest match is the call's output: opened by the jump, still open when its row comes back.
+			await waitCurrent("call:t1");
+			await ui.wait(outputOpen);
+			await awayAndBack("call:t1");
+			assert.equal(await ui.evaluate(outputOpen), true, "the output is open after its row came back");
+
+			// Collapsed by hand: it stays collapsed when the row comes back.
+			await ui.evaluate("document.querySelector('[data-find-id=\"call:t1\"] .omp-tool-head').click()");
+			await ui.wait(`!${outputOpen}`);
+			await settleFrames();
+			await awayAndBack("call:t1");
+			assert.equal(await ui.evaluate(outputOpen), false, "a block the reader collapsed stays collapsed");
+
+			// The thinking block holds the other match: opened by the jump, reopened when the row comes back.
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 2'");
+			await waitCurrent("a21");
+			assert.equal(await ui.evaluate(thinkingOpen), true, "the jump opened the thinking block");
+			await awayAndBack("a21");
+			await ui.wait(thinkingOpen);
+			assert.equal(await ui.evaluate("document.querySelectorAll('[data-find-id=\"a21\"] details.omp-thinking').length"), 1);
+
+			// Collapsed by hand: it stays closed through another trip.
+			await ui.evaluate("document.querySelector('[data-find-id=\"a21\"] details.omp-thinking > summary').click()");
+			await ui.wait(`!${thinkingOpen}`);
+			await settleFrames();
+			await awayAndBack("a21");
+			await settleFrames();
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('[data-find-id=\"a21\"] details.omp-thinking[open]'))"), false, "the collapsed thinking block stays closed");
+
+			// A new jump clears the flag: Enter to the call and Enter back to the thinking opens each again.
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 2'");
+			await ui.wait(outputOpen);
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 2'");
+			await ui.wait(thinkingOpen);
+			await press("Escape", "Escape", 27);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 	} finally {
 		page?.socket.close();
 		if (browser) await browser.call("Browser.close").catch(() => {});

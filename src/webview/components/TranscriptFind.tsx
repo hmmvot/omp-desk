@@ -14,7 +14,7 @@ import type { OverviewProjection } from "../../chat/tool-overview";
 import { canHighlight, paintFind, rangesIn, rowText } from "../lib/find-dom";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { provideFindAction, requestPanelAction } from "../lib/panel-actions";
-import { clearFindCache, findIdOf, findPattern, findUnitsOf, isLetterKey, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch } from "../lib/transcript-find";
+import { clearFindCache, findIdOf, findPattern, findUnitsOf, isLetterKey, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch, type FindSegment, type FindUnit } from "../lib/transcript-find";
 import type { TranscriptScrollController } from "../lib/transcript-scroll";
 import { markdownShownText } from "./Markdown";
 
@@ -61,6 +61,25 @@ function statusText(query: string, search: FindSearch, position: number): string
 	return position < 0 ? `${search.total.toLocaleString("en-US")} found` : `${(position + 1).toLocaleString("en-US")} of ${search.total.toLocaleString("en-US")}`;
 }
 
+/** The state keys of what hides `segment` of `unit`: its tool group in the Overview and, for output text, the call. */
+function containerKeys(view: TranscriptFindParams, unit: FindUnit, segment: FindSegment | null): string[] {
+	if (unit.callId === undefined) return [];
+	const keys: string[] = [];
+	const run = view.grouped ? view.overview.runs.find(candidate => candidate.members.some(member => member.kind === "tool" && member.tool.call.id === unit.callId)) : undefined;
+	if (run !== undefined) keys.push(run.id);
+	if (segment?.part === "output") keys.push(`call:${view.namespace}:${unit.callId}`);
+	return keys;
+}
+
+/** The thinking block that holds `segment`: the one of its position among the unit's thinking blocks when the row draws as many, else every block of the row. */
+function thinkingBlocks(row: HTMLElement, unit: FindUnit, segment: FindSegment | null): HTMLDetailsElement[] {
+	if (segment?.part !== "thinking") return [];
+	const blocks = [...row.querySelectorAll<HTMLDetailsElement>("details.omp-thinking")].filter(details => details.closest("[data-find-id]") === row);
+	const thinking = unit.segments.filter(candidate => candidate.part === "thinking");
+	const block = blocks.length === thinking.length ? blocks[thinking.indexOf(segment)] : undefined;
+	return block === undefined ? blocks : [block];
+}
+
 /** The find bar's state and keys; the bar to draw (`null` while closed). */
 export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 	const { enabled } = params;
@@ -81,6 +100,10 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 	const painting = useRef<number | null>(null);
 	const paintTimer = useRef<number | undefined>(undefined);
 	const lastPaint = useRef(0);
+	/** The match whose containers are held open, whether the reader closed one of them since its jump, and the keys seen open. */
+	const held = useRef("");
+	const userClosed = useRef(false);
+	const seenOpen = useRef(new Set<string>());
 	const latest = useRef(params);
 	latest.current = params;
 
@@ -91,11 +114,43 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 	const state = useRef({ search, current, open });
 	state.current = { search, current, open };
 
+	/**
+	 * Opens the tool group and the call output a match hides in (state the transcript keeps by key); `true` when it opened one. A block the
+	 * reader collapsed by hand after the jump is left alone: a key seen open that is closed now was closed by the reader, since only this
+	 * code opens them and nothing here closes them.
+	 */
+	const openContainers = useCallback((unit: FindUnit, segment: FindSegment | null): boolean => {
+		const view = latest.current;
+		let opened = false;
+		for (const key of containerKeys(view, unit, segment)) {
+			if (view.shown.get(key) === true) seenOpen.current.add(key);
+			else if (seenOpen.current.has(key)) userClosed.current = true;
+		}
+		if (userClosed.current) return false;
+		for (const key of containerKeys(view, unit, segment)) if (view.shown.get(key) !== true) { view.disclose(key, true); opened = true; }
+		return opened;
+	}, []);
+	/** The current match's own containers are open again when its row is back (it scrolled out and in, or a repaint rebuilt it), unless the reader closed one. */
+	const keepOpen = useCallback((): void => {
+		const { search: now, current: match } = state.current;
+		if (match === null) return;
+		const id = `${match.id}:${match.occurrence}`;
+		if (held.current !== id) { held.current = id; userClosed.current = false; seenOpen.current.clear(); }
+		const unit = now.units.find(candidate => candidate.id === match.id);
+		if (unit === undefined) return;
+		const segment = segmentOf(unit, match.occurrence);
+		openContainers(unit, segment);
+		if (userClosed.current) return;
+		const row = rowOf(latest.current.rootRef.current, unit.id);
+		if (row !== null) for (const details of thinkingBlocks(row, unit, segment)) if (!details.open) details.open = true;
+	}, [openContainers]);
+
 	/** Paint every occurrence in the mounted rows and the current match over them. */
 	const paint = useCallback((): void => {
 		const root = latest.current.rootRef.current, { search: now, current: match, open: showing } = state.current;
 		root?.querySelector("[data-find-current]")?.removeAttribute("data-find-current");
 		if (!showing || root === null || now.pattern === null) { paintFind([], null); return; }
+		keepOpen();
 		const all: Range[] = [];
 		let currentRange: Range | null = null, currentRow: Element | null = null;
 		for (const row of root.querySelectorAll<HTMLElement>("[data-find-id]")) {
@@ -107,7 +162,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		paintFind(all, currentRange);
 		// A match whose text is not drawn (deep in a long output), or a page that cannot paint, still shows which row holds it.
 		if (currentRow !== null && (currentRange === null || !canHighlight())) currentRow.setAttribute("data-find-current", "");
-	}, []);
+	}, [keepOpen]);
 	/** `throttled`: a mutation-driven repaint (streaming output) runs at most once per `PAINT_INTERVAL`; a change of query or match paints on the next frame. */
 	const schedulePaint = useCallback((throttled = false): void => {
 		if (painting.current !== null || paintTimer.current !== undefined) return;
@@ -125,29 +180,22 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		const needle = now.pattern;
 		if (unit === undefined || needle === null) return;
 		const segment = segmentOf(unit, match.occurrence);
-		const hasThinking = unit.segments.some((candidate, index) => candidate.part === "thinking" && (unit.memo?.counts[index] ?? 0) > 0);
+		held.current = `${match.id}:${match.occurrence}`;
+		userClosed.current = false;
+		seenOpen.current.clear();
+		const hasThinking = segment?.part === "thinking";
 		const first = latest.current;
 		if (!first.rows.some(card => findIdOf(card) === unit.id)) {
 			if (first.paged) first.showPage(unit.cardId); else first.pinTop(unit.cardId);
 		}
 		/** Opens the group and the call a match hides in. Each opening re-captures the reader's place, so the scroll is asked for again after it. */
-		const openHidden = (): boolean => {
-			const view = latest.current;
-			if (unit.callId === undefined) return false;
-			let opened = false;
-			const run = view.grouped ? view.overview.runs.find(candidate => candidate.members.some(member => member.kind === "tool" && member.tool.call.id === unit.callId)) : undefined;
-			if (run !== undefined && view.shown.get(run.id) !== true) { view.disclose(run.id, true); opened = true; }
-			const call = `call:${view.namespace}:${unit.callId}`;
-			if (segment?.part === "output" && view.shown.get(call) !== true) { view.disclose(call, true); opened = true; }
-			return opened;
-		};
-		openHidden();
+		openContainers(unit, segment);
 		latest.current.controllerRef.current?.reveal(unit.sources);
 		let frames = 0, seen = 0;
 		const tick = (): void => {
 			if (revealToken.current !== token) return;
 			frames++;
-			if (frames > 1 && frames < REVEAL_FRAMES && openHidden()) {
+			if (frames > 1 && frames < REVEAL_FRAMES && openContainers(unit, segment)) {
 				latest.current.controllerRef.current?.reveal(unit.sources);
 				requestAnimationFrame(tick);
 				return;
@@ -155,7 +203,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 			const row = rowOf(latest.current.rootRef.current, unit.id);
 			if (row !== null) {
 				seen++;
-				const closed = hasThinking ? [...row.querySelectorAll<HTMLDetailsElement>("details.omp-thinking:not([open])")] : [];
+				const closed = hasThinking && !userClosed.current ? thinkingBlocks(row, unit, segment).filter(details => !details.open) : [];
 				if (closed.length > 0) for (const details of closed) details.open = true;
 				else {
 					const target = rangesIn(rowText(row), needle)[match.occurrence] ?? null;
@@ -174,7 +222,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 			if (frames < REVEAL_FRAMES) requestAnimationFrame(tick);
 		};
 		requestAnimationFrame(tick);
-	}, [schedulePaint]);
+	}, [schedulePaint, openContainers]);
 
 	const goTo = useCallback((match: FindMatch | null): void => {
 		setCurrent(match);
@@ -271,6 +319,19 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		observer.observe(root, { childList: true, characterData: true, subtree: true });
 		return () => observer.disconnect();
 	}, [open, params.rootRef, schedulePaint]);
+	// A block the reader closes by hand (a click, Esc inside it, the thinking toggle) is theirs from then on, until the next jump.
+	useEffect(() => {
+		const root = params.rootRef.current;
+		if (!open || root === null) return;
+		const onToggle = (event: Event): void => {
+			const block = event.target;
+			if (!(block instanceof HTMLDetailsElement) || block.open || !block.classList.contains("omp-thinking")) return;
+			const match = state.current.current;
+			if (match !== null && block.closest("[data-find-id]")?.getAttribute("data-find-id") === match.id) userClosed.current = true;
+		};
+		root.addEventListener("toggle", onToggle, true);
+		return () => root.removeEventListener("toggle", onToggle, true);
+	}, [open, params.rootRef]);
 	useEffect(() => () => {
 		revealToken.current++;
 		if (painting.current !== null) cancelAnimationFrame(painting.current);
