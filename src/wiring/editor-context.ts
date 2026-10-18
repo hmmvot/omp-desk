@@ -22,10 +22,10 @@
  */
 import type { SessionItemState } from "../views/session-tree.ts";
 import { codeSpan } from "../shared/code-span.ts";
-import { MAX_EDITOR_QUOTES, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH, mentionTokenForPath } from "../protocol/messages.ts";
+import { MAX_EDITOR_QUOTES, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH, MAX_QUOTE_SIDE_LOCATION_LENGTH, mentionTokenForPath } from "../protocol/messages.ts";
 import type { GuestEditorQuote } from "../protocol/messages.ts";
 import { quoteSizeRefusal } from "../shared/quote-limit.ts";
-import { quoteLocationText } from "../shared/quote-location.ts";
+import { hunkLocationText, quoteLocationText } from "../shared/quote-location.ts";
 import { mentionPath } from "../host/file-mentions.ts";
 import { UNSAFE_PATH } from "../host/bracketed-paste.ts";
 
@@ -128,7 +128,7 @@ export function quoteLocation(fsPath: string, cwd: string, lines: LineRange, ver
 	const path = mentionPath(fsPath, cwd);
 	if (path.length === 0 || UNSAFE_PATH.test(path)) return { ok: false, reason: `“${fsPath}” has a character a message cannot carry.` };
 	const location = quoteLocationText(path, lines.start, lines.end, version);
-	if (location.length > MAX_QUOTE_LOCATION_LENGTH) return { ok: false, reason: `The path of “${fsPath}” is too long to quote.` };
+	if (location.length > MAX_QUOTE_SIDE_LOCATION_LENGTH) return { ok: false, reason: `The path of “${fsPath}” is too long to quote.` };
 	return { ok: true, location };
 }
 
@@ -175,6 +175,46 @@ export function composeEditorQuotes(source: EditorQuoteSource, cwd: string): Edi
 	const tooLong = quoteSizeRefusal(total);
 	if (tooLong !== null) return { ok: false, reason: tooLong };
 	return { ok: true, quotes, summary: quotes.length === 1 ? (locations[0] ?? `${source.fileName || "the selection"}`) : `${quotes.length} selections` };
+}
+
+/** One side of a diff for the quote of a hunk: where its document is (`null` path: none OMP can open) and the lines of the hunk on it (`null`: the hunk has no line there). */
+export interface HunkQuoteSide {
+	readonly fsPath: string | null;
+	readonly version: string | null;
+	readonly lines: LineRange | null;
+}
+
+/** The hunk under the caret of a diff editor (decision 11 of the quote design): the unified-diff text and the lines it covers on each side. */
+export interface HunkQuoteSource {
+	readonly modified: HunkQuoteSide;
+	readonly original: HunkQuoteSide;
+	readonly text: string;
+}
+
+/**
+ * The hunk as one quote: a `diff` block (`text`), under a location that names the lines of both sides, the modified side first
+ * (`src/app.ts:3-5 was src/app.ts:3-4 @ HEAD (3f2a9c1)`). A side without a path, or without a line in the hunk, is left out of it; a hunk
+ * whose sides both are left out is quoted without a location. The refusals are a selection's: a control character, the size.
+ */
+export function composeHunkQuote(source: HunkQuoteSource, cwd: string): EditorQuotes | Refusal {
+	const text = source.text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+	if (text.trim().length === 0) return { ok: false, reason: "There is no change to quote." };
+	if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(text)) return { ok: false, reason: "The change holds a control character that a message cannot carry." };
+	const sides: (string | null)[] = [];
+	for (const side of [source.modified, source.original]) {
+		if (side.fsPath === null || side.lines === null) {
+			sides.push(null);
+			continue;
+		}
+		const located = quoteLocation(side.fsPath, cwd, side.lines, side.version);
+		if (!located.ok) return located;
+		sides.push(located.location);
+	}
+	const location = hunkLocationText(sides[0] ?? null, sides[1] ?? null);
+	if (location !== null && location.length > MAX_QUOTE_LOCATION_LENGTH) return { ok: false, reason: "The paths of this change are too long to quote." };
+	const tooLong = quoteSizeRefusal(text.length);
+	if (tooLong !== null) return { ok: false, reason: tooLong };
+	return { ok: true, quotes: [{ location, fileName: "", languageId: "diff", text }], summary: location ?? "the change" };
 }
 
 /**

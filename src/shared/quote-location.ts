@@ -34,3 +34,26 @@ const REVISION_LOCATION = new RegExp(`:\\d+(?:-\\d+)?${QUOTE_VERSION_SEPARATOR}\
 export function isRevisionLocation(text: string): boolean {
 	return REVISION_LOCATION.test(text);
 }
+
+/** What separates the two sides of a hunk location: the modified side first, then the original side (`src/app.ts:3-5 was src/app.ts:3-4 @ HEAD (3f2a9c1)`). */
+export const HUNK_LOCATION_SEPARATOR = " was ";
+
+/**
+ * The location line of a quoted hunk of a diff (decision 11): the lines of the modified side, then {@link HUNK_LOCATION_SEPARATOR}
+ * and the lines of the original side, each as {@link quoteLocationText} writes it. A side that has no line in the hunk (a block that
+ * only deletes, or only inserts) is left out, and then the location is the other side's alone.
+ */
+export function hunkLocationText(modified: string | null, original: string | null): string | null {
+	if (modified === null) return original;
+	return original === null ? modified : `${modified}${HUNK_LOCATION_SEPARATOR}${original}`;
+}
+
+const HUNK_LOCATION = new RegExp(`:\\d+(?:-\\d+)?(?:${QUOTE_VERSION_SEPARATOR}\\S[^\\r\\n\`]{0,${MAX_QUOTE_VERSION_LENGTH - 1}}?)?${HUNK_LOCATION_SEPARATOR}[^\\r\\n\`]{1,4096}:\\d+(?:-\\d+)?(?:${QUOTE_VERSION_SEPARATOR}\\S[^\\r\\n\`]{0,${MAX_QUOTE_VERSION_LENGTH - 1}})?$`);
+
+/**
+ * Whether `text` is the location of a hunk (`src/app.ts:3-5 was src/app.ts:3-4`): two paths and their lines, which no file link
+ * opens, so the transcript must not make it one even when both sides are files on disk.
+ */
+export function isHunkLocation(text: string): boolean {
+	return text.length <= 8192 && HUNK_LOCATION.test(text);
+}

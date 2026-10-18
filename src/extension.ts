@@ -131,6 +131,7 @@ import {
   EditorRecency,
   candidateDescription as sendCandidateDescription,
   composeEditorQuotes,
+  composeHunkQuote,
   composeInsertion,
   composeLineReference,
   folderName as sessionFolderName,
@@ -139,7 +140,8 @@ import {
   pickerEntries,
   visibleQuoteTarget,
 } from "./wiring/editor-context";
-import type { EditorQuoteSource, LineReferenceSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
+import type { EditorQuoteSource, HunkQuoteSource, LineReferenceSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
+import { quoteHunkOf } from "./wiring/quote-hunk";
 import { quoteSourceOf } from "./wiring/quote-source";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
@@ -6311,16 +6313,18 @@ async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIn
   return await promise;
 }
 
-/** What goes to the chosen session: `@path` references (Add File to Session), a quote of editor text, or the reference to a caret's line (both Alt+Q). */
+/** What goes to the chosen session: `@path` references (Add File to Session), a quote of editor text, the hunk of a diff under the caret, or the reference to a caret's line (the last three are Alt+Q). */
 type InsertionRequest =
   | { readonly kind: "references"; readonly sources: readonly ReferenceSource[] }
   | { readonly kind: "quote"; readonly source: EditorQuoteSource }
+  | { readonly kind: "hunk"; readonly source: HunkQuoteSource }
   | { readonly kind: "line"; readonly source: LineReferenceSource };
 
 /** How the status bar and the warnings word what went where. */
 const SEND_WORDS = {
   references: { past: "added", Past: "Added", to: "to" },
   quote: { past: "quoted", Past: "Quoted", to: "into" },
+  hunk: { past: "quoted", Past: "Quoted", to: "into" },
   line: { past: "referenced", Past: "Referenced", to: "in" },
 } as const;
 
@@ -6335,6 +6339,10 @@ function composeRequest(request: InsertionRequest, cwd: string):
   if (request.kind === "line") {
     const composed = composeLineReference(request.source, cwd);
     return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-text", text: composed.text }, pasteText: null } : composed;
+  }
+  if (request.kind === "hunk") {
+    const composed = composeHunkQuote(request.source, cwd);
+    return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
   }
   const composed = composeEditorQuotes(request.source, cwd);
   return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
@@ -6353,6 +6361,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
  * (docs/designs/2026-10-18-chat-keys-and-empty-state.md, decision 3): `path:N` as inline code, inserted at the caret of the draft, by
  * the quote's own location rule and target rule. The active editor of a diff is the side that has the focus; a side that is a Git
  * revision names the version it is (decision 10 of the quote design, `src/wiring/quote-source.ts`).
+ * In a diff editor, with nothing selected and the caret on a changed line, the whole hunk is quoted instead (decision 11, `wiring/quote-hunk.ts`).
  */
 async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -6363,6 +6372,18 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
   const { document } = editor;
   const selections = editor.selections.filter(selection => !selection.isEmpty);
   if (selections.length === 0) {
+    // In a diff editor with the caret on a changed line, the whole hunk is the quote (decision 11); anywhere else the caret's line is referenced.
+    const hunk = await quoteHunkOf(editor);
+    if (hunk !== null) {
+      log.debug(`diff hunk: ${hunk.modified.version ?? "file on disk"} against ${hunk.original.version ?? "file on disk"}`);
+      const early = composeHunkQuote(hunk, "");
+      if (!early.ok) {
+        showWarning(`${early.reason} Nothing was quoted.`);
+        return;
+      }
+      await sendToSession(context, index, { kind: "hunk", source: hunk }, hunk.modified.fsPath ?? hunk.original.fsPath, document.isDirty);
+      return;
+    }
     const where = await quoteSourceOf(document, [editor.selection]);
     const source: LineReferenceSource = { fsPath: where.fsPath, version: where.version, line: editor.selection.active.line + 1 };
     log.debug(`line reference: ${document.uri.scheme} document, ${source.fsPath === null ? "no path" : source.version === null ? "file on disk" : `version ${source.version}`}`);
@@ -6447,7 +6468,7 @@ async function sendToSession(context: vscode.ExtensionContext, index: SessionInd
     });
     return;
   }
-  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : request.kind === "quote" ? `${request.source.selections.length} editor quote(s)` : "a line reference"}`);
+  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : request.kind === "quote" ? `${request.source.selections.length} editor quote(s)` : request.kind === "hunk" ? "a diff hunk" : "a line reference"}`);
   const notes: string[] = [];
   if (unsaved) notes.push(chatOnly ? "the file has unsaved changes: the location is the saved file's" : "unsaved changes are not included");
   if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);

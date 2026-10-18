@@ -5,6 +5,8 @@
  * in, with the version after ` @ ` for a Git side. This checks the key and the editor's right-click menu on both sides of the Source
  * Control diff of a changed file and of a staged file, of a commit's changes in the multi-file diff editor and of a diff of two plain
  * files, the left side of a file that is staged and then changed again, the inline view, and that a sent Git location is plain code and not a link to the file on disk.
+ * With nothing selected and the caret on a changed line, the same keys quote the whole hunk under the caret as a `diff` block under a location that
+ * names both sides (decision 11): in the side-by-side view on either side, in a commit's changes and in the inline view.
  *
  * Measured here and recorded in the design: the deleted lines of an inline diff are drawn by VS Code as view-zone text, not as editor
  * text, so no editor selection (`editorHasSelection`) exists there and the key does nothing.
@@ -126,11 +128,40 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await page.keyboard.press("Control+w");
 		};
 		const code = (location: string, ...lines: string[]): string => `> \`${location}\`\n> \`\`\`ts\n${lines.map(line => `> ${line}\n`).join("")}> \`\`\`\n`;
+		/** The Markdown of a quoted hunk: its location as inline code, then the diff rows (the ones that start with a space are the unchanged lines) in a `diff` fence. */
+		const hunk = (location: string, ...rows: string[]): string => `> \`${location}\`\n> \`\`\`diff\n${rows.map(row => `> ${row}\n`).join("")}> \`\`\`\n`;
+		/** Puts the caret, with nothing selected, on line `line` (zero-based) of a side. */
+		const placeCaret = async (which: "original" | "modified", line: number): Promise<void> => {
+			await side(which).click();
+			await page.keyboard.press("Control+Home");
+			for (let i = 0; i < line; i++) await page.keyboard.press("ArrowDown");
+		};
+		/** Alt+Q with the caret on a changed line: the draft must be exactly the hunk. */
+		const quoteHunkWithKey = async (which: "original" | "modified", line: number, quote: string): Promise<void> => {
+			await placeCaret(which, line);
+			await page.keyboard.press("Alt+q");
+			await expect.poll(draft, `${which} side, caret on line ${line + 1}`).toBe(quote);
+			await clear();
+		};
+		/** The same through the right-click menu on the caret's line, found by its text. */
+		const quoteHunkWithMenu = async (which: "original" | "modified", line: number, lineText: string, quote: string): Promise<void> => {
+			await placeCaret(which, line);
+			await side(which).locator(".view-line").filter({ hasText: lineText }).first().click({ button: "right", position: { x: 30, y: 5 } });
+			const item = page.locator(".monaco-menu .action-label", { hasText: /^Quote Selection to Session$/ });
+			await item.hover();
+			await expect(item.locator("xpath=ancestor::li[1]")).toHaveClass(/focused/);
+			await page.keyboard.press("Enter");
+			await expect.poll(draft, `${which} side, caret on line ${line + 1}, menu`).toBe(quote);
+			await clear();
+		};
 
 		await test.step("a changed file: the left side is HEAD (the file is not staged), the right side is the file", async () => {
 			await openFile(page, "diff-app.ts");
-			await runCommand(page, "Git: Open Changes");
-			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
+			// The repository was created after the window started: Git's scan finds it some time later, and until then the command is not even listed. Ask again until the diff is there.
+			await expect(async () => {
+				await runCommand(page, "Git: Open Changes");
+				await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 10_000 });
+			}).toPass({ timeout: 120_000, intervals: [1_000] });
 			await expect(page.locator(".monaco-diff-editor")).toBeVisible();
 			await quoteWithKey("original", 2, 2, code(`diff-repo/diff-app.ts:3-4 @ HEAD (${headShort})`, "export function f(x: number) {", "  return x + a;"));
 			await quoteWithKey("modified", 2, 2, code("diff-repo/diff-app.ts:3-4", "// edited again", "export const a = 2;"));
@@ -159,6 +190,31 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await closeDiff();
 		});
 
+		await test.step("the hunk under the caret, with nothing selected, in the Source Control diffs", async () => {
+			await openFile(page, "diff-app.ts");
+			await runCommand(page, "Git: Open Changes");
+			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
+			await expect(page.locator(".monaco-diff-editor")).toBeVisible();
+			const changed = hunk(`diff-repo/diff-app.ts:1-7 was diff-repo/diff-app.ts:1-5 @ HEAD (${headShort})`, " // app", "-export const a = 1;", "+// edited", "+// edited again", "+export const a = 2;", " export function f(x: number) {", "   return x + a;", " }");
+			await quoteHunkWithKey("original", 1, changed);
+			await quoteHunkWithKey("modified", 2, changed);
+			await quoteHunkWithMenu("original", 1, "export const a = 1;", changed);
+			await quoteHunkWithMenu("modified", 3, "export const a = 2;", changed);
+			// A caret on a line the diff did not change is referenced, as before (the line of its own side).
+			await placeCaret("original", 3);
+			await page.keyboard.press("Alt+q");
+			await expect.poll(draft, "an unchanged line is referenced, not quoted").toBe(`\`diff-repo/diff-app.ts:4 @ HEAD (${headShort})\` `);
+			await clear();
+			await closeDiff();
+			await openFile(page, "diff-staged.ts");
+			await runCommand(page, "Git: Open Changes");
+			await expect(page.locator('.tab[aria-label*="Index"]').first()).toBeVisible({ timeout: 60_000 });
+			const staged = hunk(`diff-repo/diff-staged.ts:1-5 @ index was diff-repo/diff-staged.ts:1-4 @ HEAD (${headShort})`, "-// app", "+// staged", "+// staged too", " export const a = 1;", " export function f(x: number) {", "   return x + a;");
+			await quoteHunkWithKey("original", 0, staged);
+			await quoteHunkWithKey("modified", 1, staged);
+			await closeDiff();
+		});
+
 		await test.step("a commit's changes in the multi-file diff editor: both sides are Git versions at commits", async () => {
 			// What `git.viewCommit` opens (read from the Git extension of VS Code 1.142): the workbench's multi-file diff editor over `git:` documents whose ref is the full hash of the parent and of the commit. A keybinding calls that command with the same payload.
 			const fsPath = join(repo, "diff-history.ts").replace(/^[A-Z]:/, drive => drive.toLowerCase());
@@ -174,6 +230,10 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await quoteWithKey("modified", 2, 2, code(`diff-repo/diff-history.ts:3-4 @ ${headShort}`, "export const a = 1;", "export function f(x: number) {"));
 			await quoteWithMenu("original", 2, 2, code(`diff-repo/diff-history.ts:3-4 @ ${parentShort}`, "export function f(x: number) {", "  return x + a;"));
 			await quoteWithMenu("modified", 2, 2, code(`diff-repo/diff-history.ts:3-4 @ ${headShort}`, "export const a = 1;", "export function f(x: number) {"));
+			// Both sides are Git versions at commits: the hunk names each with its commit.
+			const commitHunk = hunk(`diff-repo/diff-history.ts:1-5 @ ${headShort} was diff-repo/diff-history.ts:1-4 @ ${parentShort}`, "-// app", "+// history", "+// second commit", " export const a = 1;", " export function f(x: number) {", "   return x + a;");
+			await quoteHunkWithKey("original", 0, commitHunk);
+			await quoteHunkWithKey("modified", 1, commitHunk);
 			await closeDiff();
 		});
 
@@ -186,6 +246,15 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await expect(page.locator(".monaco-diff-editor .editor.modified .view-zones .view-line"), "the deleted line is drawn in a view zone").toHaveCount(1, { timeout: 30_000 });
 			await quoteWithKey("modified", 2, 2, code("diff-repo/diff-app.ts:3-4", "// edited again", "export const a = 2;"));
 			await quoteWithMenu("modified", 2, 2, code("diff-repo/diff-app.ts:3-4", "// edited again", "export const a = 2;"));
+			// Nothing selected, the caret on the added line of a change that replaced one line by three: the whole hunk, deleted line included, from the file's side of the inline view and from the menu.
+			const inlineHunk = hunk(`diff-repo/diff-app.ts:1-7 was diff-repo/diff-app.ts:1-5 @ HEAD (${headShort})`, " // app", "-export const a = 1;", "+// edited", "+// edited again", "+export const a = 2;", " export function f(x: number) {", "   return x + a;", " }");
+			await quoteHunkWithKey("modified", 3, inlineHunk);
+			await quoteHunkWithMenu("modified", 1, "// edited", inlineHunk);
+			// A caret on an unchanged line keeps the caret-line reference.
+			await placeCaret("modified", 0);
+			await page.keyboard.press("Alt+q");
+			await expect.poll(draft, "an unchanged line is referenced, not quoted").toBe("`diff-repo/diff-app.ts:1` ");
+			await clear();
 			// The one deleted line is text in a view zone: a triple click selects it in the page, but the editor has no selection, so the key finds nothing to quote.
 			const deleted = page.locator(".monaco-diff-editor .editor.modified .view-zones .view-line").first();
 			await expect(deleted).toHaveText("export const a = 1;");
@@ -212,6 +281,10 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await quoteWithKey("modified", 0, 2, "> `diff-repo/diff-b.txt:1-2`\n>\n> beta one\n> alpha two\n");
 			await quoteWithMenu("original", 0, 2, "> `diff-repo/diff-a.txt:1-2`\n>\n> alpha one\n> alpha two\n");
 			await quoteWithMenu("modified", 0, 2, "> `diff-repo/diff-b.txt:1-2`\n>\n> beta one\n> alpha two\n");
+			// Nothing selected, the caret on a changed line: the whole hunk, whichever side the caret is in.
+			const hunkB = hunk("diff-repo/diff-b.txt:1-2 was diff-repo/diff-a.txt:1-2", "-alpha one", "+beta one", " alpha two");
+			await quoteHunkWithKey("original", 0, hunkB);
+			await quoteHunkWithKey("modified", 0, hunkB);
 			await closeDiff();
 		});
 
@@ -230,6 +303,22 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await expect(location).toHaveText(`diff-repo/diff-app.ts:3-4 @ HEAD (${headShort})`);
 			await expect(sent.locator("blockquote .omp-file-link"), "no link to the file on disk, whose lines 3-4 are other lines").toHaveCount(0);
 			await closeDiff();
+		});
+
+		await test.step("a plain editor of the file in another group is not a side of the diff beside it: nothing hijacks its caret-line reference", async () => {
+			await openFile(page, "diff-app.ts");
+			await runCommand(page, "Git: Open Changes");
+			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
+			// The diff moves to a group of its own on the right; the plain editor of the same file stays in its group, and the diff is still the visible tab of its group.
+			await runCommand(page, "View: Move Editor into Right Group");
+			await expect(page.locator(".monaco-diff-editor")).toBeVisible();
+			const plain = page.locator(".monaco-editor:not(.monaco-diff-editor .monaco-editor) .view-lines").first();
+			await plain.click();
+			await page.keyboard.press("Control+Home");
+			for (let i = 0; i < 2; i++) await page.keyboard.press("ArrowDown");
+			await page.keyboard.press("Alt+q");
+			await expect.poll(draft, "the line of the plain editor, not a hunk of the diff in the other group").toBe("`diff-repo/diff-app.ts:3` ");
+			await clear();
 		});
 	} finally {
 		writeFileSync(settingsFile, originalSettings);

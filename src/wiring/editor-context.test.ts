@@ -12,6 +12,7 @@ import {
 	EditorRecency,
 	candidateDescription,
 	composeEditorQuotes,
+	composeHunkQuote,
 	composeInsertion,
 	composeLineReference,
 	formatReference,
@@ -22,7 +23,7 @@ import {
 	selectionLines,
 	visibleQuoteTarget,
 } from "./editor-context.ts";
-import type { EditorQuoteSource, SendCandidate } from "./editor-context.ts";
+import type { EditorQuoteSource, HunkQuoteSource, SendCandidate } from "./editor-context.ts";
 import { bracketedPaste } from "../host/bracketed-paste.ts";
 import { MAX_FILE_PATH_LENGTH, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH } from "../protocol/messages.ts";
 import { MAX_QUOTE_VERSION_LENGTH } from "../shared/quote-location.ts";
@@ -383,3 +384,56 @@ describe("quoting editor selections", () => {
 		assert.deepEqual(composeEditorQuotes(source(many), CWD), { ok: false, reason: "Quote takes at most 64 selections at once." });
 	});
 });
+
+describe("quoting a hunk of a diff", () => {
+	const FILE = "D:\\Work\\Repo\\src\\app.ts";
+	const hunk = (over: Partial<HunkQuoteSource> = {}): HunkQuoteSource => ({
+		modified: { fsPath: FILE, version: null, lines: { start: 3, end: 5 } },
+		original: { fsPath: FILE, version: "HEAD (3f2a9c1)", lines: { start: 3, end: 4 } },
+		text: " keep\n-old\n+new\n+newer",
+		...over,
+	});
+
+	it("is one diff block under a location that names the lines of both sides, the modified side first", () => {
+		assert.deepEqual(composeHunkQuote(hunk(), CWD), {
+			ok: true,
+			quotes: [{ location: "src/app.ts:3-5 was src/app.ts:3-4 @ HEAD (3f2a9c1)", fileName: "", languageId: "diff", text: " keep\n-old\n+new\n+newer" }],
+			summary: "src/app.ts:3-5 was src/app.ts:3-4 @ HEAD (3f2a9c1)",
+		});
+	});
+
+	it("gives each side its own path and version: a staged file against HEAD, a renamed file, two files on disk", () => {
+		const staged = composeHunkQuote(hunk({ modified: { fsPath: FILE, version: "index", lines: { start: 7, end: 7 } }, original: { fsPath: FILE, version: "HEAD (3f2a9c1)", lines: { start: 7, end: 7 } } }), CWD);
+		assert.ok(staged.ok && staged.quotes[0]?.location === "src/app.ts:7 @ index was src/app.ts:7 @ HEAD (3f2a9c1)");
+		const renamed = composeHunkQuote(hunk({ original: { fsPath: "D:\\Work\\Repo\\src\\old.ts", version: "HEAD (3f2a9c1)", lines: { start: 3, end: 4 } } }), CWD);
+		assert.ok(renamed.ok && renamed.quotes[0]?.location === "src/app.ts:3-5 was src/old.ts:3-4 @ HEAD (3f2a9c1)");
+		const files = composeHunkQuote(hunk({ original: { fsPath: "D:\\Other\\b.ts", version: null, lines: { start: 1, end: 2 } } }), CWD);
+		assert.ok(files.ok && files.quotes[0]?.location === "src/app.ts:3-5 was D:/Other/b.ts:1-2");
+	});
+
+	it("leaves out a side that has no line in the hunk or no path, and quotes with no location when both are left out", () => {
+		const deleting = composeHunkQuote(hunk({ modified: { fsPath: FILE, version: null, lines: null } }), CWD);
+		assert.ok(deleting.ok && deleting.quotes[0]?.location === "src/app.ts:3-4 @ HEAD (3f2a9c1)");
+		const inserting = composeHunkQuote(hunk({ original: { fsPath: FILE, version: "HEAD (3f2a9c1)", lines: null } }), CWD);
+		assert.ok(inserting.ok && inserting.quotes[0]?.location === "src/app.ts:3-5");
+		const pathless = composeHunkQuote(hunk({ original: { fsPath: null, version: null, lines: { start: 1, end: 1 } } }), CWD);
+		assert.ok(pathless.ok && pathless.quotes[0]?.location === "src/app.ts:3-5");
+		const none = composeHunkQuote(hunk({ modified: { fsPath: null, version: null, lines: null }, original: { fsPath: null, version: null, lines: null } }), CWD);
+		assert.ok(none.ok && none.quotes[0]?.location === null && none.summary === "the change");
+	});
+
+	it("refuses what a selection's quote refuses: an empty change, a control character, too much text, a location that is too long", () => {
+		assert.equal(composeHunkQuote(hunk({ text: " \n" }), CWD).ok, false);
+		assert.equal(composeHunkQuote(hunk({ text: "+a\u001bb" }), CWD).ok, false);
+		assert.equal(composeHunkQuote(hunk({ text: `+${"x".repeat(20_001)}` }), CWD).ok, false);
+		const long = composeHunkQuote(hunk({ modified: { fsPath: `/r/${"d/".repeat(400)}a.ts`, version: null, lines: { start: 1, end: 1 } } }), "/r");
+		assert.equal(long.ok, false);
+		const longest = composeHunkQuote({
+			modified: { fsPath: `/r/${"d".repeat(MAX_FILE_PATH_LENGTH - 20)}.ts`, version: "x".repeat(MAX_QUOTE_VERSION_LENGTH), lines: { start: 1, end: 99_999 } },
+			original: { fsPath: `/r/${"e".repeat(MAX_FILE_PATH_LENGTH - 20)}.ts`, version: "y".repeat(MAX_QUOTE_VERSION_LENGTH), lines: { start: 1, end: 99_999 } },
+			text: "+a",
+		}, "/r");
+		assert.ok(longest.ok && (longest.quotes[0]?.location?.length ?? Infinity) <= MAX_QUOTE_LOCATION_LENGTH, "two of the longest sides pass the page's bound");
+	});
+});
+

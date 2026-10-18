@@ -185,6 +185,12 @@ test("the location of a Git revision in inline code is plain code, never a link 
 	assert.match(linked, /<code>src\/a\.ts:9 @ HEAD \(3f2a9c1\)<\/code> <code>src\/a\.ts:9 @ index<\/code>/);
 });
 
+test("the location of a hunk of a diff, two files on disk or a file and a Git version, is plain code too", async () => {
+	const linked = await renderLinked("`src/a.ts:9 was src/a.ts:3` `src/a.ts:9 @ index was src/a.ts:9 @ HEAD (3f2a9c1)` `src/a.ts:9`", EXISTING);
+	assert.deepEqual([...linked.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["src/a.ts:9"], "only the location of one file on disk links");
+	assert.match(linked, /<code>src\/a\.ts:9 was src\/a\.ts:3<\/code> <code>src\/a\.ts:9 @ index was src\/a\.ts:9 @ HEAD \(3f2a9c1\)<\/code>/);
+});
+
 test("a code symbol linked to its definition line opens that file, and an unproven target stays inline code", async () => {
 	const linked = await renderLinked("[`World.Current`](src/a.ts:12:4) and [`Missing.Thing`](src/missing.ts:3)", EXISTING);
 	assert.deepEqual([...linked.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["src/a.ts:12:4"]);

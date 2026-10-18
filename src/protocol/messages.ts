@@ -37,7 +37,7 @@ import { DRAFT_CONTROL_CHARACTER } from "../shared/text-file.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
-import { MAX_QUOTE_VERSION_LENGTH, QUOTE_VERSION_SEPARATOR } from "../shared/quote-location.ts";
+import { HUNK_LOCATION_SEPARATOR, MAX_QUOTE_VERSION_LENGTH, QUOTE_VERSION_SEPARATOR } from "../shared/quote-location.ts";
 import { isEmptyStateKeyCommand, type EmptyStateKeyCommand } from "../shared/key-hints.ts";
 import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
@@ -452,8 +452,10 @@ export interface GuestInsertTextMessage {
 
 /** Selections one `omp:insert-quote` may carry. */
 export const MAX_EDITOR_QUOTES = 64;
-/** Longest location an editor quote may carry: `path:start-end`, plus ` @ ` and the version of a Git revision (`src/shared/quote-location.ts`). */
-export const MAX_QUOTE_LOCATION_LENGTH = MAX_FILE_PATH_LENGTH + 24 + QUOTE_VERSION_SEPARATOR.length + MAX_QUOTE_VERSION_LENGTH;
+/** Longest location of one side of an editor quote: `path:start-end`, plus ` @ ` and the version of a Git revision (`src/shared/quote-location.ts`). */
+export const MAX_QUOTE_SIDE_LOCATION_LENGTH = MAX_FILE_PATH_LENGTH + 24 + QUOTE_VERSION_SEPARATOR.length + MAX_QUOTE_VERSION_LENGTH;
+/** Longest location an editor quote may carry: one side, or the two sides of a hunk of a diff. */
+export const MAX_QUOTE_LOCATION_LENGTH = 2 * MAX_QUOTE_SIDE_LOCATION_LENGTH + HUNK_LOCATION_SEPARATOR.length;
 
 /**
  * One selection of a text editor that the user quoted (`ompDesk.quoteEditorSelection`, `Alt+Q` in an editor).
