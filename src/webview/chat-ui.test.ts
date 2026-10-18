@@ -1788,6 +1788,44 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
 		});
 
+		await t.test("the editor dialog of OMP's /review is multi-line (prefilled, Shift+Enter adds a line, Enter submits the text as typed) and the input dialog and Cancel answer once each", async () => {
+			await reset("review-dialogs");
+			const answers = () => ui.evaluate<unknown[]>("window.sent.filter(message=>message.type==='omp:chat-ui-response').map(message=>message.response)");
+			const enter = async (shift: boolean) => {
+				for (const type of ["keyDown", "keyUp"]) await ui.call("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers: shift ? 8 : 0, ...(type === "keyDown" ? { text: "\r" } : {}) });
+			};
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'rv-edit',method:'editor',title:'Enter custom review instructions',prefill:'Review the following:\\n\\n',promptStyle:true}]})");
+			await ui.wait("document.querySelector('.omp-ask textarea')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-ask-title').textContent"), /^Enter custom review instructions/);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask textarea').value"), "Review the following:\n\n", "the prefill is the draft, blank lines kept");
+			await ui.evaluate("(()=>{const field=document.querySelector('.omp-ask textarea');field.focus();field.setSelectionRange(field.value.length,field.value.length)})()");
+			await ui.call("Input.insertText", { text: "check the error handling" });
+			await enter(true);
+			await ui.call("Input.insertText", { text: "and the tests" });
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask textarea').value"), "Review the following:\n\ncheck the error handling\nand the tests", "Shift+Enter adds a line and sends nothing");
+			assert.deepEqual(await answers(), []);
+			assert.ok(await ui.evaluate<number>("document.querySelector('.omp-ask textarea').getBoundingClientRect().height") > 40, "the field grows with its lines");
+			await enter(false);
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-ui-response' && message.response.id==='rv-edit')");
+			assert.deepEqual(await answers(), [{ id: "rv-edit", value: "Review the following:\n\ncheck the error handling\nand the tests" }]);
+
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'rv-input',method:'input',title:'Search open pull requests — title, author, or #123'}]})");
+			await ui.wait("document.querySelector('.omp-ask textarea') && document.querySelector('.omp-ask-title').textContent.startsWith('Search open pull requests')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask textarea').value"), "");
+			await ui.evaluate("document.querySelector('.omp-ask textarea').focus()");
+			await ui.call("Input.insertText", { text: "#12" });
+			await ui.evaluate("[...document.querySelectorAll('.omp-ask .omp-btn--primary')].find(button=>button.textContent.trim()==='Submit').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-ui-response' && message.response.id==='rv-input')");
+			assert.deepEqual((await answers()).at(-1), { id: "rv-input", value: "#12" });
+
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'rv-cancel',method:'select',title:'Review Mode',options:[{label:'1. Review against a base branch (PR Style)'},{label:'2. Review uncommitted changes'}]}]})");
+			await ui.wait("document.querySelectorAll('.omp-ask-options button').length===2");
+			await ui.evaluate("[...document.querySelectorAll('.omp-ask-actions button')].find(button=>button.textContent.trim()==='Cancel').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-ui-response' && message.response.id==='rv-cancel')");
+			assert.deepEqual((await answers()).at(-1), { id: "rv-cancel", cancelled: true });
+			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
+		});
+
 		await t.test("transcript displays native content but never internal entries, fields or role echoes", async () => {
 			await reset("native-visibility", "detailed", true);
 			await ui.evaluate(`(()=>{

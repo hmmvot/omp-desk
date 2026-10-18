@@ -159,6 +159,16 @@ These work in Chat.
 - `/delete` confirms deletion before starting a replacement.
 - Clear requires the Desk command and supported OMP entry points.
 
+### `/review`
+
+`/review` is OMP's own code review, and it works in Chat as in the terminal: OMP asks what to review in a dialog in place of the message box, then sends the review request (the mode, the changed files and the diff) to the model as your message.
+
+- Type `/review` or pick it in the Commands list. **Review Mode** offers **uncommitted changes**, a **branch diff** (then the base branch to compare against), a **specific commit** (then one of the latest commits), a **specific pull request** (the open pull requests, a search row, or `#123`) and **custom review instructions** (a multi-line box, prefilled with `Review the following:`; `Enter` submits, `Shift+Enter` adds a line). **Cancel** in any of these dialogs ends the command and sends nothing.
+- `/review <PR link>` reviews that pull request without asking. `/review <text>` keeps the text as the focus of the review, and the custom-instructions choice is not offered.
+- Pull requests need the GitHub CLI (`gh`). Without it OMP's message (`GitHub CLI (gh) is not installed…`) appears as an error message of the window and nothing is sent.
+- A dialog may stay open as long as you like: the `/review` message is not reported as unconfirmed while OMP waits for your answer.
+- A `review` command of your own in OMP's commands folder replaces OMP's; its dialogs and prompts are then its own.
+
 ### `/fork`
 
 `/fork` opens a copy of this session in a **new Chat tab** beside it, and this session carries on untouched:

@@ -1740,7 +1740,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						: "the session is waiting for a response, but it is not running here"}
 				</div>
 			)}
-			{sending && !captureLocked && <div className="omp-composer-hint" role="status">Waiting for OMP to confirm this message. Your draft remains editable.</div>}
+			{sending && !captureLocked && request === null && <div className="omp-composer-hint" role="status">Waiting for OMP to confirm this message. Your draft remains editable.</div>}
 			{recoverable.map(entry => (
 				<div key={entry.id} className="omp-attach-error" role="alert">
 					<div>{entry.reason}</div>

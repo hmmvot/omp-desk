@@ -178,6 +178,34 @@ describe("text admission receipts", () => {
 		assert.deepEqual(await pending, result);
 	});
 
+	it("does not bound the receipt while a dialog is open, and bounds it again from the moment the dialog settles", async t => {
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const { client, sent } = live({}, false);
+		const pending = client.sendPrompt("/review");
+		let settled = false;
+		void pending.then(() => { settled = true; });
+		t.mock.timers.tick(20_000);
+		client.handle({ type: "omp:chat-ui-request", epoch: EPOCH, request: PICK });
+		t.mock.timers.tick(10 * 45_000);
+		await Promise.resolve();
+		assert.equal(settled, false, "OMP waits for the user: the command is not acknowledged yet, and the message is not lost");
+		assert.equal(client.answerUi({ id: PICK.id, value: "a" }).ok, true);
+		t.mock.timers.tick(44_999);
+		await Promise.resolve();
+		assert.equal(settled, false, "the whole deadline starts over at the answer");
+		client.handle({ type: "omp:chat-send-result", epoch: EPOCH, requestId: textRequestId(sent[0]), status: "accepted" });
+		assert.deepEqual(await pending, { ok: true });
+
+		const lost = client.sendPrompt("/review again");
+		client.handle({ type: "omp:chat-ui-request", epoch: EPOCH, request: APPROVE });
+		t.mock.timers.tick(3 * 45_000);
+		client.handle({ type: "omp:chat-ui-cancel", epoch: EPOCH, targetId: APPROVE.id });
+		t.mock.timers.tick(45_000);
+		const result = await lost;
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.unconfirmed, true, "a command that never answers after its dialog is still reported, one deadline later");
+	});
+
 	it("registers correlation before posting, even for a synchronous reply", async () => {
 		let client: ChatClient;
 		client = new ChatClient({ post: message => {

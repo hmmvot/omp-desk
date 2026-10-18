@@ -63,6 +63,8 @@ describe("installed OMP registry", () => {
 		assert.equal(registry.find(entry => entry.name === "compact")?.handled, true);
 		assert.equal(tuiOnlyCommand("/hotkeys", registry, []), "hotkeys");
 		assert.equal(tuiOnlyCommand("/retry", registry, []), null);
+		assert.equal(registry.some(entry => entry.name === "review" || entry.aliases.includes("review")), false, "/review is a bundled custom command, not a terminal-only builtin");
+		assert.equal(tuiOnlyCommand("/review focus on tests", registry, []), null, "a draft that starts with /review is sent");
 	});
 
 	it("answers null for a package root that holds no registry", async () => {

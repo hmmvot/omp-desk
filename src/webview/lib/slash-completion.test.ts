@@ -83,3 +83,20 @@ test("/fork lists once with the Desk description and replaces OMP's entry of the
  assert.notEqual(found[0]!.description, "OMP fork");
  assert.equal(slashSuggestions([], "fork").filter(command => command.name === "fork").length, 1);
 });
+
+test("OMP's bundled /review is listed with the Desk text; a command of the user's own that reuses the name keeps its text", () => {
+ const bundled = [{ name: "review", source: "custom", description: "Launch interactive code review", inputHint: "arguments" }];
+ const found = slashSuggestions(bundled, "review");
+ assert.equal(found.length, 1);
+ assert.match(found[0]!.description!, /uncommitted changes, a branch diff, a commit or a pull request/);
+ assert.equal(found[0]!.inputHint, "[PR link] [what to focus on]");
+ assert.equal(found[0]!.source, "custom", "it stays the command OMP runs");
+ const typed = slashArgumentAt(bundled, "/review ", 8);
+ assert.equal(typed?.hint.text, "[PR link] [what to focus on]");
+ assert.equal(typed?.hint.requirement, "optional");
+ assert.equal(missingRequiredArgument(bundled, "/review"), false, "a bare /review is sent: OMP asks what to review");
+ const own = [{ name: "review", source: "custom", description: "Our own checklist", inputHint: "files" }];
+ assert.deepEqual(slashSuggestions(own, "review")[0], own[0]);
+ const later = [{ name: "review", source: "custom", description: "A later OMP text", inputHint: "arguments" }];
+ assert.deepEqual(slashSuggestions(later, "review")[0], later[0]);
+});

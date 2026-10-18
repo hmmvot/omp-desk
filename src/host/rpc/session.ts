@@ -564,6 +564,8 @@ interface PendingCommand {
 	resolve(response: RpcResponseFrame): void;
 	reject(error: CommandFailure): void;
 	timer: unknown;
+	/** Starts the deadline over: a dialog opened or settled, so the child's silence is explained by a user it waits for. */
+	restart(): void;
 	/** `#queueRevision` when the command was written: a `get_state` answer is no newer than a later `queue_update`. */
 	queueRevision: number;
 }
@@ -2454,6 +2456,7 @@ export class RpcSession {
 					return;
 				}
 				this.#model = applyChatUiRequest(this.#model, request);
+				this.#restartCommandDeadlines();
 				if (this.#live) this.#emit({ type: "ui-request", epoch: this.epoch, request });
 				this.#emitModel();
 				return;
@@ -2517,7 +2520,10 @@ export class RpcSession {
 	#dropDialog(targetId: string): void {
 		const before = this.#model;
 		this.#model = applyChatUiCancel(this.#model, targetId);
-		if (this.#model !== before && this.#live) this.#emit({ type: "ui-cancel", epoch: this.epoch, targetId });
+		if (this.#model !== before) {
+			this.#restartCommandDeadlines();
+			if (this.#live) this.#emit({ type: "ui-cancel", epoch: this.epoch, targetId });
+		}
 		this.#emitModel();
 	}
 
@@ -3153,23 +3159,47 @@ export class RpcSession {
 		return { status: "refused", reason: error.reason === "closed" ? "not-live" : "write-failed" };
 	}
 
-	/** Write one command and wait for the response carrying the same id. */
+	/**
+	 * Write one command and wait for the response carrying the same id. While a dialog is open the child is waiting for
+	 * the user, not lost: a command that asks through a dialog (`/review` opens a picker inside its `prompt`, and OMP
+	 * acknowledges the prompt only when the command returns) answers late, and a deadline that ran on would report
+	 * a delivered message as unconfirmed. The deadline therefore does not run while a dialog is open and starts over
+	 * when a dialog opens or settles ({@link #restartCommandDeadlines}). `get_state` is exempt: OMP answers it while a
+	 * command waits (the RPC mode runs `prompt` as a background task), so an unanswered probe, the watchdog's included,
+	 * is evidence of a lost child and never of a user who is still reading a list.
+	 */
 	#send(id: string, command: RpcCommand, timeoutMs?: number): Promise<RpcResponseFrame> {
 		return new Promise<RpcResponseFrame>((resolve, reject) => {
-			const timer = this.#timers.setTimeout(() => {
-				this.#pendingCommands.delete(id);
-				reject(new CommandFailure("timeout"));
-			}, timeoutMs ?? this.#options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
-			this.#pendingCommands.set(id, { resolve, reject, timer, command, queueRevision: this.#queueRevision });
+			const limit = timeoutMs ?? this.#options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+			const exempt = command.type === "get_state";
+			const entry: PendingCommand = { resolve, reject, timer: null, restart: () => { if (!exempt) arm(); }, command, queueRevision: this.#queueRevision };
+			const arm = (): void => {
+				if (entry.timer !== null) this.#timers.clearTimeout(entry.timer);
+				entry.timer = this.#timers.setTimeout(() => {
+					if (this.#model.uiRequest !== null && !exempt) {
+						arm();
+						return;
+					}
+					this.#pendingCommands.delete(id);
+					reject(new CommandFailure("timeout"));
+				}, limit);
+			};
+			arm();
+			this.#pendingCommands.set(id, entry);
 			this.#channel.writeLine(encodeCommand(id, command)).catch((error: unknown) => {
 				if (this.#pendingCommands.get(id) === undefined) return;
 				this.#pendingCommands.delete(id);
-				this.#timers.clearTimeout(timer);
+				this.#timers.clearTimeout(entry.timer);
 				const code = writeErrorCode(error);
 				this.#onWriteFailure(code);
 				reject(new CommandFailure("write", code));
 			});
 		});
+	}
+
+	/** A dialog opened or settled: every command still waiting for its answer gets its whole deadline again. */
+	#restartCommandDeadlines(): void {
+		for (const pending of this.#pendingCommands.values()) pending.restart();
 	}
 
 	#onWriteFailure(code: RpcWriteErrorCode): void {

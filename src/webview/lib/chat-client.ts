@@ -152,7 +152,7 @@ export class ChatClient {
 	readonly #answered = new Set<string>();
 	readonly #childReads = new Map<string, PendingSubagentRead>();
 	readonly #queueRemovals = new Map<string, PendingQueueRemoval>();
-	readonly #textSends = new Map<string, { resolve(result: ChatSendResult): void; timer: unknown }>();
+	readonly #textSends = new Map<string, { resolve(result: ChatSendResult): void; timer: unknown; restart(): void }>();
 	readonly #aborts = new Map<string, (answer: ChatAbortAnswer) => void>();
 	readonly #navigations = new Map<string, { resolve(answer: ChatNavigateAnswer): void; timer: unknown }>();
 	readonly #navigationListeners = new Set<(answer: ChatNavigateAnswer) => void>();
@@ -199,8 +199,11 @@ export class ChatClient {
 
 	#commit(next: ChatModel): void {
 		if (next === this.#model) return;
+		const dialog = this.#model.uiRequest?.id ?? null;
 		this.#model = next;
 		this.#operations.model(next);
+		// A dialog opened or settled: OMP is (or was) waiting for the user, so a send still awaiting its result starts its deadline over.
+		if ((next.uiRequest?.id ?? null) !== dialog) for (const send of this.#textSends.values()) send.restart();
 		for (const listener of [...this.#listeners]) listener();
 	}
 
@@ -343,11 +346,21 @@ export class ChatClient {
 		const message = wire === undefined ? base : { ...base, images: wire };
 		if (this.#transport.carries?.(message) === false) return Promise.resolve({ ok: false, reason: REFUSAL_ROUTE_TOO_SMALL });
 		const { promise, resolve } = Promise.withResolvers<ChatSendResult>();
-		const timer = setTimeout(() => this.#finishTextSend(requestId, "unconfirmed"), SEND_RESULT_TIMEOUT_MS);
-		this.#textSends.set(requestId, { resolve, timer });
+		// While a dialog is open OMP is waiting for the user, not lost: a command that asks before it returns (`/review`) is
+		// acknowledged only after the answer, so the deadline does not run then and starts over when a dialog opens or settles.
+		const pending = { resolve, timer: null as unknown, restart: () => arm() };
+		const arm = (): void => {
+			clearTimeout(pending.timer as number);
+			pending.timer = setTimeout(() => {
+				if (this.#model.uiRequest !== null) arm();
+				else this.#finishTextSend(requestId, "unconfirmed");
+			}, SEND_RESULT_TIMEOUT_MS);
+		};
+		arm();
+		this.#textSends.set(requestId, pending);
 		try {
 			if (this.#transport.post(message) === false) {
-				clearTimeout(timer);
+				clearTimeout(pending.timer as number);
 				this.#textSends.delete(requestId);
 				resolve({ ok: false, reason: REFUSAL_UNREACHABLE });
 			}

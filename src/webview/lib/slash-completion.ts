@@ -30,7 +30,7 @@ export function slashQueryAt(text: string, caret: number): { query: string; end:
 
 /** Every command Chat can act on, before any query: Desk's own commands, then what the session advertises (denied owners and their aliases never appear). */
 export function slashCatalogue(commands: readonly ChatSlashCommand[]): readonly ChatSlashCommand[] {
- const catalogue = [...DESK_COMMANDS, ...commands.filter(command => !DESK_COMMANDS.some(local => local.name === command.name || local.aliases?.includes(command.name)))];
+ const catalogue = [...DESK_COMMANDS, ...commands.filter(command => !DESK_COMMANDS.some(local => local.name === command.name || local.aliases?.includes(command.name))).map(deskListed)];
  return catalogue.filter(command => DESK_COMMANDS.includes(command) || !classifySlashInput(`/${command.name}`, commands).denied);
 }
 
@@ -54,9 +54,25 @@ export function parseArgumentHint(hint?: string): { text: string; requirement: "
  return { text, requirement: /^\[[\s\S]+\]$/.test(text) ? "optional" : /^<[^>]+>(?:\s|$)/.test(text) ? "required" : "unknown" };
 }
 
+/**
+ * OMP's bundled `/review` is a custom command whose catalogue entry says only "Launch interactive code review" with the hint
+ * "arguments"; it asks its questions as dialogs of the Chat. The Desk text names what it offers. Only the bundled entry is
+ * rewritten (a same-named command of the user's own keeps its own text, and so does a later OMP text).
+ */
+const BUNDLED_REVIEW_TEXT = "Launch interactive code review";
+const DESK_REVIEW: Pick<ChatSlashCommand, "description" | "inputHint"> = {
+ description: "Review code: pick uncommitted changes, a branch diff, a commit or a pull request (needs the GitHub CLI), or write your own request",
+ inputHint: "[PR link] [what to focus on]",
+};
+
+/** The command as Desk lists it: OMP's entry with the Desk text where one is defined. */
+function deskListed(command: ChatSlashCommand): ChatSlashCommand {
+ return command.name === "review" && command.source === "custom" && command.description === BUNDLED_REVIEW_TEXT ? { ...command, ...DESK_REVIEW } : command;
+}
+
 function resolveCommand(commands: readonly ChatSlashCommand[], name: string): ChatSlashCommand | undefined {
  const command = commands.find(command => command.name.toLowerCase() === name.toLowerCase() || command.aliases?.some(alias => alias.toLowerCase() === name.toLowerCase()));
- return command && !classifySlashInput(`/${command.name}`, commands).denied ? command : undefined;
+ return command && !classifySlashInput(`/${command.name}`, commands).denied ? deskListed(command) : undefined;
 }
 
 /** Only the first argument token is variant-owned; later arguments remain ordinary text. */
