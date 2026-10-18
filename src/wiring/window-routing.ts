@@ -139,6 +139,8 @@ export interface RoutingEditorPort {
 	tab(tabId: string): RoutingTab | undefined;
 	/** VS Code shows a tab for the editor slot. */
 	hasEditorTab(slot: string): boolean;
+	/** The editor slot ids of the editors VS Code holds in this window right now (restored tabs not yet shown included), or `null` while the tab set is not known to be complete (shortly after activation); published in the registry so another window can tell a closed editor from a moved one, and left out of the record (unknown, never "none") while `null`. */
+	liveEditorSlots(): readonly string[] | null;
 	/** Make VS Code show the slot's tab; `false` when it did not become active. */
 	selectEditorTab(slot: string): Promise<boolean>;
 	revealExistingTab(index: SessionIndex, tabId: string, panel: vscode.WebviewPanel): Promise<void>;
@@ -339,11 +341,13 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		}
 		const localFolders = localWindowFolders();
 		const staying = localFolders.filter(folder => !runsAtRepositoryRoot(folder));
+		const slots = deps.liveEditorSlots();
 		registry.setSnapshot({
 			windowUri: owningWindowUri()?.toString() ?? null,
 			label: vscode.workspace.name ?? "",
 			folders: localFolders,
 			...(staying.length > 0 ? { staysInFolder: staying } : {}),
+			...(slots === null ? {} : { slots: [...new Set(slots)].sort() }),
 			liveCwds: localLiveSessionCwds(index),
 			rows,
 			focusedAt: windowFocusedAt,

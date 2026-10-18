@@ -2977,6 +2977,38 @@ export class SessionIndex {
 	}
 
 	/**
+	 * Drop the passive bindings of editors the window that held them has seen close and no live window holds
+	 * (`src/host/editor-slot-prune.ts` decides that; this is the write).
+	 *
+	 * The committed bindings are adopted first, so what is dropped is what is committed now, and a binding another window
+	 * has since changed or promoted is judged as it stands: only a binding that is *still passive* goes. A controlling
+	 * binding stays (broker provenance and a recorded stop read the controller of a conversation that runs with no editor
+	 * open; a later controller demotes it, and it is dropped then). The write is the ordinary merged save, so a binding
+	 * another window changed after this window adopted it is kept by the merge and reported, never deleted.
+	 *
+	 * Returns the slot ids that need no more attention: dropped now, or bound to nothing. A slot whose binding is
+	 * controlling is not returned.
+	 */
+	async dropClosedPassiveSlots(slotIds: readonly string[]): Promise<string[]> {
+		await this.refreshFromStore();
+		const settled: string[] = [];
+		let dropped = false;
+		for (const slotId of slotIds) {
+			const binding = this.#bindings.get(slotId);
+			if (binding === undefined) {
+				settled.push(slotId);
+				continue;
+			}
+			if (binding.role !== "passive") continue;
+			this.#bindings.delete(slotId);
+			settled.push(slotId);
+			dropped = true;
+		}
+		if (dropped) await this.#persist();
+		return settled;
+	}
+
+	/**
 	 * Drop every binding of a row that leaves the index, in the same save that drops the row.
 	 *
 	 * A binding names a row no window can show once the row is gone: the serializer already treats it as absent and a

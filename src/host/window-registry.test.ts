@@ -143,6 +143,46 @@ describe("window registry", () => {
 		assert.deepEqual(bounded.staysInFolder, ["C:/x"], "only an opened folder can stay");
 	});
 
+	it("publishes the editor slots a window holds, reads a record without them as unknown and an empty list as none, and does not repaint for them", async () => {
+		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { slots: ["a".repeat(32), "b".repeat(32)] });
+		const reader = windowOf("reader", 2, "2026-10-10T09:05:00.000Z");
+		await publish(owner, reader);
+		assert.deepEqual(reader.windowOf("owner")?.slots, ["a".repeat(32), "b".repeat(32)]);
+		assert.equal(reader.windowOf("reader")?.slots, undefined, "a window that published none has an unknown list");
+		owner.setSnapshot({ windowUri: null, label: "owner", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, slots: [] });
+		await owner.flush();
+		assert.equal(await reader.refresh(), false, "which editors a window holds is never shown");
+		assert.deepEqual(reader.windowOf("owner")?.slots, [], "an empty list says the window has no editor");
+		const record = { version: 1, holderId: "abc", pid: 5, startedAt: "2026-10-10T09:00:00.000Z", updatedAt: "2026-10-10T09:00:01.000Z", windowUri: null, label: "x", folders: [], liveCwds: [], rows: {} };
+		assert.equal(parseWindowRecord(JSON.stringify(record), "abc")?.slots, undefined, "an earlier build's record: unknown");
+		assert.deepEqual(parseWindowRecord(JSON.stringify({ ...record, slots: ["a".repeat(32)] }), "abc")?.slots, ["a".repeat(32)]);
+		assert.equal(parseWindowRecord(JSON.stringify({ ...record, slots: [3] }), "abc")?.slots, undefined, "a list that is not slot ids is no evidence, and the record is still read");
+		assert.notEqual(parseWindowRecord(JSON.stringify({ ...record, slots: ["not a slot"] }), "abc"), null);
+		const whole = Array.from({ length: 512 }, (_, index) => index.toString(16).padStart(32, "0"));
+		assert.deepEqual(boundWindowSnapshot({ windowUri: null, label: "", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, slots: whole }).slots, whole);
+		assert.equal(boundWindowSnapshot({ windowUri: null, label: "", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, slots: [...whole, "f".repeat(32)] }).slots, undefined, "a list that does not fit is not published cut: a cut list would call a live editor closed");
+		assert.equal(boundWindowSnapshot({ windowUri: null, label: "", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, slots: ["not a slot"] }).slots, undefined);
+	});
+
+	it("runs beforeRenew ahead of every lease renewal, so a renewed record carries what the hook just published", async () => {
+		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { slots: [] }, { heartbeatMs: 20 });
+		const reader = windowOf("reader", 2, "2026-10-10T09:05:00.000Z");
+		await publish(owner, reader);
+		assert.deepEqual(reader.windowOf("owner")?.slots, []);
+		const beat = Promise.withResolvers<void>();
+		owner.start({
+			onChange: () => {},
+			beforeRenew: () => {
+				owner.setSnapshot({ windowUri: null, label: "owner", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, slots: ["c".repeat(32)] });
+				beat.resolve();
+			},
+		});
+		await beat.promise; // the heartbeat's own renewal is queued right behind the hook; this flush follows it
+		await owner.flush();
+		await reader.refresh();
+		assert.deepEqual(reader.windowOf("owner")?.slots, ["c".repeat(32)]);
+	});
+
 	it("drops a window whose process is gone, and sweeps its file once the file is stale too", async () => {
 		const stays = windowOf("stays", 1, "2026-10-10T09:00:00.000Z", { folders: ["C:/a"] });
 		const crashes = windowOf("crashes", 2, "2026-10-10T09:01:00.000Z", { folders: ["C:/b"] });

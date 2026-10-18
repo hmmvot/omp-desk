@@ -25,6 +25,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { errorCode, readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
 import type { BoundedRead } from "./atomic-file.ts";
+import { isEditorSlotId } from "./editor-slots.ts";
 import { watchDirectory } from "./directory-watch.ts";
 
 /** Directory under the global storage folder that holds one record per live window. */
@@ -41,6 +42,7 @@ const MAX_RECORD_BYTES = 512 * 1024;
 /** What folders, live cwds and rows may cost together: the rest of the record is a few hundred bytes. */
 const MAX_PAYLOAD_BYTES = 384 * 1024;
 const MAX_FOLDERS = 64;
+const MAX_SLOTS = 512;
 const MAX_LIVE_CWDS = 256;
 const MAX_ROWS = 512;
 const MAX_TEXT = 4096;
@@ -117,6 +119,12 @@ export interface WindowSnapshot {
 	 * record of an earlier build: the setting's default applies.
 	 */
 	readonly staysInFolder?: readonly string[];
+	/**
+	 * The editor slot ids of the editors this window's VS Code holds right now, restored but not yet shown ones included (the
+	 * authority is the tab set, not a live panel). Absent when the window did not publish it (a record of an earlier build) or the
+	 * list did not fit the record: *unknown*, which a reader never reads as "none". An empty list says the window has no editor.
+	 */
+	readonly slots?: readonly string[];
 	/** Working directories of the sessions this window runs or is launching. */
 	readonly liveCwds: readonly string[];
 	/** The sessions this window runs, by tab id. */
@@ -225,11 +233,15 @@ export function boundWindowSnapshot(snapshot: WindowSnapshot): WindowSnapshot {
 	const folders = take(snapshot.folders, MAX_FOLDERS, fits);
 	const stays = take(snapshot.staysInFolder ?? [], MAX_FOLDERS, item => folders.includes(item));
 	const liveCwds = take(snapshot.liveCwds, MAX_LIVE_CWDS, fits);
+	// A list that is cut would name a live editor as closed: it is published whole or not at all.
+	const slotCost = snapshot.slots === undefined ? 0 : encodedBytes(snapshot.slots);
+	const slots = snapshot.slots !== undefined && snapshot.slots.length <= MAX_SLOTS && snapshot.slots.every(isEditorSlotId) && slotCost <= budget ? snapshot.slots : undefined;
 	return {
 		windowUri: snapshot.windowUri !== null && snapshot.windowUri.startsWith("file:") && snapshot.windowUri.length <= MAX_TEXT ? snapshot.windowUri : null,
 		label: clampText(snapshot.label),
 		folders,
 		...(stays.length > 0 ? { staysInFolder: stays } : {}),
+		...(slots === undefined ? {} : { slots: [...slots] }),
 		liveCwds,
 		rows,
 		focusedAt: snapshot.focusedAt !== null && isIsoTime(snapshot.focusedAt) ? snapshot.focusedAt : null,
@@ -259,6 +271,8 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 	if (record.version !== RECORD_VERSION || record.holderId !== fileHolderId || !ID_RE.test(fileHolderId)) return null;
 	const { pid, startedAt, updatedAt, windowUri, label, folders, liveCwds, rows } = record;
 	const staysInFolder = record.staysInFolder === undefined ? [] : record.staysInFolder;
+	// A list that is not a list of slot ids is no evidence: the window's editors are unknown, and the record is otherwise kept.
+	const slots = Array.isArray(record.slots) && record.slots.length <= MAX_SLOTS && record.slots.every(isEditorSlotId) ? (record.slots as string[]) : undefined;
 	// A record of a build that published no focus time has none.
 	const focusedAt = record.focusedAt === undefined ? null : record.focusedAt;
 	if (focusedAt !== null && !isIsoTime(focusedAt)) return null;
@@ -295,6 +309,7 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 		label,
 		folders,
 		...(staysInFolder.length > 0 ? { staysInFolder } : {}),
+		...(slots === undefined ? {} : { slots }),
 		liveCwds,
 		rows: checkedRows,
 		focusedAt,
@@ -380,7 +395,7 @@ interface ReadPass {
 
 /** The other live windows as one read saw them, each with the extension-host process id of its record. */
 export interface OtherWindowsSnapshot {
-	readonly windows: ReadonlyArray<{ readonly window: OpenWindow; readonly hostPid: number }>;
+	readonly windows: ReadonlyArray<{ readonly window: OpenWindow; readonly hostPid: number; readonly updatedAtMs: number }>;
 	readonly unreadable: number;
 }
 
@@ -393,6 +408,7 @@ function openWindowOf(record: WindowRecord): OpenWindow {
 		label: record.label,
 		folders: record.folders,
 		...(record.staysInFolder === undefined ? {} : { staysInFolder: record.staysInFolder }),
+		...(record.slots === undefined ? {} : { slots: record.slots }),
 		liveCwds: record.liveCwds,
 		rows: record.rows,
 		focusedAt: record.focusedAt,
@@ -466,9 +482,12 @@ export class WindowRegistry {
 	 * directory and renew the lease every heartbeat. `onChange` runs whenever what the
 	 * windows show — not how fresh it is — differs from what it last reported;
 	 * `onHeartbeat` runs on every heartbeat, for work that must be repeated whatever the
-	 * registry saw (re-probing the session folders).
+	 * registry saw (re-probing the session folders). `beforeRenew` runs first on every
+	 * heartbeat, before the lease is renewed: a window that publishes a fact the registry
+	 * cannot see change (the editors VS Code holds) re-evaluates it there, so a fresh
+	 * `updatedAt` always means the record's content was checked at that moment.
 	 */
-	start(hooks: { readonly onChange: () => void; readonly onHeartbeat?: () => void }): void {
+	start(hooks: { readonly onChange: () => void; readonly onHeartbeat?: () => void; readonly beforeRenew?: () => void }): void {
 		const onChange = hooks.onChange;
 		if (this.#disposed || this.#stopWatch !== null) return;
 		const reread = (): void => {
@@ -485,6 +504,11 @@ export class WindowRegistry {
 			...(this.#watchDebounceMs === undefined ? {} : { debounceMs: this.#watchDebounceMs }),
 		});
 		this.#heartbeat = setInterval(() => {
+			try {
+				hooks.beforeRenew?.();
+			} catch (error) {
+				this.#report(`a heartbeat handler failed: ${messageOf(error)}`);
+			}
 			void this.flush();
 			reread();
 			try {
@@ -557,7 +581,7 @@ export class WindowRegistry {
 		if (observed === null) throw new Error("the window registry was closed");
 		const now = this.#now();
 		const live = observed.pass.others.filter(({ record, alive }) => alive && leaseHolds(record, now, this.#leaseMs));
-		const entries = live.map(({ record }) => ({ window: openWindowOf(record), hostPid: record.pid }));
+		const entries = live.map(({ record }) => ({ window: openWindowOf(record), hostPid: record.pid, updatedAtMs: Date.parse(record.updatedAt) }));
 		const ordered = orderWindows(entries.map(entry => entry.window));
 		return { windows: ordered.map(window => entries.find(entry => entry.window === window)!), unreadable: observed.pass.unreadable };
 	}

@@ -119,6 +119,7 @@ import { PersistFailureReporter } from "./host/persist-report";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
+import { EditorSlotPruner, EditorSlotWatch } from "./host/editor-slot-prune";
 import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./host/omp-session-lease";
 import { describeLoadSteps, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./host/win32-native";
 import { warmNativeAsset } from "./host/native-proof";
@@ -616,6 +617,8 @@ interface WindowState {
   // Window registry and routing
   /** The leased registry of this profile's windows (ADR-0056), once this window activated. */
   windowRegistry: WindowRegistry | undefined;
+  /** Remembers the editor slots this window has held and drops the passive bindings of the ones that closed (ADR-0025 amendment 2026-10-19); set at activation. */
+  editorSlotPruner: EditorSlotPruner | undefined;
   /** Re-probe the session folders (the checkout roots) of every live window's folders; set at activation. */
   resolveSessionFolders: () => Promise<void>;
   /**
@@ -1043,6 +1046,7 @@ function windowRoutingDeps(): WindowRoutingDeps {
     releaseSelection: releaseSelectionFromOtherWindow,
     tab: stateOf,
     hasEditorTab: slot => editorTabOf(slot) !== null,
+    liveEditorSlots: () => (windowState().editorSlotPruner?.complete === true ? windowState().bridgeHost.editorMembership().map(entry => entry.editorId) : null),
     selectEditorTab,
     revealExistingTab,
     isSessionTabInput: input => windowState().editorPanels.isSessionTabInput(input),
@@ -1295,6 +1299,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     claimFileNames: new Map<string, string | null>(),
     // Window registry and routing
     windowRegistry: undefined,
+    editorSlotPruner: undefined,
     routing: registerWindowRouting(windowRoutingDeps()),
     resolveSessionFolders: async () => {},
     requestSelections: new Set<string>(),
@@ -1737,6 +1742,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     onError: detail => log.warn(`window registry: ${detail}`),
   });
   s.windowRegistry = windowsRegistry;
+  s.editorSlotPruner = new EditorSlotPruner({
+    watch: new EditorSlotWatch({ store: context.workspaceState }),
+    membership: () => new Set(s.bridgeHost.editorMembership().map(entry => entry.editorId)),
+    registry: () => s.windowRegistry,
+    index: () => index,
+  });
+  // The editors VS Code has restored so far are the ones this window holds from the start; a tab it lists later is recorded when its change arrives.
+  s.editorSlotPruner.observe();
   if (vscode.window.state.focused) s.routing.noteFocused();
   // The checkout root an opened folder's sessions run at is read from the disk off the tree's path, for the
   // folders of every live window: until the answer arrives the folder shows as itself, and the
@@ -2260,6 +2273,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.window.tabGroups.onDidChangeTabs(() => {
       settleViewedSession(index);
+      // Which editors this window holds is what a closed editor's binding is judged by, here and in the other windows' registry reads.
+      windowState().editorSlotPruner?.observe();
+      windowState().routing.publishSnapshot();
       void windowState().bridgeHost.syncEditors(context, index, { retireMissing: true }).catch(error =>
         log.warn(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`),
       );
@@ -2280,7 +2296,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // The registry starts after the first snapshot exists, so the first record already says what
   // this window has open. From here the other windows' records, its own lease, and the session
   // folders of every live window's folders are kept current by watch, heartbeat and focus.
-  windowsRegistry.start({ onChange: s.routing.registryChanged, onHeartbeat: s.routing.heartbeat });
+  windowsRegistry.start({
+    onChange: s.routing.registryChanged,
+    // Before each renewal, so a fresh `updatedAt` means the record says what the tab set holds now. The first heartbeat is also
+    // when the tab set counts as complete, and from then on the record lists this window's editors.
+    beforeRenew: () => {
+      s.editorSlotPruner?.markComplete();
+      s.routing.publishSnapshot();
+    },
+    onHeartbeat: () => {
+      s.routing.heartbeat();
+      // The passive bindings of editors that closed here and that no live window holds are dropped from the catalog.
+      void s.editorSlotPruner?.run().then(
+        report => { if (report.dropped.length > 0) log.info(`editor slots: dropped ${report.dropped.length} passive binding(s) of closed editors`); },
+        error => log.warn(`editor slots: the bindings of closed editors could not be settled: ${messageOf(error)}`),
+      );
+    },
+  });
   // The editors this window already has are reconciled before any asynchronous native
   // work: their serializers are registered, and a page that survived a previous
   // extension host is adopted with the document its records name, so its reconnect has

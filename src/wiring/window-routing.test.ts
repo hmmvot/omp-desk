@@ -126,6 +126,8 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		binding: { tabId: "", role: "controlling", mode: "chat", generation: 3 } as { tabId: string; role: string; mode: string; generation: number },
 		tabs: new Map<string, { slotId: string; panel: unknown }>(),
 		editorTabs: new Set<string>(),
+		/** The tab set is not known to be complete yet (shortly after activation). */
+		slotsUnknown: false,
 		selectResult: true,
 		noRegistry: false,
 		published: [] as WindowSnapshot[],
@@ -209,6 +211,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		releaseSelection: target => { released.push(target); },
 		tab: tabId => state.tabs.get(tabId) as never,
 		hasEditorTab: slot => state.editorTabs.has(slot),
+		liveEditorSlots: () => (state.slotsUnknown ? null : [...state.editorTabs]),
 		selectEditorTab: async slot => { selected.push(slot); return state.selectResult; },
 		revealExistingTab: async (_index, tabId) => { revealed.push(tabId); },
 		isSessionTabInput: input => input !== null && typeof input === "object" && "session" in input,
@@ -331,6 +334,26 @@ describe("what this window publishes", () => {
 		w.routing.publishSnapshot();
 		const focusedAt = w.state.published.at(-1)?.focusedAt;
 		assert.ok(typeof focusedAt === "string" && Date.parse(focusedAt) >= before);
+	});
+
+	it("publishes the editor slots VS Code holds in this window, in a stable order, an empty list when there is none", async () => {
+		const w = await world();
+		w.routing.publishSnapshot();
+		assert.deepEqual(w.state.published.at(-1)?.slots, [], "no editor is a published fact, not an unknown one");
+		w.state.editorTabs.add("b".repeat(32));
+		w.state.editorTabs.add("a".repeat(32));
+		w.routing.publishSnapshot();
+		assert.deepEqual(w.state.published.at(-1)?.slots, ["a".repeat(32), "b".repeat(32)]);
+	});
+
+	it("leaves the editor slots out of the record while the tab set is not known to be complete: unknown, never none", async () => {
+		const w = await world();
+		w.state.slotsUnknown = true;
+		w.routing.publishSnapshot();
+		assert.equal("slots" in w.state.published.at(-1)!, false);
+		w.state.slotsUnknown = false;
+		w.routing.publishSnapshot();
+		assert.deepEqual(w.state.published.at(-1)?.slots, []);
 	});
 
 	it("publishes nothing while there is no registry or no index", async () => {
