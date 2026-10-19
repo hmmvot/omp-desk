@@ -241,28 +241,29 @@ report('inline-style',(()=>{const e=document.createElement('i');e.setAttribute('
 			assert.equal(seen["inline-style"], "rgb(4, 5, 6)", "a style attribute applied");
 			assert.deepEqual(await ui.evaluate("window.violations"), [], "the page's own policy never complained");
 			// The frame reports a source map back: Page | Source toggle and Copy.
-			assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-mermaid-tab')].map(button=>button.textContent).join()"), "Page,Source");
-			assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-htmlpage .omp-mermaid-copy'))"), true);
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-htmlpage-head .omp-mermaid-tab')].map(button=>button.textContent).join()"), "Page,Source");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-htmlpage .omp-htmlpage-head .omp-htmlpage-copy'))"), true);
 		});
 
-		await t.test("the toolbar has a row of its own: it never covers the page frame, wide or narrow", async () => {
+		await t.test("the header is a row of its own above the frame: never over it, always visible, wide or narrow", async () => {
 			for (const width of [900, 700, 360]) {
 				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
-				await ui.until("document.querySelector('.omp-htmlpage .omp-mermaid-bar') && document.querySelector('iframe.omp-htmlpage-frame')");
-				const [bar, frame] = await ui.evaluate<number[][]>("(()=>{const r=element=>{const b=element.getBoundingClientRect();return[b.left,b.top,b.right,b.bottom]};return[r(document.querySelector('.omp-htmlpage .omp-mermaid-bar')),r(document.querySelector('iframe.omp-htmlpage-frame'))]})()");
-				const apart = bar![2]! <= frame![0]! || frame![2]! <= bar![0]! || bar![3]! <= frame![1]! || frame![3]! <= bar![1]!;
-				assert.ok(apart, `at ${width}px the toolbar ${bar} does not intersect the frame ${frame}`);
+				await ui.until("document.querySelector('.omp-htmlpage .omp-htmlpage-head') && document.querySelector('iframe.omp-htmlpage-frame')");
+				const [bar, frame] = await ui.evaluate<number[][]>("(()=>{const r=element=>{const b=element.getBoundingClientRect();return[b.left,b.top,b.right,b.bottom]};return[r(document.querySelector('.omp-htmlpage .omp-htmlpage-head')),r(document.querySelector('iframe.omp-htmlpage-frame'))]})()");
+				assert.ok(bar![3]! <= frame![1]!, `at ${width}px the header ${bar} ends above the frame ${frame}`);
+				assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-htmlpage .omp-htmlpage-head')).opacity"), "1", "not a hover overlay");
+				assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-htmlpage .omp-htmlpage-head')).position"), "static");
 			}
 			await ui.call("Emulation.setDeviceMetricsOverride", { width: 700, height: 900, deviceScaleFactor: 1, mobile: false });
 		});
 
 		await t.test("Source shows the code and Page brings the page back", async () => {
 			await delay(6500); // longer than the frame's answer timeout: a page that answered must never be given up on afterwards
-			await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-mermaid-tab')].find(button=>button.textContent==='Source').click()");
+			await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-htmlpage-head .omp-mermaid-tab')].find(button=>button.textContent==='Source').click()");
 			await ui.until("document.querySelector('.omp-htmlpage pre')");
 			assert.equal(await frames(), 0);
 			assert.match(await ui.evaluate<string>("document.querySelector('.omp-htmlpage pre').textContent"), /<h1 id="t">Hello<\/h1>/);
-			await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-mermaid-tab')].find(button=>button.textContent==='Page').click()");
+			await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-htmlpage-head .omp-mermaid-tab')].find(button=>button.textContent==='Page').click()");
 			await ui.until("document.querySelector('iframe.omp-htmlpage-frame')");
 		});
 
@@ -298,17 +299,44 @@ report('ready','1');
 			assert.equal(changed.born, dark.born, "the same page instance: a theme change is a message, not a reload");
 		});
 
-		await t.test("the frame is as tall as its page up to a cap, and scrolls inside beyond it", async () => {
+		await t.test("the frame is as tall as its page up to a cap; a taller page expands to its full height and back, tracking its content", async () => {
 			await open("height");
+			const frameHeight = (): Promise<number> => ui.evaluate<number>("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height");
 			await ui.evaluate(reply(`<div id="s" style="height:100px"></div>`));
 			await ui.until("document.querySelector('iframe.omp-htmlpage-frame') && document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height<150");
-			const short = await ui.evaluate<number>("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height");
+			const short = await frameHeight();
 			assert.ok(short >= 100 && short <= 130, `a 100px page in an 8px margin is about 116px, not the 160px start (${short})`);
-			await ui.evaluate(reply(`<div style="height:2000px">tall</div><script>${REPORT}addEventListener('load',()=>report('scroll',document.documentElement.scrollHeight>innerHeight))</script>`));
-			await ui.until("document.querySelector('iframe.omp-htmlpage-frame') && document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height>=480");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-htmlpage-more'))"), false, "a short page has no expand button");
+			await ui.evaluate(reply(`<div id="big" style="height:2000px">tall</div><script>${REPORT}
+addEventListener('message',e=>{if(e.source!==parent)return;if(e.data==='ask')report('dims',document.documentElement.scrollHeight+','+innerHeight);if(e.data==='grow')document.getElementById('big').style.height='3000px'});
+addEventListener('load',()=>report('scroll',document.documentElement.scrollHeight>innerHeight));
+</script>`));
+			await ui.until("document.querySelector('.omp-htmlpage-more')");
 			await delay(200);
-			assert.equal(await ui.evaluate("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height"), 480);
-			assert.equal((await probes()).scroll, "true", "the rest scrolls inside the frame");
+			assert.equal(await frameHeight(), 480, "collapsed at the cap");
+			assert.equal((await probes()).scroll, "true", "the rest scrolls inside the frame while collapsed");
+			const layout = await ui.evaluate<Record<string, number>>("(()=>{const r=s=>document.querySelector(s).getBoundingClientRect();return{headBottom:r('.omp-htmlpage-head').bottom,frameTop:r('iframe.omp-htmlpage-frame').top,frameBottom:r('iframe.omp-htmlpage-frame').bottom,moreTop:r('.omp-htmlpage-more').top}})()");
+			assert.ok(layout.headBottom! <= layout.frameTop!, `the header (${layout.headBottom}) is above the frame (${layout.frameTop}), never over it`);
+			assert.ok(layout.moreTop! >= layout.frameBottom!, "the button is below the frame");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-more').textContent"), "Show full page");
+
+			await ui.evaluate("document.querySelector('.omp-htmlpage-more').click()");
+			await ui.until("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height>=2000");
+			await delay(300);
+			await ui.evaluate("window.frameLog.length=0;document.querySelector('iframe.omp-htmlpage-frame').contentWindow.postMessage('ask','*')");
+			await ui.until("window.frameLog.some(entry=>entry.data.probe==='dims')");
+			const [scrollHeight, innerHeight] = (await probes()).dims!.split(",").map(Number);
+			assert.ok(scrollHeight! <= innerHeight! + 1, `expanded: the frame shows the whole page with no inner scroll (${scrollHeight} in ${innerHeight})`);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-more').textContent"), "Show less");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-more').getAttribute('aria-expanded')"), "true");
+
+			// While expanded the height follows the content.
+			await ui.evaluate("document.querySelector('iframe.omp-htmlpage-frame').contentWindow.postMessage('grow','*')");
+			await ui.until("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height>=3000");
+
+			await ui.evaluate("document.querySelector('.omp-htmlpage-more').click()");
+			await ui.until("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height===480");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-more').textContent"), "Show full page", "collapse returns to the cap");
 		});
 
 		await t.test("a hostile page reaches nothing: no parent, no host channel, no storage, no network, no navigation, no forged message", async () => {

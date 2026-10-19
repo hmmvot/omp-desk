@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { figurePaletteFrom } from "./figure-palette.ts";
 import {
-	HTML_PAGE_MAX_HEIGHT,
+	HTML_PAGE_MAX_CONTENT_HEIGHT,
 	HTML_PAGE_MIN_HEIGHT,
 	MAX_HTML_PAGE_CHARS,
 	htmlPageMessage,
@@ -50,7 +50,8 @@ test("the page message carries the source, the scheme and the variables, nothing
 test("a size report is read only from a frame message and is clamped", () => {
 	assert.equal(parseHtmlPageSize({ ompHtmlPage: "size", height: 300.2 }), 301);
 	assert.equal(parseHtmlPageSize({ ompHtmlPage: "size", height: 1 }), HTML_PAGE_MIN_HEIGHT);
-	assert.equal(parseHtmlPageSize({ ompHtmlPage: "size", height: 1e9 }), HTML_PAGE_MAX_HEIGHT);
+	assert.equal(parseHtmlPageSize({ ompHtmlPage: "size", height: 1e9 }), HTML_PAGE_MAX_CONTENT_HEIGHT);
+	assert.equal(parseHtmlPageSize({ ompHtmlPage: "size", height: 1200 }), 1200, "a tall page's own height is kept: the block decides how much to show");
 	for (const data of [null, "size", 3, {}, { ompHtmlPage: "theme", height: 100 }, { ompHtmlPage: "size" }, { ompHtmlPage: "size", height: "100" }, { ompHtmlPage: "size", height: Number.NaN }, { ompHtmlPage: "size", height: Infinity }, { type: "omp:chat-state" }]) {
 		assert.equal(parseHtmlPageSize(data), null, JSON.stringify(data));
 	}

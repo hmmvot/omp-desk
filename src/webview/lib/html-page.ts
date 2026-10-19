@@ -17,10 +17,13 @@ export { HTML_PAGE_CHANNEL };
 
 /** The longest page source shown as a page; a longer one stays a code block. */
 export const MAX_HTML_PAGE_CHARS = 200_000;
-/** The frame's height before the page has reported its own, the least it takes and the most it grows to (the page scrolls inside beyond it). */
+/** The frame's height before the page has reported its own, and the least it takes. */
 export const HTML_PAGE_INITIAL_HEIGHT = 160;
 export const HTML_PAGE_MIN_HEIGHT = 40;
+/** The most a collapsed page takes (it scrolls inside beyond it); a taller page offers Show full page. */
 export const HTML_PAGE_MAX_HEIGHT = 480;
+/** The most a page's reported content height is believed, expanded or not: a page asking for more scrolls inside. */
+export const HTML_PAGE_MAX_CONTENT_HEIGHT = 30_000;
 
 /** A theme value the frame accepts: colours, font stacks and sizes, nothing that can end a declaration. */
 const SAFE_VALUE = /^[#A-Za-z0-9 ,.'_()%-]{1,200}$/;
@@ -87,10 +90,10 @@ export function isHtmlPageReady(data: unknown): boolean {
 	return typeof data === "object" && data !== null && (data as Record<string, unknown>)[HTML_PAGE_CHANNEL] === "ready";
 }
 
-/** The height a frame reported, clamped to what a page may take, or `null` for anything that is not a size report. */
+/** The content height a frame reported (never below the least a frame takes, never above {@link HTML_PAGE_MAX_CONTENT_HEIGHT}), or `null` for anything that is not a size report. The block, not this, decides how much of it is shown. */
 export function parseHtmlPageSize(data: unknown): number | null {
 	if (typeof data !== "object" || data === null) return null;
 	const record = data as Record<string, unknown>;
 	if (record[HTML_PAGE_CHANNEL] !== "size" || typeof record.height !== "number" || !Number.isFinite(record.height)) return null;
-	return Math.min(HTML_PAGE_MAX_HEIGHT, Math.max(HTML_PAGE_MIN_HEIGHT, Math.ceil(record.height)));
+	return Math.min(HTML_PAGE_MAX_CONTENT_HEIGHT, Math.max(HTML_PAGE_MIN_HEIGHT, Math.ceil(record.height)));
 }

@@ -4,15 +4,17 @@
  * What the reader sees, by state:
  * - not the assistant's own reply text (a user message, a tool result, thinking), or `ompDesk.chatHtmlPages` off: the plain code block, nothing run;
  * - the closing fence has not arrived (the reply is streaming): the code block; the text changes with every token;
- * - closed ({@link prepareHtmlPage}): a sandboxed frame (`lib/html-page.ts` says what that frame can and cannot do) with a Page | Source
- *   toggle and Copy of the source in the corner;
+ * - closed ({@link prepareHtmlPage}): one bordered block: a header row of its own (always visible, never over the page) with Page | Source and
+ *   Copy, the sandboxed frame (`lib/html-page.ts` says what that frame can and cannot do) and, for a page taller than the cap, a bottom row with
+ *   Show full page / Show less;
  * - refused (empty, too large, no nonce): the code block and one muted line saying why.
  *
- * The frame's height follows its content up to a cap, then the page scrolls inside it. It reports its height by message; only the
- * window of this block's own frame is listened to.
+ * The frame reports its content height by message (only the window of this block's own frame is listened to). Collapsed, the frame is that
+ * height up to the cap and the page scrolls inside it; expanded it is the whole content height, with no inner scroll, and follows the content.
+ * The block's size change reaches the transcript through its rows' `ResizeObserver`, like any other row that grows.
  */
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
-import { HTML_PAGE_INITIAL_HEIGHT, htmlPageMessage, htmlPageThemeMessage, isHtmlPageReady, parseHtmlPageSize, prepareHtmlPage } from "../lib/html-page.ts";
+import { HTML_PAGE_INITIAL_HEIGHT, HTML_PAGE_MAX_HEIGHT, htmlPageMessage, htmlPageThemeMessage, isHtmlPageReady, parseHtmlPageSize, prepareHtmlPage } from "../lib/html-page.ts";
 import { HTML_PAGE_FRAME_CLASS, holdHtmlPageFocusGuard } from "../lib/html-page-focus.ts";
 import { htmlPageFrameUrl, useHtmlPageTheme } from "../lib/html-page-theme.ts";
 import { useHtmlPagesEnabled } from "../lib/html-pages-enabled.ts";
@@ -32,6 +34,7 @@ type View = "page" | "source";
 
 const preferences = new Map<string, View>();
 const heights = new Map<string, number>();
+const expansions = new Map<string, boolean>();
 
 /** The view the reader left this source in, and the height its page last had: the transcript unmounts rows that scroll away and mounts them again. */
 function remember<T>(memory: Map<string, T>, source: string, value: T): void {
@@ -76,7 +79,12 @@ function DrawnPage({ source, frameUrl, leaf }: { source: string; frameUrl: strin
 	const latest = useRef(theme);
 	latest.current = theme;
 	const [view, setView] = useState<View>(() => preferences.get(source) ?? "page");
-	const [height, setHeight] = useState(() => heights.get(source) ?? HTML_PAGE_INITIAL_HEIGHT);
+	const [content, setContent] = useState(() => heights.get(source) ?? HTML_PAGE_INITIAL_HEIGHT);
+	const [expanded, setExpanded] = useState(() => expansions.get(source) === true);
+	const toggle = (next: boolean): void => {
+		setExpanded(next);
+		remember(expansions, source, next);
+	};
 	const [status, setStatus] = useState<"loading" | "ready" | "failed">("loading");
 	const choose = (next: View): void => {
 		setView(next);
@@ -100,7 +108,7 @@ function DrawnPage({ source, frameUrl, leaf }: { source: string; frameUrl: strin
 			}
 			const next = parseHtmlPageSize(event.data);
 			if (next === null) return;
-			setHeight(next);
+			setContent(next);
 			remember(heights, source, next);
 		};
 		window.addEventListener("message", onMessage);
@@ -115,29 +123,36 @@ function DrawnPage({ source, frameUrl, leaf }: { source: string; frameUrl: strin
 	}, [theme, status]);
 
 	if (status === "failed" && view === "page") return <CodeWithNote source={source} closed reason={FRAME_SILENT} leaf={leaf} />;
+	const overflows = content > HTML_PAGE_MAX_HEIGHT;
+	const open = expanded && overflows;
 	return (
-		<div className="omp-mermaid omp-mermaid--drawn omp-htmlpage">
-			{view === "page" ? (
-				<div className="omp-htmlpage-box">
-					<iframe
-						ref={frame}
-						className={HTML_PAGE_FRAME_CLASS}
-						title="HTML page"
-						sandbox="allow-scripts"
-						allow=""
-						referrerPolicy="no-referrer"
-						src={frameUrl}
-						style={{ height }}
-					/>
-				</div>
-			) : (
-				<CodeBlock language="html" source={source} closed copy={false} leaf={leaf} />
-			)}
-			<div className="omp-mermaid-bar" role="toolbar" aria-label="Page view">
+		<div className="omp-htmlpage">
+			<div className="omp-htmlpage-head" role="toolbar" aria-label="Page view">
 				<button type="button" className="omp-mermaid-tab" aria-pressed={view === "page"} onClick={() => choose("page")}>Page</button>
 				<button type="button" className="omp-mermaid-tab" aria-pressed={view === "source"} onClick={() => choose("source")}>Source</button>
-				<CopyButton text={source} label="Copy HTML source" className="omp-mermaid-copy" />
+				<CopyButton text={source} label="Copy HTML source" className="omp-htmlpage-copy" />
 			</div>
+			{view === "page" ? (
+				<iframe
+					ref={frame}
+					className={HTML_PAGE_FRAME_CLASS}
+					title="HTML page"
+					sandbox="allow-scripts"
+					allow=""
+					referrerPolicy="no-referrer"
+					src={frameUrl}
+					style={{ height: open ? content : Math.min(content, HTML_PAGE_MAX_HEIGHT) }}
+				/>
+			) : (
+				<div className="omp-htmlpage-source">
+					<CodeBlock language="html" source={source} closed copy={false} leaf={leaf} />
+				</div>
+			)}
+			{view === "page" && overflows && (
+				<button type="button" className="omp-htmlpage-more" aria-expanded={open} onClick={() => toggle(!open)}>
+					{open ? "Show less" : "Show full page"}
+				</button>
+			)}
 		</div>
 	);
 }

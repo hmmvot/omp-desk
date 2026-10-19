@@ -70,7 +70,7 @@ export const TOOL_INTENT_INJECTION: ChatPromptInjection = {
 	text: "This replaces the built-in rule for `i` (2–6-word present-participle intent). For every tool whose schema has an `i` field, set `i` to what you are doing and why, in terms of the current task: the question the call answers or the change it makes, naming its subject (feature, bug, file, agent). At most 10 words. It is shown beside the tool name and its arguments, so do not repeat them, and do not use a bare verb such as check, read, search, run, fix or wait. Examples: not \"Find menu\" but \"Find where the tool card menu is drawn\"; not \"Tree state\" but \"Check that agents left no uncommitted changes\". Do not add `i` to tools whose schema lacks this field.",
 };
 
-export const MAX_HTML_PAGE_INJECTION_CHARS = 700;
+export const MAX_HTML_PAGE_INJECTION_CHARS = 800;
 /**
  * Added only when `ompDesk.chatHtmlPages` is on: a closed top-level ```html fence of a reply is shown as a live page in a sandboxed frame
  * (docs/designs/2026-10-19-chat-html-pages.md). The model has to know what that page can and cannot do, or it writes a page that
@@ -78,7 +78,7 @@ export const MAX_HTML_PAGE_INJECTION_CHARS = 700;
  */
 export const HTML_PAGE_INJECTION: ChatPromptInjection = {
 	id: "html-page",
-	text: "A closed ```html fence in your reply is shown to the user as a live page. Use it only when a page shows what Markdown cannot (an interactive explainer, a chart, a mockup). It is one self-contained document in a sandboxed frame: inline classic `<script>`/`<style>` run, nothing loads from the network (no CDN, fonts, fetch, external scripts; `data:` images only), no forms, popups, links out or navigation. Colour it with the theme's variables, never your own palette: `var(--bg)`, `--fg`, `--muted`, `--border`, `--surface`, `--accent`, `--success`, `--warning`, `--error`, `--c1`…`--c6`, `--font`, `--font-mono`. Its height follows its content up to 480px, then scrolls, so no `100vh`.",
+	text: "A closed ```html fence in your reply is shown to the user as a live page. Use it only when a page shows what Markdown cannot (an interactive explainer, a chart, a mockup). One self-contained document in a sandboxed frame: inline `<script>`/`<style>` run; nothing loads from the network (no CDN, fonts, fetch; `data:` images only); no forms, popups, links out or navigation. Colour only with theme variables: `var(--bg)`, `--fg`, `--muted`, `--border`, `--surface`, `--accent`, `--success`, `--warning`, `--error`, `--c1`…`--c6`, `--font`, `--font-mono`. Keep the document height fixed when tabs, steps or states switch (reserve the tallest one in a fixed-height container), or the reply jumps; a page over 480px gets a Show full page button, so no `100vh`.",
 };
 
 /** The Chat prompt for a launch: the standing injections, the HTML page rule when `env` sets {@link HTML_PAGES_ENV} to `1`, and the tool-intent rule when it sets {@link TOOL_INTENT_ENV} to `1`. */
