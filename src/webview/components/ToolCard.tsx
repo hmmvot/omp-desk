@@ -187,8 +187,11 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		{ id: "raw", label: viewState.raw ? "Hide raw result and details" : "View raw result and details", icon: "code", disabled: source === undefined ? "There is no result yet" : null, run: () => { setViewState({ raw: !viewState.raw }); } },
 		{ id: "open-full", label: "Open full output", icon: "go-to-file", disabled: fullOutputArtifact === undefined ? "This output was not truncated, so no full copy was saved" : artifacts.open === undefined ? artifacts.reason : null, run: () => { if (fullOutputArtifact !== undefined) artifacts.open?.(fullOutputArtifact); } },
 	];
-	const outputBar = view !== undefined && state !== "skipped" && source !== undefined
-		? <div className="omp-output-bar">
+	const hasBar = view !== undefined && state !== "skipped" && source !== undefined;
+	// A bar with nothing but the ⋯ menu (a running call with no output yet) would be an empty row: it sits in the body's corner instead, and the full view's toolbar already carries the menu.
+	const menuOnly = hasBar && copyText === "" && format === null && !(exit !== undefined && exit !== 0) && chips.length === 0;
+	const outputBar = hasBar && !(menuOnly && full)
+		? <div className={menuOnly ? "omp-output-bar omp-output-bar--menu-only" : "omp-output-bar"}>
 			{copyText !== "" && <span className="omp-output-label">{outputLabel}</span>}
 			{format !== null && <span className="omp-chip omp-format-badge">{format.badge}</span>}
 			{exit !== undefined && exit !== 0 && <span className="omp-chip omp-chip--err">EXIT {exit}</span>}
@@ -317,7 +320,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			{face}
 		</button>
 		{jobCancel !== null && <JobCancel cardJob={jobCancel} />}
-		{showBody && <div id={bodyId} className="omp-tool-body" role="region" aria-label={`${view?.title ?? metadata.title} details`} tabIndex={0}>{body}</div>}
+		{showBody && <div id={bodyId} className={menuOnly && !full ? "omp-tool-body omp-tool-body--menu-only" : "omp-tool-body"} role="region" aria-label={`${view?.title ?? metadata.title} details`} tabIndex={0}>{body}</div>}
 	</div>;
 });
 
