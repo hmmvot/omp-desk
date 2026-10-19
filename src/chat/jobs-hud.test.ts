@@ -9,7 +9,7 @@ function job(id: string, patch: Partial<JobRecord> = {}): JobRecord {
 	return { id, type: "bash", label: "x", state: "running", startedAt: null, endedAt: null, durationMs: null, callId: "c", live: true, gone: false, ...patch };
 }
 function view(running: JobRecord[], patch: Partial<JobsView> = {}): JobsView {
-	return { shown: true, pending: running.length > 0, running, byId: new Map(running.map(item => [item.id, item])), agentsRunning: false, incomplete: false, ...patch };
+	return { shown: true, pending: running.length > 0, running, byId: new Map(running.map(item => [item.id, item])), agentsRunning: false, toolsRunning: false, incomplete: false, ...patch };
 }
 const MINUTE = 60_000;
 

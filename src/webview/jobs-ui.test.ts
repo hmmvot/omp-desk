@@ -379,6 +379,11 @@ test("background jobs in the Jobs row, the working row, tool cards and proc:// l
 			await ui.evaluate("window.ui.jobs([], {pending:true,olderCount:0})");
 			await ui.wait("document.querySelector('.omp-hud--jobs .omp-hud-summary')?.textContent==='Background work is pending · no job is named in this chat'");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-hud--jobs .omp-hud-summary').className.includes('warn') || document.querySelector('.omp-hud--jobs').outerHTML.includes('warn')"), true, "drawn as a warning");
+			// A tool call of the turn still running (an eval whose job is not named yet) may be all OMP is waiting for: no row, not the warning.
+			await ui.evaluate("window.ui.push({activeTools:[{toolCallId:'eval-1',toolName:'eval',args:{},startedAt:Date.now()}]})");
+			await ui.wait("!document.querySelector('.omp-hud--jobs')");
+			await ui.evaluate("window.ui.push({activeTools:[]})");
+			await ui.wait("document.querySelector('.omp-hud--jobs .omp-hud-summary')?.textContent==='Background work is pending · no job is named in this chat'");
 		});
 
 		await t.test("a short viewport drops the note before a job and folds the rest into +N more", async () => {

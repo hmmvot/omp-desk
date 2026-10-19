@@ -345,7 +345,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 /** The jobs the model shows, the same object until a job or the row's own facts change, so the tool cards re-render only for a job they may show. */
 function useJobsView(snapshot: ChatSnapshot, gone: GoneJobs): JobsView {
 	const previous = useRef<JobsView | null>(null);
-	const next = useMemo(() => jobsViewOf(snapshot, gone), [snapshot.entries, snapshot.jobFrames, snapshot.asyncPaused, snapshot.state?.hasPendingAsyncWork, snapshot.settled, snapshot.phase, snapshot.olderCount, gone]); // eslint-disable-line react-hooks/exhaustive-deps -- the view reads exactly these fields
+	const next = useMemo(() => jobsViewOf(snapshot, gone), [snapshot.entries, snapshot.jobFrames, snapshot.asyncPaused, snapshot.state?.hasPendingAsyncWork, snapshot.settled, snapshot.phase, snapshot.olderCount, snapshot.activeTools.size > 0, gone]); // eslint-disable-line react-hooks/exhaustive-deps -- the view reads exactly these fields
 	if (previous.current !== null && sameJobsView(previous.current, next)) return previous.current;
 	previous.current = next;
 	return next;

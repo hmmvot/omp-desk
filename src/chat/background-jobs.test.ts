@@ -194,7 +194,7 @@ describe("parseJobFrames", () => {
 });
 
 function source(entries: ChatEntry[], patch: Partial<JobsSource> = {}): JobsSource {
-	return { phase: "live", asyncPaused: false, settled: false, state: null, entries, olderCount: 0, jobFrames: new Map(), ...patch };
+	return { phase: "live", asyncPaused: false, settled: false, state: null, entries, olderCount: 0, activeTools: new Map(), jobFrames: new Map(), ...patch };
 }
 
 describe("jobsViewOf", () => {
@@ -234,6 +234,21 @@ describe("jobsViewOf", () => {
 		assert.deepEqual(mixed.running.map(job => job.id), ["bg_2"]);
 		assert.equal(mixed.shown, true);
 		assert.equal(jobsViewOf(source(chain(started("c1", 1_000, "bg_1", "task"), delivered(2_000, "bg_1")), { state: { hasPendingAsyncWork: true } })).shown, true, "with the agent ended, unnamed pending work is shown again");
+	});
+
+	it("shows no row for pending work no job names while any tool call of the turn is still executing, and the warning once nothing is", () => {
+		const pending = { state: { hasPendingAsyncWork: true } };
+		const settledJobs = chain(started("c1", 1_000, "bg_1"), started("c2", 2_000, "bg_2"), delivered(3_000, "bg_1", "bg_2"));
+		for (const toolName of ["eval", "bash", "task"]) {
+			const view = jobsViewOf(source(settledJobs, { ...pending, activeTools: new Map([["c9", { toolName }]]) }));
+			assert.equal(view.toolsRunning, true, toolName);
+			assert.equal(view.shown, false, `${toolName} running, its job not named yet`);
+		}
+		const quiet = jobsViewOf(source(settledJobs, pending));
+		assert.equal(quiet.toolsRunning, false);
+		assert.equal(quiet.shown, true, "nothing executes: the warning");
+		assert.equal(jobsViewOf(source(settledJobs, { asyncPaused: true, activeTools: new Map([["c9", {}]]) })).shown, false, "a paused turn counts as pending too");
+		assert.equal(jobsViewOf(source(two, { ...pending, activeTools: new Map([["c9", { toolName: "eval" }]]) })).shown, true, "a named running job is shown whatever else runs");
 	});
 
 	it("reads the gone map", () => {
