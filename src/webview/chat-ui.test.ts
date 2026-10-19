@@ -178,7 +178,7 @@ createRoot(document.getElementById("root")).render(location.search.includes("fol
 
 // Skipped on machines with no Chromium-based browser installed. One browser hosts every
 // subtest; the timeout only guards a hang and must cover the whole set under suite load.
-test("compact chat's rendered behavioral boundaries", { skip: browserPath === undefined, timeout: 280_000 }, async t => {
+test("compact chat's rendered behavioral boundaries", { skip: browserPath === undefined, timeout: 420_000 }, async t => {
 	const bundled = await build({ stdin: { contents: fixture, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") },
 		bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", loader: { ".css": "text" }, define: { "process.env.NODE_ENV": '"production"' },
 		plugins: [{ name: "bridge-operation-test-access", setup(builder) {
@@ -1274,7 +1274,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const firstPlain = listed.findIndex(row => row.group === "command");
 			assert.ok(firstPlain > 0, "there are GUI commands and plain ones");
 			assert.ok(listed.slice(0, firstPlain).every(row => row.marked && row.group === "gui") && listed.slice(firstPlain).every(row => !row.marked), "GUI rows come first and only they are marked");
-			assert.deepEqual(listed.slice(firstPlain).map(row => row.name), ["/fix", "/skill:review", "/usage"], "ordinary commands follow, alphabetically");
+			assert.deepEqual(listed.slice(firstPlain).map(row => row.name), ["/btw", "/fix", "/skill:review", "/usage"], "ordinary commands follow, alphabetically");
 			for (const name of ["/settings", "/models", "/agents", "/rewind", "/clear", "/compact", "/export", "/hotkeys", "/git", "/login", "/logout"]) assert.ok(listed.some(row => row.name === name && row.group === "gui"), `${name} is GUI-supported`);
 			assert.deepEqual(listed.filter(row => ["/tree", "/handoff", "/vibe"].includes(row.name)), [], "commands Chat cannot run are not listed");
 			assert.deepEqual([listed.find(row => row.name === "/fix")!.chip, listed.find(row => row.name === "/skill:review")!.chip, listed.find(row => row.name === "/export")!.chip, listed.find(row => row.name === "/settings")!.chip], ["Prompt", "Skill", "OMP", "Desk"]);
