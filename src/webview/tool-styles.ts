@@ -23,6 +23,17 @@ export const TOOL_STYLES = `
 .omp-diff-stat--add { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
 .omp-diff-stat--del { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
 .omp-native-tool .omp-tool-head > .omp-tool-counter { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+/* A card that started a background job: its status chip in the head, and Cancel at the head's right edge (a sibling of the head button, never inside it). */
+.omp-native-tool--job-cancel { position: relative; }
+.omp-native-tool--job-cancel > .omp-tool-head { padding-right: 76px; }
+.omp-job-cancel { position: absolute; top: 3px; right: 6px; height: 20px; padding: 0 8px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); background: var(--vscode-editor-background); color: var(--vscode-foreground); font: inherit; font-size: 11px; line-height: 16px; cursor: pointer; }
+.omp-job-cancel:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.omp-job-cancel:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.omp-job-cancel:disabled { opacity: 0.55; cursor: default; }
+.omp-native-tool .omp-tool-head > .omp-job-chip { flex: none; padding: 0 6px; border: 1px solid var(--omp-border); border-radius: 10px; font-size: 11px; line-height: 16px; color: var(--omp-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.omp-job-chip--running { border-color: var(--vscode-charts-blue); color: var(--vscode-charts-blue); }
+.omp-job-chip--completed { color: var(--vscode-testing-iconPassed); }
+.omp-job-chip--failed { border-color: var(--vscode-errorForeground); color: var(--vscode-errorForeground); }
 .omp-native-tool .omp-tool-body { padding: 4px 12px 8px 30px; }
 .omp-wait-title-short { display: none; }
 @media (max-width: 300px) {

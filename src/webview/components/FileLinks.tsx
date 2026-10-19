@@ -11,9 +11,11 @@ import type { MouseEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { createContext, Fragment, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages";
 import { fileLinkMenuContext } from "../../shared/terminal-links";
+import { detectProcLinks, isJobId, parseProcLink } from "../../shared/proc-links";
 import type { FileLinkAction } from "../../shared/terminal-links";
 import { ChatFileLinks, detectChatFileLinks, isFileLinkCandidate } from "../lib/chat-file-links";
 import { ChatSymbolLinks } from "../lib/chat-symbol-links";
+import { JobsContext } from "../lib/jobs-context";
 import type { SymbolLink } from "../lib/chat-symbol-links";
 import { useHighlightedRuns } from "../lib/use-highlighted-runs";
 import { CodeRuns } from "./CodeRuns";
@@ -126,6 +128,48 @@ export function InternalLink({ target, children }: { target: string; children: R
 	const links = useContext(FileLinksContext);
 	const proven = useProvenTargets(links, links === null ? [] : [target], undefined);
 	return links !== null && proven.has(target) ? <InternalAnchor links={links} target={target}>{children}</InternalAnchor> : <>{children}</>;
+}
+
+/**
+ * `children` as the link to an OMP `proc://` address (`proc://bg_3`, `proc://`, even `proc://bg_3/kill`): a click shows the job in the Jobs
+ * row and nothing more. The address's `/kill` or `/mode` says what an OMP write would do; a link never writes, so it never sends a cancel.
+ * Plain `children` where the page has no Jobs row (a detail tab, a static render) or `target` is not a `proc://` address.
+ */
+export function ProcJobLink({ target, children }: { target: string; children: ReactNode }): ReactNode {
+	const jobs = useContext(JobsContext);
+	const link = parseProcLink(target);
+	if (jobs === null || link === null) return <>{children}</>;
+	const show = (): void => jobs.ui.focus(link.id);
+	return <span
+		className="omp-file-link omp-proc-link"
+		role="link"
+		tabIndex={0}
+		data-proc-target={target}
+		title={link.id === null ? `${target}\nShow the Jobs row` : `${target}\nShow ${link.id} in the Jobs row (this link never cancels it)`}
+		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
+		onClick={event => { if (claimLinkActivation(event)) show(); }}
+		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) show(); }}
+	>{children}</span>;
+}
+
+/** A job's id as the link to that job (`proc://<id>`); plain where `id` is not a word OMP mints for jobs. */
+export function JobIdLink({ id, children }: { id: string; children: ReactNode }): ReactNode {
+	return isJobId(id) ? <ProcJobLink target={`proc://${id}`}>{children}</ProcJobLink> : <>{children}</>;
+}
+
+/** `text` with every `proc://` address in it a {@link ProcJobLink}; the characters themselves are never altered. */
+function ProcLinkText({ text, revalidate }: { text: string; revalidate?: unknown }): ReactNode {
+	const found = detectProcLinks(text);
+	if (found.length === 0) return <FileLinkText text={text} revalidate={revalidate} />;
+	const nodes: ReactNode[] = [];
+	let cursor = 0;
+	found.forEach(({ start, end }, index) => {
+		if (start > cursor) nodes.push(<FileLinkText key={`t${index}`} text={text.slice(cursor, start)} revalidate={revalidate} />);
+		nodes.push(<ProcJobLink key={`p${index}`} target={text.slice(start, end)}>{breakable(text.slice(start, end))}</ProcJobLink>);
+		cursor = end;
+	});
+	if (cursor < text.length) nodes.push(<FileLinkText key="tail" text={text.slice(cursor)} revalidate={revalidate} />);
+	return <>{nodes}</>;
 }
 
 /**
@@ -290,6 +334,8 @@ function CommandText({ text, language, closed }: { text: string; language: strin
  */
 export function ToolTargetText({ category, paths, text, line, revalidate, language, closed = true }: { category: string; paths: readonly string[]; text: string; line?: number; revalidate?: unknown; language?: string; closed?: boolean }): ReactNode {
 	if (category === "skill") return paths.length >= 1 ? <FileLink target={paths[0]!} revalidate={revalidate}>{text}</FileLink> : text;
+	// A `proc://` address (a read of a job's output, a write to it) shows the job in the Jobs row; it is never a file.
+	if ((category === "read" || category === "edit" || category === "other") && paths.every(path => /^proc:\/\//i.test(path)) && detectProcLinks(text).length > 0) return <ProcLinkText text={text} revalidate={revalidate} />;
 	if (category === "read" && paths.length >= 1) return <FileLink target={`${paths[0]}${displayedPosition(text)}`} proof={paths[0]} revalidate={revalidate}>{text}</FileLink>;
 	const single = category === "edit" && isFileLinkCandidate(text) && !text.includes("→") && !text.includes(", ") && !/^\d+ files?$/.test(text);
 	if (single) return <FileLink target={line === undefined ? text : `${text}:${line}`} proof={text} revalidate={revalidate}>{text}</FileLink>;

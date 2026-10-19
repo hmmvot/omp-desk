@@ -406,7 +406,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.push({workingIntent:'Latest intent'})");
 			await ui.wait("document.querySelector('.omp-working-status .omp-sr-only').textContent==='Latest intent'");
 			assert.equal(await ui.evaluate("window.announcements.length"), 1, "rapid intents coalesce into one polite announcement");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-working-status').getAttribute('aria-live')"), "polite");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-working-status .omp-sr-only').getAttribute('aria-live')"), "polite");
 			await ui.evaluate("window.statusObserver.disconnect();window.ui.push({uiRequests:[{id:'status-ask',method:'confirm',title:'Proceed?',message:''}]})");
 			await ui.wait("document.querySelector('.omp-working-status-text').textContent==='Waiting for your answer'");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-turn-progress')!==null"), true);

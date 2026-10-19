@@ -22,6 +22,7 @@ import { useArtifactOpener } from "../lib/artifact-opener";
 import { focusAfter } from "../lib/focus-after";
 import { rawDetailsCopy, rawDetailsView } from "../lib/raw-details";
 import { FoldAllButtons } from "./JsonRows";
+import { JobCancel, JobChip, cardJobCancelable, cardJobShown, useCardJob } from "./JobCard";
 import { ToolMenu, type ToolMenuItem } from "./ToolMenu";
 import { copyToClipboard, ToolCopyButton, ToolFooter, ToolViewContext } from "./tool-view";
 
@@ -95,6 +96,10 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const source = result ?? partialResult;
 	const data = record(source);
 	const details = record(data.details);
+	// A card that started a background job says how the job is doing, and offers Cancel while it runs.
+	const jobCard = useCardJob(details, props.callId ?? result?.toolCallId);
+	const jobChip = jobCard !== null && cardJobShown(jobCard) ? jobCard : null;
+	const jobCancel = jobCard !== null && cardJobCancelable(jobCard) ? jobCard : null;
 	// Where an edit's first change is, for the link on its path: one file's result carries it directly or in its per-file row.
 	const changedRow = Array.isArray(details.perFileResults) ? record(details.perFileResults[0]) : {};
 	const changedLine = [details.firstChangedLine, changedRow.firstChangedLine].find((value): value is number => typeof value === "number" && value >= 1);
@@ -285,6 +290,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		{metaInHead && view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}
 		{metadata.stats && <DiffStatSpans stats={metadata.stats} />}
 		{metadata.counter && <span className="omp-native-tool-meta omp-tool-counter">{metadata.counter}</span>}
+		{jobChip !== null && <JobChip cardJob={jobChip} />}
 		{diagnosticCount > 0 && <span className="omp-chip omp-chip--warn"><span className="codicon codicon-warning" aria-hidden="true" />{diagnosticCount} diagnostics</span>}
 		{/* Failure is conveyed by one status icon; skipped calls retain their readable badge. */}
 		{!pendingAsk && state === "skipped" && <span className="omp-chip">{state}</span>}
@@ -296,11 +302,12 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const plainRow = view?.expandable === false && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && !frozen;
 	const title = [intent, view?.tooltip].filter(Boolean).join("\n");
 	if (plainRow) {
-		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--static" data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state}>
+		return <div ref={root} className={`omp-tool omp-native-tool omp-native-tool--static${jobCancel !== null ? " omp-native-tool--job-cancel" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state}>
 			<div className={`omp-tool-head omp-tool-head--static${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} title={title || undefined}><span className="codicon codicon-blank" aria-hidden="true" />{face}</div>
 		</div>;
 	}
-	return <div ref={root} className={`omp-tool omp-native-tool${failed ? " omp-tool--error" : ""}${state === "skipped" ? " omp-native-tool--skipped" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state} onKeyDown={event => {
+	return <div ref={root} className={`omp-tool omp-native-tool${failed ? " omp-tool--error" : ""}${state === "skipped" ? " omp-native-tool--skipped" : ""}${jobCancel !== null ? " omp-native-tool--job-cancel" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state} onKeyDown={event => {
+			{jobCancel !== null && <JobCancel cardJob={jobCancel} />}
 		if (event.key !== "Escape" || !showBody || !root.current?.contains(document.activeElement)) return;
 		event.preventDefault(); event.stopPropagation();
 		collapse();
@@ -309,6 +316,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			<span className={`codicon codicon-${showBody ? "chevron-down" : "chevron-right"}`} aria-hidden="true" />
 			{face}
 		</button>
+		{jobCancel !== null && <JobCancel cardJob={jobCancel} />}
 		{showBody && <div id={bodyId} className="omp-tool-body" role="region" aria-label={`${view?.title ?? metadata.title} details`} tabIndex={0}>{body}</div>}
 	</div>;
 });

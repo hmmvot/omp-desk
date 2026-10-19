@@ -48,6 +48,7 @@ import { parseLiveAgents } from "../chat/agent-liveness.ts";
 import { parseNativeEventFrame, type MaintenanceState, type RetryState } from "../chat/events.ts";
 import { parseChatGoal, parsePromptError, parseUsageLimit } from "../chat/host-signals.ts";
 import { parseTodoPhases } from "../chat/todos.ts";
+import { parseJobFrames } from "../chat/background-jobs.ts";
 import type { EphemeralItem } from "../chat/projection.ts";
 import { MAX_EPHEMERAL_ITEMS, MAX_QUEUED_ITEMS, MAX_QUEUED_TEXT_LENGTH, MAX_QUEUED_TOTAL_BYTES, MAX_WIDGET_LINES, normalizeQueuedMessages, queuedJsonBytes } from "../chat/model.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, parseBranchPoints, type NavigateRefusal, type NavigationKind } from "../chat/rewind.ts";
@@ -969,6 +970,8 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		if (tool === null) return null;
 		activeTools.push(tool);
 	}
+	const jobFrames = parseJobFrames(value.jobFrames);
+	if (jobFrames === null) return null;
 
 	if (!Array.isArray(value.uiRequests) || value.uiRequests.length > MAX_CHAT_UI_REQUESTS) return null;
 	const uiRequests: ChatUiRequest[] = [];
@@ -1057,6 +1060,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		pending,
 		stream,
 		activeTools,
+		jobFrames,
 		working: value.working,
 		workingIntent: typeof value.workingIntent === "string" ? value.workingIntent : null,
 		settled: value.settled,

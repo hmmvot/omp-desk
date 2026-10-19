@@ -7,7 +7,7 @@ import { evalTitle, normalizeToolPath, resolveToolRoute } from "../../chat/tool-
 import { skillReadView, stripSkillHeader } from "../../chat/skill-read";
 import { isRecord } from "../../shared/guards";
 import { Markdown } from "./Markdown";
-import { FileLink, FileLinkText } from "./FileLinks";
+import { FileLink, FileLinkText, JobIdLink } from "./FileLinks";
 import type { ExplicitFileLink } from "./FileLinks";
 import { fmtDuration, fmtTokens } from "../../shared/format";
 import { useLiveDurations } from "../lib/live-clock";
@@ -307,7 +307,7 @@ function JobRows({ details: d, expanded, live = false, settled = false }: { deta
 		const label = first && first !== id ? first : "";
 		const duration = durationOf(job);
 		return <section className="omp-native-job" data-job-id={scalar(job.id)} data-job-status={status}>
-			<div className="omp-native-job-head omp-native-job-head--row"><span className={`codicon codicon-${JOB_ICONS[status] ?? "check"}`} aria-hidden="true" /><span className="omp-native-badge">{scalar(job.type)}</span><strong>{id || label || "Job"}</strong>{label && <span className="omp-native-job-label" title={string(job.label)}>{lines.length > 1 ? `${label} …` : label}</span>}<span className="omp-sr-only">{status}</span>{typeof job.exitCode === "number" && <span className="omp-empty-note">exit {job.exitCode}</span>}{duration !== undefined && <span className="omp-empty-note omp-native-job-duration">{fmtDuration(duration)}</span>}</div>
+			<div className="omp-native-job-head omp-native-job-head--row"><span className={`codicon codicon-${JOB_ICONS[status] ?? "check"}`} aria-hidden="true" /><span className="omp-native-badge">{scalar(job.type)}</span><strong><JobIdLink id={string(job.id)}>{id || label || "Job"}</JobIdLink></strong>{label && <span className="omp-native-job-label" title={string(job.label)}>{lines.length > 1 ? `${label} …` : label}</span>}<span className="omp-sr-only">{status}</span>{typeof job.exitCode === "number" && <span className="omp-empty-note">exit {job.exitCode}</span>}{duration !== undefined && <span className="omp-empty-note omp-native-job-duration">{fmtDuration(duration)}</span>}</div>
 			{lines.slice(1, 3).some(line => line.trim()) && <div className="omp-native-job-description">{lines.slice(1, 3).map(line => line.length > 60 ? `${line.slice(0, 59)}…` : line).join("\n")}</div>}
 			<TextPreview text={jobPreview(string(job.errorText || job.resultText))} expanded={expanded} />
 			<OutputMetadata details={job} />

@@ -4,7 +4,8 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { backgroundWaitOf, readBackgroundJobs } from "./background-wait.ts";
+import { scanJobs } from "./background-jobs.ts";
+import { backgroundWaitOf } from "./background-wait.ts";
 import type { ChatEntry, ChatMessage } from "./messages.ts";
 import { applyChatEntries, applyChatLiteState, applyChatSnapshot, applyChatUiRequest, chatTurnInProgress, createChatModel, reduceChatFrame, snapshotOf, type ChatModel } from "./model.ts";
 import { assistantMessage, messageEntry, toolResultMessage, userMessage } from "../host/rpc/test-support.ts";
@@ -46,14 +47,14 @@ describe("background wait", () => {
 		assert.equal(chatTurnInProgress(model), true, "the turn is still open");
 		assert.equal(wait?.text, "Waiting for background job: Хвост лога push");
 		assert.equal(wait?.since, 3_000, "since the agent's last message, not since the turn started");
-		assert.deepEqual(wait?.jobs, [{ id: "job-1", label: "Хвост лога push" }]);
+		assert.deepEqual(wait?.jobs.map(job => ({ id: job.id, label: job.label })), [{ id: "job-1", label: "Хвост лога push" }]);
 	});
 
 	it("falls back to the command, then to the job id, when the call has no intent", () => {
 		const bare = chain(toolCalls(2_000, { id: "c1", args: { command: "npm test\nnpm run lint" } }), started("c1", 2_100, "job-1"));
-		assert.equal(readBackgroundJobs(bare).jobs[0]?.label, "npm test", "first line of the command");
+		assert.equal(scanJobs(bare)[0]?.label, "npm test", "first line of the command");
 		const orphan = chain(started("unseen-call", 2_100, "job-9"));
-		assert.equal(readBackgroundJobs(orphan).jobs[0]?.label, "job-9");
+		assert.equal(scanJobs(orphan)[0]?.label, "job-9");
 	});
 
 	it("counts several jobs and drops each one as its result is delivered", () => {

@@ -38,9 +38,12 @@ export interface HudHeaderProps {
 	expanded: boolean;
 	controls: string;
 	onToggle: () => void;
-	openLabel: string;
-	onOpen: () => void;
-	openAvailable: boolean;
+	/** The detail tab's button beside the toggle; a row with no detail tab gives `action` instead. */
+	openLabel?: string;
+	onOpen?: () => void;
+	openAvailable?: boolean;
+	/** A control beside the toggle (never inside it), in place of the detail-tab button. */
+	action?: ReactNode;
 }
 
 /** The width a text takes in the font of `element`, from one shared canvas (no layout involved). */
@@ -99,9 +102,11 @@ export function HudHeader(props: HudHeaderProps): ReactNode {
 				<span ref={summary} className={`omp-hud-summary${props.warn === true ? " omp-hud-summary--warn" : ""}`}>{text}</span>
 				{props.counter !== undefined && <span className="omp-hud-counter" title={props.counter.title}><span aria-hidden="true">{props.counter.text}</span><span className="omp-sr-only">{props.counter.title}</span></span>}
 			</button>
-			<button type="button" className="omp-hud-open" aria-label={props.openAvailable ? props.openLabel : `${props.openLabel} (${DETAIL_UNAVAILABLE_TEXT})`} title={props.openAvailable ? props.openLabel : DETAIL_UNAVAILABLE_TEXT} disabled={!props.openAvailable} onClick={props.onOpen}>
-				<span className="codicon codicon-link-external" aria-hidden="true" />
-			</button>
+			{props.action ?? (
+				<button type="button" className="omp-hud-open" aria-label={props.openAvailable ? props.openLabel : `${props.openLabel} (${DETAIL_UNAVAILABLE_TEXT})`} title={props.openAvailable ? props.openLabel : DETAIL_UNAVAILABLE_TEXT} disabled={props.openAvailable !== true} onClick={props.onOpen}>
+					<span className="codicon codicon-link-external" aria-hidden="true" />
+				</button>
+			)}
 		</div>
 	);
 }

@@ -47,6 +47,22 @@ export const HUD_STYLES = `
 .omp-hud-elapsed { flex: none; margin-left: auto; padding-left: 8px; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
 .omp-hud-agent--failed .omp-hud-agent-id { color: var(--vscode-errorForeground); }
 .omp-hud-agent--completed .codicon-check { color: var(--vscode-testing-iconPassed); }
+.omp-hud-job-item { min-width: 0; }
+.omp-hud-job { width: 100%; }
+.omp-hud-job-id { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; color: var(--vscode-charts-blue); font-weight: 600; }
+.omp-hud-job-title { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.omp-hud-job--failed .omp-hud-job-id { color: var(--vscode-errorForeground); }
+.omp-hud-job--completed .codicon-check { color: var(--vscode-testing-iconPassed); }
+.omp-hud-job--focus { background: var(--vscode-list-hoverBackground); outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-hud-cancel, .omp-hud-cancel-all { flex: none; padding: 0 8px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); background: none; color: var(--vscode-foreground); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
+.omp-hud-cancel:hover:not(:disabled), .omp-hud-cancel-all:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.omp-hud-cancel:focus-visible, .omp-hud-cancel-all:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-hud-cancel:disabled, .omp-hud-cancel-all:disabled { opacity: 0.55; cursor: default; }
+.omp-hud-cancel-all { align-self: center; margin-right: 4px; color: var(--omp-muted); }
+.omp-hud-cancel-all--armed { color: var(--vscode-errorForeground); border-color: var(--vscode-errorForeground); }
+.omp-hud-jobs-feedback, .omp-hud-jobs-note { overflow: hidden; text-overflow: ellipsis; }
+.omp-hud-job-outcome { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.omp-hud-jobs-note { display: block; color: var(--omp-muted); line-height: ${HUD_LINE_PX - 2}px; }
 @media (prefers-reduced-motion: reduce) { .codicon.codicon-loading.codicon-modifier-spin, .codicon.codicon-sync.codicon-modifier-spin, .codicon.codicon-gear.codicon-modifier-spin { animation: none; } }
 
 .omp-detail { display: flex; flex-direction: column; height: 100%; min-height: 0; }

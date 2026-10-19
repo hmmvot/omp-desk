@@ -260,6 +260,9 @@ ${ANSI_STYLES}
 .vscode-high-contrast .omp-working-status-text, .vscode-high-contrast-light .omp-working-status-text { background: none; color: var(--omp-muted); animation: none; }
 @media (forced-colors: active) { .omp-working-status-text { background: none; color: inherit; animation: none; } .omp-working-status-text::before { -webkit-text-fill-color: currentColor; } }
 .omp-working-status-elapsed { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.omp-working-status-link { padding: 0; border: 0; font: inherit; text-align: left; cursor: pointer; }
+.omp-working-status-link:hover { text-decoration: underline; }
+.omp-working-status-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 
 /* The view renders only the newest rows; this reveals the rest a step at a time. */
 .omp-earlier { padding: 2px 0 6px; text-align: center; }

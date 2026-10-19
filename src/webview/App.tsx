@@ -18,6 +18,8 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncE
 import { guestTransport } from "./bridge";
 import type { GuestRouteKind } from "./bridge";
 import { backgroundWaitOf } from "../chat/background-wait";
+import { jobsViewOf, sameJobsView, type GoneJobs, type JobsView } from "../chat/background-jobs";
+import { jobsCancelBlocked } from "../chat/jobs-hud";
 import { chatTurnInProgress } from "../chat/model";
 import { Composer } from "./components/Composer";
 import { FileLinksProvider } from "./components/FileLinks";
@@ -33,7 +35,9 @@ import { RewindBar } from "./components/Rewind";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindTargets, undoOffer, type NavigationKind } from "../chat/rewind";
 import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason } from "../chat/rewind-mode";
 import { parseDraftHandoffContent } from "../protocol/messages";
-import type { ChatClient } from "./lib/chat-client";
+import { chatWritable, type ChatClient, type ChatSnapshot } from "./lib/chat-client";
+import { JobsContext, useJobsUiState, type JobsContextValue } from "./lib/jobs-context";
+import { JobsUi } from "./lib/jobs-ui";
 import { chatBanner } from "./lib/chat-banner";
 import { operationBannerText } from "./lib/chat-operation";
 import { captureDraft, offerRestoredDraft, releaseDraftCapture } from "./lib/draft-handoff";
@@ -179,6 +183,12 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	// While the link is down or the session is being (re)attached, a remembered `working` is not an observation: show none.
 	const workUnknown = hostLost || snapshot.phase === "attaching" || snapshot.phase === "resyncing" || snapshot.phase === "failed";
 	const shown = workUnknown && snapshot.working ? { ...snapshot, working: false } : snapshot;
+	// The Jobs row, the working row, the tool cards and the `proc://` links share one view of OMP's background jobs and one page-level state.
+	const jobsUi = useMemo(() => new JobsUi(client), [client]);
+	const { gone } = useJobsUiState(jobsUi);
+	const jobsView = useJobsView(snapshot, gone);
+	const cancelBlocked = jobsCancelBlocked(snapshot.commands, chatWritable(snapshot) && !hostLost);
+	const jobs = useMemo((): JobsContextValue => ({ view: jobsView, ui: jobsUi, cancelBlocked }), [jobsView, jobsUi, cancelBlocked]);
 	const readChild = useCallback((id: string, options?: { fromByte?: number; beforeId?: string }) => client.readSubagent(id, options), [client]);
 	/** The page hands the transcript its child renderer, so `Transcript` does not import `ChildTranscript` (which imports it). */
 	const renderChild = useCallback((id: string, depth: number) => <ChildTranscript subagentId={id} reader={readChild} depth={depth} />, [readChild]);
@@ -257,6 +267,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 			{/* One link-validation cache for the transcript and the rewind bar's changed files (a context only, no DOM). */}
 			<ArtifactEpochContext.Provider value={snapshot.epoch}>
 			<FileLinksProvider transport={guestTransport} cwd={snapshot.header?.cwd}>
+			<JobsContext.Provider value={jobs}>
 			<div className="omp-body">
 				<div className="omp-main">
 					<Transcript
@@ -268,7 +279,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						activeTools={snapshot.activeTools}
 						working={shown.working}
 						turnInProgress={!workUnknown && chatTurnInProgress(snapshot)}
-						backgroundWait={workUnknown ? null : backgroundWaitOf(snapshot)}
+						backgroundWait={workUnknown ? null : backgroundWaitOf(snapshot, gone)}
 						workingIntent={snapshot.workingIntent}
 						phase={snapshot.phase}
 						olderCount={snapshot.olderCount}
@@ -318,8 +329,18 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 					onDismissNotice={() => setRewindNotice(null)} />
 				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} onRewind={startRewind} onSubmitted={followOwnSubmit} />
 			</div>
+			</JobsContext.Provider>
 			</FileLinksProvider>
 			</ArtifactEpochContext.Provider>
 		</div>
 	);
+}
+
+/** The jobs the model shows, the same object until a job or the row's own facts change, so the tool cards re-render only for a job they may show. */
+function useJobsView(snapshot: ChatSnapshot, gone: GoneJobs): JobsView {
+	const previous = useRef<JobsView | null>(null);
+	const next = useMemo(() => jobsViewOf(snapshot, gone), [snapshot.entries, snapshot.jobFrames, snapshot.asyncPaused, snapshot.state?.hasPendingAsyncWork, snapshot.settled, snapshot.phase, snapshot.olderCount, gone]); // eslint-disable-line react-hooks/exhaustive-deps -- the view reads exactly these fields
+	if (previous.current !== null && sameJobsView(previous.current, next)) return previous.current;
+	previous.current = next;
+	return next;
 }

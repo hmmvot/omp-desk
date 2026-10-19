@@ -22,6 +22,7 @@ import { DROPPED_FRAME_NOTICE_SOURCE, EXTENSION_ERROR_NOTICE_SOURCE, type Mainte
 import { footerGoal, type ChatFastMode, type ChatGoal, type ChatPromptError, type ChatSlowMode, type ChatUsageLimit } from "./host-signals.ts";
 import { positionTranscript, type EphemeralItem, type TranscriptPosition } from "./projection.ts";
 import type { ActiveTool, PendingRow } from "./pending.ts";
+import { jobFrameOf, withJobFrame, type JobFrame } from "./background-jobs.ts";
 import { transcriptWindow, type TranscriptWindow } from "./transcript-window.ts";
 import type { BranchPoint } from "./rewind.ts";
 import type { ChatExitReason } from "./exit-reason.ts";
@@ -255,6 +256,8 @@ export interface ChatModel {
 	sealedSeq: number;
 	durablePositions: ReadonlyMap<string, TranscriptPosition>;
 	activeTools: ReadonlyMap<string, ActiveTool>;
+	/** The newest live frame of each background job the page saw (see `background-jobs.ts`); a job's end is read from here when the transcript has no row for it. */
+	jobFrames: ReadonlyMap<string, JobFrame>;
 	/** `agent_start`..`agent_end`, reconciled by `state.isStreaming`. */
 	working: boolean;
 	/** Latest tool intent for this turn, retained across tool completion and stream gaps. */
@@ -432,6 +435,7 @@ export interface ChatSnapshotPayload {
 	/** The in-flight assistant message, if any. */
 	stream: { messageId: string; message: AssistantMessage } | null;
 	activeTools: readonly ActiveTool[];
+	jobFrames?: readonly ({ id: string } & JobFrame)[];
 	working: boolean;
 	workingIntent?: string | null;
 	settled: boolean;
@@ -507,6 +511,7 @@ export function createChatModel(): ChatModel {
 		durablePositions: new Map(),
 		displayTurns: [],
 		activeTools: EMPTY_TOOLS,
+		jobFrames: new Map(),
 		working: false,
 		workingIntent: null,
 		asyncPaused: false,
@@ -838,6 +843,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			sealedSeq: snapshot.sealedSeq ?? 0,
 			durablePositions: new Map((snapshot.durablePositions ?? []).map(row => [row.entryId, { anchorId: row.anchorId, seq: row.seq }])),
 			activeTools: tools,
+			jobFrames: new Map((snapshot.jobFrames ?? []).map(({ id, ...frame }) => [id, frame])),
 			working: snapshot.working,
 			workingIntent: snapshot.workingIntent ?? null,
 			settled: snapshot.settled,
@@ -1041,7 +1047,9 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			const tool: ActiveTool = existing
 				? { ...existing, partialResult: frame.partialResult }
 				: { toolCallId: frame.toolCallId, toolName: frame.toolName, args: frame.args, partialResult: frame.partialResult, startedAt: now };
-			return { ...model, workingIntent: existing ? model.workingIntent : workingIntent(frame.args) ?? model.workingIntent, activeTools: new Map(model.activeTools).set(frame.toolCallId, tool) };
+			// After its call returned, a background job keeps reporting here; the newest word on each job is kept for the Jobs row and the cards.
+			const job = jobFrameOf(frame.partialResult);
+			return { ...model, ...(job === null ? {} : { jobFrames: withJobFrame(model.jobFrames, job.id, { state: job.state, type: job.type, callId: frame.toolCallId, at: now }) }), workingIntent: existing ? model.workingIntent : workingIntent(frame.args) ?? model.workingIntent, activeTools: new Map(model.activeTools).set(frame.toolCallId, tool) };
 		}
 		case "tool_stream_update": {
 			const existing = model.activeTools.get(frame.toolCallId);
@@ -1054,7 +1062,10 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			const tools = new Map(model.activeTools);
 			tools.delete(frame.toolCallId);
 			const phases = frame.toolName === "todo" && frame.isError !== true ? todoPhasesFromToolResult(frame.result) : null;
+			// The result that starts a background job is the job's first live word: it is how the page knows this host process owns the job.
+			const job = jobFrameOf(frame.result);
 			return { ...model, activeTools: tools,
+				...(job === null ? {} : { jobFrames: withJobFrame(model.jobFrames, job.id, { state: job.state, type: job.type, callId: frame.toolCallId, at: now }) }),
 				...(phases !== null ? { todoSeed: phases, todo: projectTodo(model.todo, phases, null) } : {}),
 			};
 		}
@@ -1525,6 +1536,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		pending,
 		stream: model.stream !== null && model.streamId !== null ? { messageId: model.streamId, message: model.stream } : null,
 		activeTools: [...model.activeTools.values()],
+		jobFrames: [...model.jobFrames].map(([id, frame]) => ({ id, ...frame })),
 		working: model.working,
 		workingIntent: model.workingIntent,
 		settled: model.settled,

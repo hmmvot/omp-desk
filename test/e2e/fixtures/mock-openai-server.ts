@@ -6,6 +6,9 @@
  *
  *   - `[tool:<path>]` anywhere in it: the first completion calls OMP's `read` tool on `<path>`; once a tool result is in
  *     the conversation the model answers with `Tool result received.`
+ *   - `[bg:<command>]` anywhere in it (the command holds no `]`): the first completion calls OMP's `bash` tool once with
+ *     `{ command, async: true }`, which starts a background job and returns at once; once the tool result is in the
+ *     conversation the model answers with `Tool result received.`, as for `[tool:]`
  *   - `[slow]` : the text is streamed in small chunks with a delay, so a turn stays running for a while
  *   - anything else: `Mock reply to: <text>`, followed by ` [image bytes: <n>,…]` when the last user message carries images.
  *
@@ -95,6 +98,15 @@ function chunk(id: string, model: string, delta: Record<string, unknown>, finish
 	return { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta, finish_reason: finishReason }] };
 }
 
+/** The one tool call a user marker asks for: `[tool:<path>]` is a `read`, `[bg:<command>]` a background `bash` job. Null for a message without a marker. */
+export function toolCallOf(userText: string): { readonly name: string; readonly target: string; readonly args: Record<string, unknown> } | null {
+	const read = /\[tool:([^\]]+)\]/.exec(userText);
+	if (read !== null) return { name: "read", target: read[1], args: { path: read[1] } };
+	const background = /\[bg:([^\]]+)\]/.exec(userText);
+	if (background !== null) return { name: "bash", target: background[1], args: { command: background[1], async: true, i: "Starting a background job" } };
+	return null;
+}
+
 async function respond(request: IncomingMessage, response: ServerResponse, requests: RecordedRequest[]): Promise<void> {
 	const body: ChatRequest = JSON.parse(await readBody(request));
 	const messages = body.messages ?? [];
@@ -104,14 +116,14 @@ async function respond(request: IncomingMessage, response: ServerResponse, reque
 	const last = messages.at(-1);
 	const hasToolResult = messages.some(message => message.role === "tool");
 	const toolNames = (body.tools ?? []).map(tool => tool.function?.name ?? "");
-	const toolMatch = /\[tool:([^\]]+)\]/.exec(userText);
+	const marker = toolCallOf(userText);
 
 	// A turn that already carries a tool result is the follow-up completion; the user's marker is still in its history.
-	const callTool = toolMatch !== null && last?.role === "user" && toolNames.includes("read");
+	const call = marker !== null && last?.role === "user" && toolNames.includes(marker.name) ? marker : null;
 	const images = imageSizesOf(lastUser?.content);
 	const imageNote = images.length === 0 ? "" : ` [image bytes: ${images.join(",")}]`;
-	const reply = callTool ? "" : hasToolResult && toolMatch !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}${imageNote}`;
-	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), fullUserText: userText.slice(0, FULL_USER_TEXT_LIMIT), messageCount: messages.length, hasToolResult, imageBytes: images, reply: callTool ? `<tool call read ${toolMatch![1]}>` : reply });
+	const reply = call !== null ? "" : hasToolResult && marker !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}${imageNote}`;
+	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), fullUserText: userText.slice(0, FULL_USER_TEXT_LIMIT), messageCount: messages.length, hasToolResult, imageBytes: images, reply: call !== null ? `<tool call ${call.name} ${call.target}>` : reply });
 
 	const id = `chatcmpl-mock-${requests.length}`;
 	const usage = { prompt_tokens: 120 + messages.length * 10, completion_tokens: 12, total_tokens: 132 + messages.length * 10 };
@@ -125,9 +137,9 @@ async function respond(request: IncomingMessage, response: ServerResponse, reque
 	}
 	response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
 	sse(response, chunk(id, model, { role: "assistant", content: "" }, null));
-	if (callTool) {
-		const args = JSON.stringify({ path: toolMatch![1] });
-		sse(response, chunk(id, model, { tool_calls: [{ index: 0, id: "call_mock_1", type: "function", function: { name: "read", arguments: "" } }] }, null));
+	if (call !== null) {
+		const args = JSON.stringify(call.args);
+		sse(response, chunk(id, model, { tool_calls: [{ index: 0, id: "call_mock_1", type: "function", function: { name: call.name, arguments: "" } }] }, null));
 		sse(response, chunk(id, model, { tool_calls: [{ index: 0, function: { arguments: args } }] }, null));
 		sse(response, chunk(id, model, {}, "tool_calls"));
 	} else {

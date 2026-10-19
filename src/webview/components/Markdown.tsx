@@ -26,11 +26,12 @@ import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../l
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
 import { detectInternalLinks, internalTargetOf } from "../../shared/internal-links";
+import { detectProcLinks, parseProcLink } from "../../shared/proc-links";
 import { isHunkLocation, isRevisionLocation } from "../../shared/quote-location";
 import { commitTargetOfSpan, detectCommitHashes } from "../../shared/commit-links";
 import { webLinkUrl } from "../../shared/terminal-links";
 import type { TerminalTextLink } from "../../shared/terminal-links";
-import { CodeSymbolSpan, FileLink, FileLinkText, InternalLink } from "./FileLinks.tsx";
+import { CodeSymbolSpan, FileLink, FileLinkText, InternalLink, ProcJobLink } from "./FileLinks.tsx";
 import { CommitHashSpan, CommitLink } from "./CommitLinks.tsx";
 import { breakable } from "./BreakPoints.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
@@ -85,14 +86,15 @@ function files(text: string, key: string, breaks = false): ReactNode {
 	return detectChatFileLinks(text).length === 0 ? (breaks ? breakable(text) : text) : <FileLinkText key={key} text={text} breaks={breaks} />;
 }
 
-/** The bare web URLs, the internal OMP URLs (`agent://Name`) and the commit hashes of `text`, in order and without overlap; a URL inside a web link is only that link. */
-function textLinks(text: string): { link: TerminalTextLink; kind: "web" | "internal" | "commit" }[] {
-	const links: { link: TerminalTextLink; kind: "web" | "internal" | "commit" }[] = detectWebLinks(text).map(link => ({ link, kind: "web" as const }));
-	const addApart = (found: readonly TerminalTextLink[], kind: "internal" | "commit"): void => {
+/** The bare web URLs, the internal OMP URLs (`agent://Name`), the `proc://` job addresses and the commit hashes of `text`, in order and without overlap; a URL inside a web link is only that link. */
+function textLinks(text: string): { link: TerminalTextLink; kind: "web" | "internal" | "proc" | "commit" }[] {
+	const links: { link: TerminalTextLink; kind: "web" | "internal" | "proc" | "commit" }[] = detectWebLinks(text).map(link => ({ link, kind: "web" as const }));
+	const addApart = (found: readonly TerminalTextLink[], kind: "internal" | "proc" | "commit"): void => {
 		const taken = links.slice();
 		for (const link of found) if (!taken.some(other => link.start < other.link.end && other.link.start < link.end)) links.push({ link, kind });
 	};
 	addApart(detectInternalLinks(text), "internal");
+	addApart(detectProcLinks(text).map(({ start, end }) => ({ target: text.slice(start, end), start, end })), "proc");
 	addApart(detectCommitHashes(text), "commit");
 	return links.sort((a, b) => a.link.start - b.link.start);
 }
@@ -107,6 +109,7 @@ function plain(text: string, key: string): ReactNode {
 		if (link.start > cursor) nodes.push(files(text.slice(cursor, link.start), `${key}-f${index}`));
 		const label = breakable(text.slice(link.start, link.end));
 		nodes.push(kind === "internal" ? <InternalLink key={`${key}-i${index}`} target={link.target}>{label}</InternalLink>
+			: kind === "proc" ? <ProcJobLink key={`${key}-p${index}`} target={link.target}>{label}</ProcJobLink>
 			: kind === "commit" ? <CommitLink key={`${key}-c${index}`} target={link.target}>{label}</CommitLink>
 			: <WebLink key={`${key}-w${index}`} url={link.target}>{label}</WebLink>);
 		cursor = link.end;
@@ -126,6 +129,7 @@ function codeSpan(content: string, key: string): ReactNode {
 	if (isRevisionLocation(content) || isHunkLocation(content)) return <code key={key}>{breakable(content)}</code>;
 	const internal = internalTargetOf(content);
 	if (internal !== null) return <code key={key}><InternalLink target={internal}>{breakable(content)}</InternalLink></code>;
+	if (parseProcLink(content) !== null) return <code key={key}><ProcJobLink target={content.trim()}>{breakable(content)}</ProcJobLink></code>;
 	const whole = content.trim();
 	const single = !whole.startsWith("@") && (!/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole));
 	const path = single && isFileLinkCandidate(whole) ? whole : null;
@@ -191,10 +195,12 @@ function renderInline(text: string, keyPrefix: string, emphasis = true, depth = 
 			const url = file === null ? webLinkUrl(destination) : null;
 			// An internal OMP URL of the session (`[the review](agent://Name)`) is a link only once the host proves the session has what it names.
 			const internal = file === null && url === null ? internalTargetOf(destination) : null;
+			// A `proc://` address of an OMP background job is a link to the Jobs row, never to a write.
+			const proc = file === null && url === null && internal === null && parseProcLink(destination) !== null ? destination.trim() : null;
 			// A rejected scheme keeps its label but never its URL: the transcript
 			// must not carry a `javascript:`/`data:`/`command:` destination at all.
 			const text = linkLabel(label, `${key}l`);
-			nodes.push(file !== null ? <FileLink key={key} target={file}>{text}</FileLink> : internal !== null ? <InternalLink key={key} target={internal}>{text}</InternalLink> : url === null ? <Fragment key={key}>{text}</Fragment> : <WebLink key={key} url={url}>{text}</WebLink>);
+			nodes.push(file !== null ? <FileLink key={key} target={file}>{text}</FileLink> : internal !== null ? <InternalLink key={key} target={internal}>{text}</InternalLink> : proc !== null ? <ProcJobLink key={key} target={proc}>{text}</ProcJobLink> : url === null ? <Fragment key={key}>{text}</Fragment> : <WebLink key={key} url={url}>{text}</WebLink>);
 		} else if (token.startsWith("<")) {
 			const url = webLinkUrl(token.slice(1, -1));
 			nodes.push(url === null ? plain(token, key) : <WebLink key={key} url={url}>{breakable(token.slice(1, -1))}</WebLink>);
