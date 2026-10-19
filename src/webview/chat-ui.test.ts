@@ -5652,6 +5652,50 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// Typed key by key at idle with the catalogue a real OMP lists: a builtin `reload-plugins`, a prompt-template file command `report` and skills.
+		const REAL_COMMANDS = "[{name:'compact',source:'builtin',description:'Compact the context'},{name:'reload-plugins',source:'builtin',description:'Reload all plugins'},{name:'skill:omp-desk-bug-triage',source:'skill',description:'Use to triage and research OMP Desk bugs and write a report'},{name:'skill:omp-desk-release',source:'skill',description:'Release a new OMP Desk version'},{name:'report',source:'file',description:'Pause, report progress and next step, then resume'},{name:'skill:report-writer',source:'skill',description:'Write a report'}]";
+		const typeNames = async (text: string): Promise<{ typed: string; labels: string[]; selected: string[]; chips: string[] }[]> => {
+			const seen = [];
+			for (const char of text) {
+				await typeKey(char);
+				await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
+				await settleFrames();
+				seen.push({ typed: await draftValue(), ...(await slashRows()), chips: (await commandChips()).map(chip => chip.text) });
+			}
+			return seen;
+		};
+		await t.test("typed key by key at idle, /report (a file command) keeps its list open at every length, first and selected at the full name and a chip, with the skills below it", async () => {
+			await reset("chips-real-report");
+			await ui.evaluate(`window.ui.push({commands:${REAL_COMMANDS},working:false});window.composer.focus()`);
+			const seen = await typeNames("/report");
+			for (const step of seen) assert.ok(step.labels.length > 0, `the list is open after ${JSON.stringify(step.typed)}`);
+			const full = seen.at(-1)!;
+			assert.deepEqual(full.labels, ["/report", "/skill:report-writer"], "the exact file command is first, the skill whose name contains it follows");
+			assert.deepEqual(full.selected, ["/report"]);
+			assert.deepEqual(full.chips, ["/report"]);
+			assert.deepEqual(seen.slice(0, -1).map(step => step.chips), [[], [], [], [], [], []], "no prefix is a chip");
+			assert.deepEqual(seen[2]!.labels, ["/rewind", "/fresh", "/reload-plugins", "/report", "/skill:omp-desk-bug-triage", "/skill:omp-desk-release", "/skill:report-writer"], "at /re every command is listed above every skill");
+			await typeKey("s");
+			await waitDraft("window.composer.value()==='/reports'");
+			await settleFrames();
+			assert.deepEqual([(await commandChips()).length, (await slashRows()).labels.length], [0, 0], "nothing matches /reports");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("typed key by key at idle, /reload reaches OMP's /reload-plugins: the row is in the list at /rel, /reloa and /reload, and /reload-plugins is the exact chip", async () => {
+			await reset("chips-real-reload");
+			await ui.evaluate(`window.ui.push({commands:${REAL_COMMANDS},working:false});window.composer.focus()`);
+			const seen = await typeNames("/reload");
+			for (const step of seen.slice(1)) assert.ok(step.labels.includes("/reload-plugins"), `/reload-plugins is listed after ${JSON.stringify(step.typed)}`);
+			assert.deepEqual(seen.at(-1)!.labels, ["/reload-plugins"]);
+			assert.deepEqual(seen.at(-1)!.chips, [], "/reload is only a prefix, so it is text");
+			for (const char of "-plugins") await typeKey(char);
+			await waitDraft("window.composer.value()==='/reload-plugins'");
+			await waitChips(1);
+			assert.deepEqual(await slashRows(), { labels: ["/reload-plugins"], selected: ["/reload-plugins"] });
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a skill is a chip mid-text exactly where OMP invokes it: the first valid token, not after another command or a shell sigil, not an unknown skill", async () => {
 			await chipSetup("chips-mid-text");
 			await setDraft("please /skill:review the file");
