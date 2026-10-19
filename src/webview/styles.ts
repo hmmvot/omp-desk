@@ -958,6 +958,7 @@ ${FIND_STYLES}
 .omp-native-plain { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .omp-native-disclosure, .omp-native-child { margin: 6px 0; }
 .omp-native-disclosure > summary, .omp-native-child > summary { cursor: pointer; color: var(--omp-muted); }
+.omp-native-disclosure > summary:focus-visible, .omp-native-child > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-native-code, .omp-native-output, .omp-native-message pre { font-family: var(--omp-mono); font-size: var(--omp-mono-size); white-space: pre; overflow-wrap: normal; overflow-x: auto; overflow-y: hidden; max-width: 100%; }
 .omp-native-code { padding: 8px; color: var(--vscode-foreground); background: var(--vscode-textCodeBlock-background); border-radius: var(--omp-radius); }
 .omp-native-status, .omp-native-divider { padding: 6px 0; color: var(--omp-muted); }

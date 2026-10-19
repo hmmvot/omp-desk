@@ -491,6 +491,29 @@ describe("projections", () => {
 		model = applyChatRewrite(model, [user, reply], 0, "a1");
 		assert.equal(windowOf(model, 10, null).rows.some(row => row.id === "event:1"), true, "the result is still on screen");
 	});
+
+	it("keeps a compaction below the live turn it follows when the re-read lacks the entry that turn was anchored to", () => {
+		const at = "2026-10-19T09:45:00.000Z";
+		// OMP's `get_entries` returns every entry, so a delta holds model usage and title changes as unknown rows; the file reader returns chat rows only.
+		const unknown = (id: string, parentId: string | null, nativeType: string): ChatEntry => ({ type: "unknown", id, parentId, timestamp: at, nativeType, data: {} });
+		const u1 = messageEntry("u1", null, userMessage("first question", 100));
+		const a1 = messageEntry("a1", "u1", assistantMessage("first answer", 200));
+		const usage = unknown("mu1", "a1", "model_usage");
+		let model = applyChatRewrite(live(), [u1, a1], 0, "a1");
+		model = applyChatEntries(model, [usage], "mu1");
+		// The next prompt and its reply end live; each anchors to the last row of the transcript, the usage entry for the prompt.
+		model = end(model, "msg-1", userMessage("second question", 300));
+		model = end(model, "msg-2", assistantMessage("second answer", 400));
+		const u2 = messageEntry("u2", "mu1", userMessage("second question", 300));
+		const a2 = messageEntry("a2", "u2", assistantMessage("second answer", 400));
+		model = applyChatEntries(model, [u2, a2, unknown("t2", "a2", "title_change")], "t2");
+		assert.equal(model.durablePositions.get("u2")?.anchorId, "mu1");
+		// A typed `/compact` reports and the host re-reads the file: the compaction entry follows the reply, and mu1 is not among the rows.
+		const compaction: ChatEntry = { type: "compaction", id: "c1", parentId: "t2", timestamp: at, summary: "Summary of the first two turns", firstKeptEntryId: "u1", tokensBefore: 366_427, tokensAfter: 62_160 };
+		model = applyChatRewrite(model, [u1, a1, u2, a2, compaction], 0, "c1");
+		assert.equal(model.durablePositions.get("u2")?.anchorId, "a1", "the prompt moved to the nearest row the re-read still holds");
+		assert.deepEqual(windowOf(model, 10, null).rows.map(row => row.id), ["u1", "a1", "u2", "a2", "c1"]);
+	});
 });
 
 describe("IRC and custom rows reconcile without a false 'not yet saved'", () => {

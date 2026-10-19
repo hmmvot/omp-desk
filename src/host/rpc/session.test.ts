@@ -10,8 +10,9 @@
  * Runner: `node --test src/host/rpc/session.test.ts`.
  */
 import assert from "node:assert/strict";
+import { appendFile } from "node:fs/promises";
 import { afterEach, describe, it } from "node:test";
-import { chatTurnInProgress, type ChatModel, type ChatSnapshotPayload } from "../../chat/model.ts";
+import { chatTurnInProgress, windowOf, type ChatModel, type ChatSnapshotPayload } from "../../chat/model.ts";
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
 import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { turnActivity } from "../../protocol/activity.ts";
@@ -1752,6 +1753,42 @@ describe("chat quick actions", () => {
 		await tick();
 		assert.ok(channel.commandsOfType("get_entries").length > reads, "the compaction entry is read");
 		assert.deepEqual(session.model.ephemeral.map(item => item.kind), ["command_output"], "only the other output is a row");
+		session.dispose();
+	});
+
+	it("puts a typed /compact's divider below the turns shown live before it, though the file reader returns no model usage or title entry", async () => {
+		const at = "2026-10-19T09:45:00.000Z";
+		const raw = (type: string, id: string, parentId: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ type, id, parentId, timestamp: at, ...extra });
+		const file = await scratchFile("compact-order.jsonl", [u1, a1]);
+		const { session, channel } = await boot({ file, child: { sessionFile: file, entries: [u1, a1] as never, leafId: "a1" } });
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
+		const order = (): string[] => windowOf(session.model, 50, null).rows.map(row => row.id);
+		// The previous turn's last entry is model usage: `get_entries` serves it, the file reader does not.
+		const usage = raw("model_usage", "mu1", "a1");
+		channel.child.entries.push(usage);
+		channel.child.leafId = "mu1";
+		channel.emit({ type: "agent_end" });
+		await tick();
+		// The next turn ends live, each row anchored to the last row there was, then reconciles with the entries OMP saved.
+		channel.emitMessage("message_end", "msg-1", userMessage("push", 5000) as never);
+		channel.emitMessage("message_end", "msg-2", assistantMessage("pushed", 6000) as never);
+		const next = messageEntry("u3", "mu1", userMessage("push", 5000));
+		const reply = messageEntry("a3", "u3", assistantMessage("pushed", 6000));
+		const title = raw("title_change", "t3", "a3");
+		channel.child.entries.push(next as never, reply as never, title);
+		channel.child.leafId = "t3";
+		channel.emit({ type: "agent_end" });
+		await tick();
+		assert.deepEqual(order(), ["u1", "a1", "u3", "a3"]);
+		// `/compact` typed afterwards: the entry lands after the reply, and the re-read after the report is the file reader's.
+		const compaction = raw("compaction", "c1", "t3", { summary: "Summary of the earlier turns", firstKeptEntryId: "u1", tokensBefore: 366_427, tokensAfter: 62_160 });
+		channel.child.entries.push(compaction);
+		channel.child.leafId = "c1";
+		await appendFile(file, [usage, next, reply, title, compaction].map(row => `${JSON.stringify(row)}\n`).join(""));
+		assert.equal((await session.prompt({ requestId: "typed-compact", text: "/compact" })).status, "accepted");
+		channel.emit({ type: "command_output", text: "Compaction complete. Tokens: 366427 -> 62160 (saved 304267)." });
+		await waitUntil(() => session.model.entries.some(entry => entry.id === "c1"));
+		assert.deepEqual(order(), ["u1", "a1", "u3", "a3", "c1"], "the divider follows the last reply, not the turn that was shown live");
 		session.dispose();
 	});
 

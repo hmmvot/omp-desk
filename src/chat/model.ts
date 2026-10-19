@@ -1327,8 +1327,10 @@ export function applyChatRewrite(
 	const ids = new Set(next.entries.map(entry => entry.id));
 	// The streaming message is not an entry yet, but rows already anchor to its id; its own message_end makes it the pending row of that id.
 	if (next.stream !== null && next.streamId !== null) ids.add(pendingEntryId(next.streamId));
-	// A row the re-read lacks (the disk trails the process, a pending row was consumed) must not take the notices anchored to it
-	// along: they move to the nearest ancestor the new rows still hold. A rewrite that shares no ancestry (a clear, another branch) drops them.
+	// A row the re-read lacks (the disk trails the process, a pending row was consumed, or an entry the file reader never returns, such as
+	// model usage or a title change that arrived with a `get_entries` delta) must not take the rows anchored to it along: they move to the
+	// nearest ancestor the new rows still hold. A rewrite that shares no ancestry (a clear, another branch) drops notices and
+	// leaves the others unanchored.
 	const parents = new Map<string, string | null>();
 	for (const entry of model.entries) parents.set(entry.id, entry.parentId);
 	for (const item of model.ephemeral) parents.set(item.id, item.anchorId);
@@ -1348,9 +1350,20 @@ export function applyChatRewrite(
 		ephemeral.push(anchorId === item.anchorId ? item : { ...item, anchorId });
 		ids.add(item.id);
 	}
+	// Rows that were shown live keep their place by an anchor too. One whose anchor vanished with the re-read would fall to the end of
+	// the transcript, after every row the file holds and so after a compaction entry that came later than they did.
+	const nearest = (anchorId: string | null): string | null => anchorId === null ? null : resolve(anchorId) ?? null;
+	const positioned = new Map<string, TranscriptPosition>();
+	for (const [id, position] of next.durablePositions) {
+		const anchorId = nearest(position.anchorId);
+		positioned.set(id, anchorId === position.anchorId ? position : { ...position, anchorId });
+	}
 	const surviving = new Map(next.pending);
-	for (const [id, row] of surviving) if (row.anchorId !== null && !ids.has(row.anchorId)) surviving.set(id, { ...row, anchorId: null });
-	return reproject({ ...next, pending: surviving, ephemeral }, clock);
+	for (const [id, row] of surviving) {
+		const anchorId = nearest(row.anchorId);
+		if (anchorId !== row.anchorId) surviving.set(id, { ...row, anchorId });
+	}
+	return reproject({ ...next, pending: surviving, ephemeral, durablePositions: positioned }, clock);
 }
 
 /**

@@ -6691,6 +6691,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const divider = await ui.evaluate<{ text: string; rules: boolean }>(`(()=>{const summary=document.querySelector('.omp-native-summary--divider summary');
 			 const rule=pseudo=>getComputedStyle(summary,pseudo).borderTopStyle==='solid';return{text:summary.textContent,rules:rule('::before')&&rule('::after')}})()`);
 			assert.deepEqual(divider, { text: "Compacted · 400k → 47.8k tokens", rules: true });
+			// A keyboard-focused divider shows the theme's focus ring like every other control in the transcript, not the browser's default one.
+			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+			await ui.evaluate("document.documentElement.style.setProperty('--vscode-focusBorder','#007fd4')");
+			assert.deepEqual(await ui.evaluate(`(()=>{const summary=document.querySelector('.omp-native-summary--divider summary');summary.focus();
+			 const probe=document.createElement('i');probe.style.color='var(--vscode-focusBorder, #007fd4)';document.body.append(probe);
+			 const style=getComputedStyle(summary),shown={visible:summary.matches(':focus-visible'),style:style.outlineStyle,themed:style.outlineColor===getComputedStyle(probe).color};
+			 probe.remove();summary.blur();return shown})()`), { visible: true, style: "solid", themed: true }, "the divider's focus ring is the themed one");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('complete')"), false, "no 'context-full · complete' line");
 			await ui.evaluate("document.querySelector('.omp-native-summary--divider summary').click()");
 			await ui.wait("document.querySelector('.omp-native-summary--divider').textContent.includes('Summary of the earlier work')");
