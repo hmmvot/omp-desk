@@ -1350,18 +1350,23 @@ export function applyChatRewrite(
 		ephemeral.push(anchorId === item.anchorId ? item : { ...item, anchorId });
 		ids.add(item.id);
 	}
-	// Rows that were shown live keep their place by an anchor too. One whose anchor vanished with the re-read would fall to the end of
-	// the transcript, after every row the file holds and so after a compaction entry that came later than they did.
-	const nearest = (anchorId: string | null): string | null => anchorId === null ? null : resolve(anchorId) ?? null;
+	// Rows shown live keep their place by an anchor too. An anchor that is an entry the file reader never returns (model usage, a title
+	// change: `unknown` rows of a `get_entries` delta) vanishes from every re-read of the same branch, and its rows would fall to the end
+	// of the transcript, below a compaction entry saved later than they are: they move to the nearest row the re-read holds. An anchor that
+	// left the branch (a rewind, a branch switch) is not that: its rows stay unanchored, as an unsaved row of the branch left behind belongs
+	// after the new branch's rows, not in the middle of them.
+	const omitted = new Set(model.entries.filter(entry => entry.type === "unknown").map(entry => entry.id));
+	const moved = (anchorId: string | null): string | null => anchorId !== null && !ids.has(anchorId) && omitted.has(anchorId) ? resolve(anchorId) ?? null : anchorId;
 	const positioned = new Map<string, TranscriptPosition>();
 	for (const [id, position] of next.durablePositions) {
-		const anchorId = nearest(position.anchorId);
+		const anchorId = moved(position.anchorId);
 		positioned.set(id, anchorId === position.anchorId ? position : { ...position, anchorId });
 	}
 	const surviving = new Map(next.pending);
 	for (const [id, row] of surviving) {
-		const anchorId = nearest(row.anchorId);
+		const anchorId = row.anchorId !== null && !ids.has(row.anchorId) ? moved(row.anchorId) : row.anchorId;
 		if (anchorId !== row.anchorId) surviving.set(id, { ...row, anchorId });
+		else if (anchorId !== null && !ids.has(anchorId)) surviving.set(id, { ...row, anchorId: null });
 	}
 	return reproject({ ...next, pending: surviving, ephemeral, durablePositions: positioned }, clock);
 }
