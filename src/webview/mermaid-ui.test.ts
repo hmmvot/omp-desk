@@ -276,6 +276,26 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			await clean();
 		});
 
+		await t.test("the toolbar of a drawn block has a row of its own: it never covers a figure or a diagram, wide or narrow", async () => {
+			await open("toolbar-clear");
+			const svg = `<svg viewBox="0 0 900 160" width="900" height="160"><rect width="900" height="160" fill="#336699"/><text x="10" y="80">wide figure</text></svg>`;
+			await ui.evaluate(reply(`${fence(FLOWCHART)}\n\n\`\`\`svg\n${svg}\n\`\`\``));
+			await ui.wait("document.querySelectorAll('.omp-mermaid--drawn img').length===2");
+			const boxes = (): Promise<{ bar: number[]; image: number[] }[]> => ui.evaluate("[...document.querySelectorAll('.omp-mermaid--drawn')].map(block=>{const r=element=>{const b=element.getBoundingClientRect();return[b.left,b.top,b.right,b.bottom]};return{bar:r(block.querySelector('.omp-mermaid-bar')),image:r(block.querySelector('img'))}})");
+			for (const width of [900, 700, 360]) {
+				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+				await ui.settle();
+				const blocks = await boxes();
+				assert.equal(blocks.length, 2);
+				for (const { bar, image } of blocks) {
+					const apart = bar[2]! <= image[0]! || image[2]! <= bar[0]! || bar[3]! <= image[1]! || image[3]! <= bar[1]!;
+					assert.ok(apart, `at ${width}px the toolbar ${bar} does not intersect the image ${image}`);
+				}
+			}
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 700, height: 900, deviceScaleFactor: 1, mobile: false });
+			await clean();
+		});
+
 		await t.test("a broken diagram and an unknown type stay code with one muted line saying why", async () => {
 			await open("broken");
 			await ui.evaluate(reply(`${fence("flowchart TD\n  A --> ")}\n\nthen\n\n\`\`\`mermaid\nbogusDiagram\n  x\n\`\`\``));

@@ -245,6 +245,17 @@ report('inline-style',(()=>{const e=document.createElement('i');e.setAttribute('
 			assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-htmlpage .omp-mermaid-copy'))"), true);
 		});
 
+		await t.test("the toolbar has a row of its own: it never covers the page frame, wide or narrow", async () => {
+			for (const width of [900, 700, 360]) {
+				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+				await ui.until("document.querySelector('.omp-htmlpage .omp-mermaid-bar') && document.querySelector('iframe.omp-htmlpage-frame')");
+				const [bar, frame] = await ui.evaluate<number[][]>("(()=>{const r=element=>{const b=element.getBoundingClientRect();return[b.left,b.top,b.right,b.bottom]};return[r(document.querySelector('.omp-htmlpage .omp-mermaid-bar')),r(document.querySelector('iframe.omp-htmlpage-frame'))]})()");
+				const apart = bar![2]! <= frame![0]! || frame![2]! <= bar![0]! || bar![3]! <= frame![1]! || frame![3]! <= bar![1]!;
+				assert.ok(apart, `at ${width}px the toolbar ${bar} does not intersect the frame ${frame}`);
+			}
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 700, height: 900, deviceScaleFactor: 1, mobile: false });
+		});
+
 		await t.test("Source shows the code and Page brings the page back", async () => {
 			await delay(6500); // longer than the frame's answer timeout: a page that answered must never be given up on afterwards
 			await ui.evaluate("[...document.querySelectorAll('.omp-htmlpage .omp-mermaid-tab')].find(button=>button.textContent==='Source').click()");

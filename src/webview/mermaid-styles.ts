@@ -11,7 +11,9 @@ export const MERMAID_STYLES = `
 .omp-mermaid-zoom img { display: block; max-width: 100%; height: auto; }
 .omp-mermaid-frame[data-full] .omp-mermaid-zoom img { max-width: none; }
 /* Diagram | Source and Copy: hidden until the block is hovered or focused, like Copy on a code block. */
-.omp-mermaid-bar { position: absolute; top: 12px; right: 4px; display: flex; align-items: center; gap: 2px; opacity: 0; }
+/* The bar has a row of its own at the top of a drawn block (the block's padding), so it never covers the drawing; the drawing's own margin keeps it clear below. */
+.omp-mermaid--drawn { padding-top: 22px; }
+.omp-mermaid-bar { position: absolute; top: 0; right: 4px; display: flex; align-items: center; gap: 2px; opacity: 0; }
 .omp-mermaid:hover .omp-mermaid-bar, .omp-mermaid:focus-within .omp-mermaid-bar { opacity: 1; }
 .omp-mermaid-tab { padding: 2px 6px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; font-size: 11px; cursor: pointer; }
 .omp-mermaid-tab:hover { background: var(--vscode-button-secondaryHoverBackground); }
