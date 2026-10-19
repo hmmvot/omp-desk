@@ -132,6 +132,11 @@
           "default": false,
           "description": "Remind the model after every prompt you send to write the files and folders it mentions as paths in inline code and every code symbol in Chat replies as a link ([`Name`](path:line)). The reminder is a separate message added to the request only (about 120 tokens per prompt); it is never saved to the session or shown. Applies to sessions started or resumed afterwards."
         },
+        "ompDesk.toolIntentDescriptions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ask the model to describe every tool call in the `i` field in terms of your task (what question the call answers or what it changes, naming the feature, bug, file or agent; at most 10 words), instead of OMP's built-in two-to-six-word verb phrase, so the line beside each tool name in Chat says why the tool ran. Adds one paragraph (about 190 tokens) to the system prompt of Chat sessions only; subagents and Terminal sessions are unchanged. Only has an effect while OMP's own `tools.intentTracing` is on. Applies to sessions started or resumed afterwards."
+        },
         "ompDesk.executablePath": {
           "type": "string",
           "default": "",

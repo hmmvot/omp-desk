@@ -23,7 +23,7 @@
  * one request to the next and a cache breakpoint can still sit on the real prompt (OMP never anchors a breakpoint on
  * or before a message it finds rewritten for the request, which is why the reminder is its own message).
  */
-import { LINK_REMINDER_ENV } from "../host/control-protocol.ts";
+import { LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
 
 export interface ChatPromptInjection {
 	/** A short stable name for the feature the rule serves. */
@@ -58,6 +58,22 @@ export function renderChatPrompt(injections: readonly ChatPromptInjection[]): st
 }
 
 export const CHAT_PROMPT = renderChatPrompt(CHAT_PROMPT_INJECTIONS);
+
+export const MAX_TOOL_INTENT_INJECTION_CHARS = 800;
+/**
+ * Added only when `ompDesk.toolIntentDescriptions` is on. It replaces OMP's built-in `i` rule (system-prompt.md, only while
+ * `tools.intentTracing` is on): Chat shows the `i` text beside the tool name and arguments, so it has to say why, not what.
+ * Longer than an ordinary injection because the two examples are what makes the model leave bare verbs behind.
+ */
+export const TOOL_INTENT_INJECTION: ChatPromptInjection = {
+	id: "tool-intent",
+	text: "This replaces the built-in rule for `i` (2–6-word present-participle intent). For every tool whose schema has an `i` field, set `i` to what you are doing and why, in terms of the current task: the question the call answers or the change it makes, naming its subject (feature, bug, file, agent). At most 10 words. It is shown beside the tool name and its arguments, so do not repeat them, and do not use a bare verb such as check, read, search, run, fix or wait. Examples: not \"Find menu\" but \"Find where the tool card menu is drawn\"; not \"Tree state\" but \"Check that agents left no uncommitted changes\". Do not add `i` to tools whose schema lacks this field.",
+};
+
+/** The Chat prompt for a launch: the standing injections, plus the tool-intent rule when `env` sets {@link TOOL_INTENT_ENV} to `1`. */
+export function chatPromptFor(env: Readonly<Record<string, string | undefined>>): string {
+	return env[TOOL_INTENT_ENV] === "1" ? renderChatPrompt([...CHAT_PROMPT_INJECTIONS, TOOL_INTENT_INJECTION]) : CHAT_PROMPT;
+}
 
 export const MAX_LINK_REMINDER_CHARS = 350;
 /** The text inserted after each user prompt of a request. */
@@ -115,13 +131,14 @@ function withReminders(messages: readonly unknown[]): unknown[] | undefined {
  * launches the session), the `context` event also inserts {@link LINK_REMINDER} after every user prompt of each provider request.
  */
 export function registerChatPrompt(pi: ChatPromptApi, env: Readonly<Record<string, string | undefined>> = process.env): void {
+	const chatPrompt = chatPromptFor(env);
 	pi.on("before_agent_start", (event, ctx) => {
 		if (ctx?.mode !== "rpc" || ctx.agent?.kind !== "main") return undefined;
 		if (typeof event !== "object" || event === null || !("systemPrompt" in event)) return undefined;
 		const prompt = event.systemPrompt;
 		if (!Array.isArray(prompt) || !prompt.every(part => typeof part === "string")) return undefined;
-		if (prompt.includes(CHAT_PROMPT)) return undefined;
-		return { systemPrompt: [...prompt, CHAT_PROMPT] };
+		if (prompt.includes(chatPrompt)) return undefined;
+		return { systemPrompt: [...prompt, chatPrompt] };
 	});
 	if (env[LINK_REMINDER_ENV] !== "1") return;
 	pi.on("context", (event, ctx) => {

@@ -4186,6 +4186,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     brokerUnavailableReason: () => windowState().ptyGate?.reason(),
     brokerWatches: s.brokerWatches,
     linkReminder: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("linkReminder", false),
+    toolIntent: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("toolIntentDescriptions", false),
     forks: s.pendingForks,
     control: s.sessionRuntime.control,
     native: s.sessionRuntime.nativeWatch,

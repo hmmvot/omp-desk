@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV } from "./control-protocol.ts";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "./control-protocol.ts";
 import type { NativeControlBootstrap } from "./native-terminal.ts";
 import { controlRuntimeFlagSet, NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
 import type { RuntimeFlagPlan } from "./runtime-flags.ts";
@@ -109,6 +109,7 @@ describe("the rpc-ui launch command line", () => {
 			readonly carrier?: RuntimeFlagPlan["carrier"];
 			readonly inheritedBunOptions?: string;
 			readonly linkReminder?: boolean;
+			readonly toolIntent?: boolean;
 		} = {},
 	): RpcOmpLaunchSpec {
 		const control = overrides.control === undefined ? null : overrides.control;
@@ -123,6 +124,7 @@ describe("the rpc-ui launch command line", () => {
 			forkFrom: overrides.forkFrom === undefined ? null : overrides.forkFrom,
 			profile: overrides.profile === undefined ? null : overrides.profile,
 			linkReminder: overrides.linkReminder ?? true,
+			toolIntent: overrides.toolIntent ?? false,
 		});
 	}
 
@@ -203,7 +205,7 @@ describe("the rpc-ui launch command line", () => {
 
 	it("carries no host-control flag or rendezvous environment without a bootstrap", () => {
 		const result = spec();
-		assert.deepEqual(result.env, { [LINK_REMINDER_ENV]: "1" });
+		assert.deepEqual(result.env, { [LINK_REMINDER_ENV]: "1", [TOOL_INTENT_ENV]: "0" });
 		for (const flag of ["--define", "--preload", "-e"]) assert.equal(result.args.includes(flag), false, flag);
 	});
 
@@ -212,11 +214,17 @@ describe("the rpc-ui launch command line", () => {
 		assert.equal(spec({ linkReminder: false }).env[LINK_REMINDER_ENV], "0");
 	});
 
+	it("passes the ompDesk.toolIntentDescriptions setting to the Chat prompt module as an environment value", () => {
+		assert.equal(spec({ toolIntent: true }).env[TOOL_INTENT_ENV], "1");
+		assert.equal(spec({ toolIntent: false }).env[TOOL_INTENT_ENV], "0");
+	});
+
 	it("loads host control and publishes its rendezvous only when a bootstrap is given", () => {
 		const control = controlOf();
 		const result = spec({ control });
 		assert.deepEqual(result.env, {
 			[LINK_REMINDER_ENV]: "1",
+			[TOOL_INTENT_ENV]: "0",
 			[CONTROL_DIR_ENV]: control.directory,
 			[CONTROL_SLOT_ENV]: control.slotId,
 		});
@@ -418,7 +426,7 @@ describe("the runtime facts a launch hands the client", () => {
 			},
 		};
 		const outcome = await withResolver.launchRpcHost(
-			{ slot: "host:binary-facts", cwd: temp, sessionFile: null, profile: null, sessionDir: null, control: null, linkReminder: false },
+			{ slot: "host:binary-facts", cwd: temp, sessionFile: null, profile: null, sessionDir: null, control: null, linkReminder: false, toolIntent: false },
 			client as unknown as Parameters<LaunchWithResolverModule["launchRpcHost"]>[1],
 		);
 		assert.equal(outcome.state, "not-started");

@@ -84,6 +84,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		brokerUnavailableReason: () => null,
 		brokerWatches: new WeakMap(),
 		linkReminder: () => false,
+		toolIntent: () => false,
 		forks: { peek: tab => sources.get(tab) ?? null, forget: tab => { dropped.push(tab); } },
 		control: {
 			storeRecipient: async () => { events.push("storeRecipient"); },

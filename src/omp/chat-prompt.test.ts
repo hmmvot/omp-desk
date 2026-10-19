@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CHAT_PROMPT, CHAT_PROMPT_INJECTIONS, LINK_REMINDER, MAX_CHAT_PROMPT_CHARS, MAX_INJECTION_CHARS, MAX_LINK_REMINDER_CHARS, registerChatPrompt } from "./chat-prompt.ts";
-import { LINK_REMINDER_ENV } from "../host/control-protocol.ts";
+import { CHAT_PROMPT, CHAT_PROMPT_INJECTIONS, LINK_REMINDER, MAX_CHAT_PROMPT_CHARS, MAX_INJECTION_CHARS, MAX_LINK_REMINDER_CHARS, MAX_TOOL_INTENT_INJECTION_CHARS, TOOL_INTENT_INJECTION, chatPromptFor, registerChatPrompt, renderChatPrompt } from "./chat-prompt.ts";
+import { LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
 import type { ChatPromptContext } from "./chat-prompt.ts";
 
 function bindEvent(name: string, env: Record<string, string | undefined> = {}): ((event: unknown, ctx: ChatPromptContext) => unknown) | undefined {
@@ -34,6 +34,28 @@ test("only an RPC main session's system prompt gets the Chat prompt, once", () =
 	assert.equal(handler(event, { mode: "rpc", agent: { kind: "sub" } }), undefined, "a subagent answers its parent, not the user");
 	assert.equal(handler({ ...event, systemPrompt: ["base", CHAT_PROMPT] }, { mode: "rpc", agent: { kind: "main" } }), undefined);
 	assert.equal(handler({ ...event, systemPrompt: "base" }, { mode: "rpc", agent: { kind: "main" } }), undefined, "an unexpected shape is left alone");
+});
+
+const TOOL_INTENT_TEXT = "This replaces the built-in rule for `i` (2–6-word present-participle intent). For every tool whose schema has an `i` field, set `i` to what you are doing and why, in terms of the current task: the question the call answers or the change it makes, naming its subject (feature, bug, file, agent). At most 10 words. It is shown beside the tool name and its arguments, so do not repeat them, and do not use a bare verb such as check, read, search, run, fix or wait. Examples: not \"Find menu\" but \"Find where the tool card menu is drawn\"; not \"Tree state\" but \"Check that agents left no uncommitted changes\". Do not add `i` to tools whose schema lacks this field.";
+
+test("the tool-intent rule is in the Chat prompt only when ompDesk.toolIntentDescriptions is on", () => {
+	const event = { type: "before_agent_start", prompt: "hi", systemPrompt: ["base"] };
+	const on = bindEvent("before_agent_start", { [TOOL_INTENT_ENV]: "1" });
+	assert.ok(on);
+	const expected = renderChatPrompt([...CHAT_PROMPT_INJECTIONS, TOOL_INTENT_INJECTION]);
+	assert.deepEqual(on(event, MAIN), { systemPrompt: ["base", expected] });
+	assert.equal(expected.split("\n").at(-1), `- ${TOOL_INTENT_TEXT}`, "one more bullet, verbatim, after the standing rules");
+	assert.equal(expected.startsWith(CHAT_PROMPT), true);
+	assert.equal(on(event, { mode: "rpc", agent: { kind: "sub" } }), undefined, "a subagent is untouched");
+	assert.equal(on(event, { mode: "tui", agent: { kind: "main" } }), undefined, "a Terminal session is untouched");
+	assert.equal(on({ ...event, systemPrompt: ["base", expected] }, MAIN), undefined, "added once");
+	for (const env of [{}, { [TOOL_INTENT_ENV]: "0" }, { [TOOL_INTENT_ENV]: "true" }]) {
+		assert.equal(chatPromptFor(env), CHAT_PROMPT);
+		assert.doesNotMatch(chatPromptFor(env), /`i`/, "off adds nothing about i");
+		assert.deepEqual(bindEvent("before_agent_start", env)?.(event, MAIN), { systemPrompt: ["base", CHAT_PROMPT] });
+	}
+	assert.ok(TOOL_INTENT_INJECTION.text.length <= MAX_TOOL_INTENT_INJECTION_CHARS, `the rule is ${TOOL_INTENT_INJECTION.text.length} characters`);
+	assert.doesNotMatch(TOOL_INTENT_INJECTION.text, /\n/);
 });
 
 test("the Chat prompt stays within its size budget, one short rule per injection", () => {
