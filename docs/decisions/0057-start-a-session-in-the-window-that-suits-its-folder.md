@@ -38,6 +38,7 @@ First option.
 - Its "a request only selects a tab" rule is now the rule for `select` requests; `launch` requests start sessions, with the receiver's own admission and the checks above. A forged launch can start an idle session in a folder the receiver itself has open, which the same user can do directly; claims, registry data and requests remain advisory and never admit or refuse a launch.
 - Revealing a session another window already holds keeps ADR-0056's switch.
 - A **stop** request (`kind: "stop"`, ADR-0060) is a third kind: it names row identities (slot, broker id, generation, type, conversation) and asks the addressed window to stop, through its own lifecycle, those it provably runs. It is answered per row, and the receiver takes it up by an atomic rename to `.accepted` so the requester can tell a window that never saw it from one that is working. Like the other kinds it is advisory and never ownership evidence; unlike them it can end a process, but only one the receiving window itself runs, which the same user could stop with an ordinary Stop.
+- A **handover** request (`kind: "handover"`, ADR-0080, 2026-10-20 amendment) is a fourth kind beside the later `reload` and `models`: it names a session run (tab, incarnation, editor binding) and asks the claim holder to give it up without stopping it, so the requester can open it through the ordinary path; it is taken up like `stop`. It starts nothing in the receiver and never routes a launch.
 
 ### Consequences
 

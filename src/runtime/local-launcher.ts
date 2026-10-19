@@ -21,6 +21,7 @@
  */
 import { setTimeout as delay } from "node:timers/promises";
 import type { Logger } from "../shared/logger.ts";
+import type { InputReclaim } from "../protocol/rpc.ts";
 import { awaitWriterGone, watchBrokerLoss } from "../host/broker-loss.ts";
 import { createHostSlotId } from "../host/broker-slots.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
@@ -50,6 +51,9 @@ import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalNativeWatch } from "./local-native-watch.ts";
 import type { PreparedHostControl } from "./local-control.ts";
+
+/** What an adopting attach waits for a previous frontend's input claim to clear (a handover): about 10 tries over 2 s. */
+export const ADOPTED_INPUT_RECLAIM: InputReclaim = { attempts: 10, intervalMs: 200 };
 
 /** What the runtime asks of its window; contractual and in-process only (design §2.5). */
 export interface LauncherWindow {
@@ -184,12 +188,15 @@ export class LocalLauncher implements OmpHostLauncher {
 	 * open, reads the session file's tail from disk before the process is ready (the first
 	 * paint), and folds the process's own frames afterwards. Every editor showing the tab is
 	 * pointed at it, so a panel that opened first receives the conversation the moment it exists.
+	 * `reclaimInput` is given only by the attach of a surviving host (a reload, an adopted or handed-over session): the
+	 * conversation's first attach then repeats an input claim the broker refused, bounded and never as a takeover.
 	 */
 	async startConversation(
 		tabId: string,
 		runtime: SessionHostRuntime,
 		sessionFile: string | null,
 		replayFromStart: boolean,
+		reclaimInput?: InputReclaim,
 	): Promise<void> {
 		const { window, index, chat } = this.#deps;
 		window.adopt(tabId, runtime);
@@ -215,6 +222,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			// A re-adopted child replays what its broker buffered since the beginning; a fresh one
 			// has nothing to replay.
 			...(replayFromStart ? { initialSeq: 0 } : {}),
+			...(reclaimInput === undefined ? {} : { reclaimInput }),
 		});
 		window.attached(tabId, runtime);
 	}
@@ -300,7 +308,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			return { state: "unavailable", reason: outcome.reason, timings };
 		}
 		diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · ${outcome.reason}` });
-		await this.startConversation(request.tabId, runtime, request.sessionFile, true);
+		await this.startConversation(request.tabId, runtime, request.sessionFile, true, ADOPTED_INPUT_RECLAIM);
 		lap("conversation");
 		// The run intent is not recorded here: the index records it with the host it adopts, in the one write that follows this return.
 		log.info(`tab ${request.tabId}: attached — ${outcome.reason}`);

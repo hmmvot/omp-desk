@@ -312,6 +312,40 @@ describe("executor gate on a live session", () => {
 		assert.equal(provider.started.length, 1);
 	});
 
+	it("an adopting attach that wins input after a refusal or two registers the tools, opens the gate and asks for the retries once", async () => {
+		const { channel, session, provider } = await boot({ session: { reclaimInput: { attempts: 5, intervalMs: 1 } }, setup: channel => { channel.claimRefusals = 2; } });
+		assert.equal(channel.claimAttempts, 3, "two refusals, then the claim");
+		assert.equal(channel.inputOwned, true);
+		assert.equal(session.model.readOnlyReason, null);
+		assert.equal(channel.commandsOfType("set_host_tools").length, 1, "the tools are registered by the resync as for any owner");
+		channel.emitHostCall("call-1", "vscode_probe");
+		await tick();
+		assert.equal(provider.started.length, 1, "a call runs: the executor gate is open");
+		channel.closeLink("disconnected");
+		await tick();
+		assert.deepEqual(channel.reclaimRequests, [{ attempts: 5, intervalMs: 1 }, undefined], "a later reattach asks for no retries");
+	});
+
+	it("an adopting attach that never wins input stays read-only with the reason, and never takes the claim over", async () => {
+		const { channel, session, provider } = await boot({ session: { reclaimInput: { attempts: 3, intervalMs: 1 } }, setup: channel => { channel.claimRefusals = 100; } });
+		assert.equal(channel.claimAttempts, 4, "the attempts are bounded");
+		assert.equal(session.phase, "live");
+		assert.equal(session.model.readOnlyReason, "Input is held elsewhere; reload this window to take it over.");
+		assert.equal(session.snapshot().readOnlyReason, session.model.readOnlyReason);
+		assert.equal(channel.commandsOfType("set_host_tools").length, 0);
+		channel.setOwned(true);
+		await tick();
+		assert.equal(session.model.readOnlyReason, null, "the reason goes away the moment the claim is gained");
+		assert.equal(channel.commandsOfType("set_host_tools").length, 1);
+		assert.equal(provider.started.length, 0);
+	});
+
+	it("a window that was not asked to reclaim shows no reason when another window holds input", async () => {
+		const { channel, session } = await boot({ setup: channel => { channel.inputClaimable = false; } });
+		assert.equal(channel.claimAttempts, 1);
+		assert.equal(session.model.readOnlyReason, null);
+	});
+
 	it("aborts a running call when input is lost and, once the claim is back, answers it once", async () => {
 		const { channel, provider, timers } = await boot();
 		channel.emitHostCall("call-1", "vscode_probe");

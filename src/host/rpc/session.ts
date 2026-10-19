@@ -118,6 +118,7 @@ import {
 	toChatEventFrame,
 	writeErrorCode,
 	type ParsedState,
+	type InputReclaim,
 	type RpcAttachResult,
 	type RpcChannel,
 	type RpcChannelEvent,
@@ -163,6 +164,9 @@ export interface HistoryPort {
 	refresh(): Promise<HistoryRefresh>;
 }
 
+/** Why a session adopted with {@link RpcSessionOptions.reclaimInput} is read-only when the claim could not be won. */
+const INPUT_HELD_ELSEWHERE = "Input is held elsewhere; reload this window to take it over.";
+
 export interface RpcSessionOptions {
 	channel: RpcChannel;
 	/** The exact session file the process must serve; `null` for a new conversation (learned from `get_state`). */
@@ -201,6 +205,12 @@ export interface RpcSessionOptions {
 	probeTimeoutMs?: number;
 	/** Desk's host tools (ADR-0055). Absent: the session registers none and ignores host tool frames. */
 	hostTools?: HostToolProvider;
+	/**
+	 * Set by the attach that adopts a host another window may have just given up (a handover): its first attach repeats an input
+	 * claim the broker refused, a bounded number of times, never as a takeover. A session that still does not hold input after
+	 * that shows why it is read-only.
+	 */
+	reclaimInput?: InputReclaim;
 	/** Diagnostics sink for soft-limit and registration notes. */
 	log?: Logger;
 	/**
@@ -2047,7 +2057,7 @@ export class RpcSession {
 		this.#setPhase(kind === "start" ? "starting" : "attaching", null);
 		let result: RpcAttachResult;
 		try {
-			result = await this.#channel.attach({ sinceSeq: this.#lastSeq });
+			result = await this.#channel.attach({ sinceSeq: this.#lastSeq, ...(kind === "start" && this.#options.reclaimInput !== undefined ? { reclaimInput: this.#options.reclaimInput } : {}) });
 		} catch {
 			throw new SessionFailure("attach-failed");
 		}
@@ -2127,7 +2137,7 @@ export class RpcSession {
 		await askDialogPromise;
 		await this.#reconcileEntries();
 		if (this.#disposed || this.#ended) return;
-		this.#model = setChatPhase(this.#model, "live", null, null);
+		this.#model = setChatPhase(this.#model, "live", null, this.#options.reclaimInput !== undefined && !this.#channel.inputOwned ? INPUT_HELD_ELSEWHERE : null);
 		this.#autoRecoveryAttempt = 0;
 		this.#publish(true);
 		this.#hostCalls?.open();
@@ -2277,6 +2287,10 @@ export class RpcSession {
 				return;
 			case "input-owner":
 				this.#hostCalls?.ownerChanged();
+				if (event.owned && this.#model.readOnlyReason === INPUT_HELD_ELSEWHERE) {
+					this.#model = setChatPhase(this.#model, this.#model.phase, this.#model.code, null);
+					this.#emitState();
+				}
 				if (event.owned && this.#live && this.#identityVerified) void this.#registerHostTools();
 				return;
 			case "closed":

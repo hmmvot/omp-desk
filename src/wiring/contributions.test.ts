@@ -540,6 +540,24 @@ describe("commands", () => {
 		assert.deepEqual(inTitle("ompDesk.clearSession").map(entry => [entry.group, entry.when]), [["3_session@5", chatOnly]]);
 		assert.deepEqual(inTitle("ompDesk.branchSession"), [], "Branch is not in the Chat title menu: Rewind there opens the same picker");
 	});
+
+	it("declare Move to This Window on every Sessions row open in another window, in the Open group beside Stop and Switch, and Move Session to This Window as its palette command, both registered", () => {
+		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		assert.equal(declared.get("ompDesk.moveSessionHere")?.title, "Move to This Window");
+		assert.equal(declared.get("ompDesk.moveSessionHere")?.category, "OMP Desk");
+		assert.equal(declared.get("ompDesk.moveSessionHere.palette")?.title, "Move Session to This Window");
+		assert.equal(declared.get("ompDesk.moveSessionHere.palette")?.category, "OMP Desk", "the palette reads OMP Desk: Move Session to This Window");
+		for (const command of ["ompDesk.moveSessionHere", "ompDesk.moveSessionHere.palette"]) assert.ok(source.includes(`registerDeskCommand("${command}", `), `${command} is registered in extension.ts`);
+		assert.ok(hiddenFromPalette.has("ompDesk.moveSessionHere"), "the row command is hidden: the palette offers its own command");
+		assert.ok(!hiddenFromPalette.has("ompDesk.moveSessionHere.palette"));
+		const rows = menus.filter(({ menu, entry }) => menu === "view/item/context" && entry.command === "ompDesk.moveSessionHere").map(({ entry }) => entry);
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0]?.group, "1_open@2");
+		const stop = menus.find(({ menu, entry }) => menu === "view/item/context" && entry.command === "ompDesk.stopSessionHost")?.entry;
+		assert.equal(rows[0]?.when, stop?.when, "offered on exactly the rows Stop is: every row open in another window");
+		assert.ok(!(rows[0]?.when ?? "").includes("window-switchable"), "it does not need the holder's window identity, unlike Switch");
+		assert.ok(!menus.some(({ menu, entry }) => menu !== "commandPalette" && entry.command === "ompDesk.moveSessionHere.palette"), "the palette command is in no menu");
+	});
 });
 
 describe("views", () => {
@@ -720,7 +738,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.branchSession", "ompDesk.clearSession", "ompDesk.findInChat", "ompDesk.forkSession", "ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
+		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.branchSession", "ompDesk.clearSession", "ompDesk.findInChat", "ompDesk.forkSession", "ompDesk.logoutProvider", "ompDesk.moveSessionHere", "ompDesk.moveSessionHere.palette", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [

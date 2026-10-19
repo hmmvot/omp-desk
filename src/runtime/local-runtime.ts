@@ -14,7 +14,7 @@ import type { OmpHostLauncher, RestoreOutcome, RestoreReport, SessionIndex } fro
 import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session.ts";
 import type { StopOperations } from "./local-stop.ts";
 import type {
-	BeginTransitionRequest, OpenRequest, ReadTransitionFactsRequest, ReattachRequest, ReplaceWriterRequest, ReplaceWriterResult, RestorePassRequest, RuntimeHolder,
+	BeginTransitionRequest, DetachHostResult, DetachRequest, OpenRequest, ReadTransitionFactsRequest, ReattachRequest, ReplaceWriterRequest, ReplaceWriterResult, RestorePassRequest, RuntimeHolder,
 	RuntimeSnapshot, SessionRuntime, StopRecordedOutcome, StopRecordedRequest, StopRequest, StopResult, TransitionRetention, TransitionToken,
 } from "./session-runtime.ts";
 import type { LocalHostControl } from "./local-control.ts";
@@ -145,6 +145,10 @@ export class LocalSessionRuntime implements SessionRuntime {
 
 	replaceWriter(request: ReplaceWriterRequest): Promise<ReplaceWriterResult> {
 		return this.#deps.transitions.replaceWriter(request);
+	}
+
+	detach(request: DetachRequest): Promise<DetachHostResult> {
+		return this.#deps.transitions.detach(request);
 	}
 
 	/**

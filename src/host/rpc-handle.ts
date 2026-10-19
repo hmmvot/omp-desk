@@ -30,7 +30,7 @@ import { BrokerHandle, PtyRequestError, type BrokerHandleEvent } from "./broker-
 import { PTY_PROTOCOL_VERSION, PTY_RPC_MAX_WRITE_BYTES, PtyProtocolError, PtyRpcFragmentAssembler, ptyRpcFragment, ptyRpcFragmentCount } from "./pty-protocol.ts";
 import type { PtyBrokerFrame, PtyBrokerRecord, PtyStatusPayload, PtyStopMode, PtyStopResult } from "./pty-protocol.ts";
 import type { PtyClientSideConnection } from "./pty-ipc.ts";
-import type { RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChildStatus } from "../protocol/rpc.ts";
+import type { InputReclaim, RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChildStatus } from "../protocol/rpc.ts";
 
 /** How long one line write waits for the broker's acknowledgement. */
 const WRITE_TIMEOUT_MS = 60_000;
@@ -117,10 +117,11 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		};
 	}
 
-	async attach(request: { readonly sinceSeq: number }): Promise<RpcAttachResult> {
+	async attach(request: { readonly sinceSeq: number; readonly reclaimInput?: InputReclaim }): Promise<RpcAttachResult> {
 		if (this.closedReason !== null) await this.reconnect();
 		this.channelClosed = false;
 		await this.claim();
+		if (request.reclaimInput !== undefined && !this.ownsInput) await this.reclaim(request.reclaimInput);
 		const frame = await this.request({ v: PTY_PROTOCOL_VERSION, t: "rpc-attach", id: 0, sinceSeq: request.sinceSeq });
 		if (frame.t !== "rpc-attached") throw new Error("the broker did not answer with an rpc attach result");
 		return {
@@ -303,6 +304,22 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 				return;
 			}
 			throw error;
+		}
+	}
+
+	/**
+	 * Repeat a refused claim a bounded number of times, never as a takeover: the broker clears the input owner of a frontend
+	 * that left (a handover) only when it processes that frontend's close, which an attach can overtake. A frontend that
+	 * really holds input keeps it, and this attach settles without input once the tries are spent or the connection is gone.
+	 */
+	private async reclaim(reclaim: InputReclaim): Promise<void> {
+		for (let attempt = 0; attempt < reclaim.attempts && !this.ownsInput && this.closedReason === null; attempt += 1) {
+			await new Promise<void>(resolve => {
+				const timer = setTimeout(resolve, reclaim.intervalMs);
+				timer.unref();
+			});
+			if (this.closedReason !== null) return;
+			await this.claim();
 		}
 	}
 

@@ -22,7 +22,9 @@ import type { PtyBrokerClient } from "../host/pty-client.ts";
 import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import { stopRpcHost } from "../host/rpc-launch.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
-import type { OmpHostLauncher, RestoreOutcome, SessionIndex } from "../host/session-index.ts";
+import { SessionIndexError } from "../host/session-index.ts";
+import type { DetachExpectation, OmpHostLauncher, RestoreOutcome, SessionIndex } from "../host/session-index.ts";
+import { sessionIncarnation } from "../host/window-registry.ts";
 import type { TabLifecycleLease } from "../host/tab-lifecycle.ts";
 import { controlOwnerFor } from "./local-control.ts";
 import type { LocalHostControl } from "./local-control.ts";
@@ -31,7 +33,7 @@ import { withSessionReadDeadline } from "./local-stop.ts";
 import type { StopOperations } from "./local-stop.ts";
 import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 import type {
-	BeginTransitionRequest, ReadTransitionFactsRequest, ReplaceWriterRequest, ReplaceWriterResult, RuntimeSnapshot, StopRequest, StopResult,
+	BeginTransitionRequest, DetachHostResult, DetachRequest, ReadTransitionFactsRequest, ReplaceWriterRequest, ReplaceWriterResult, RuntimeSnapshot, StopRequest, StopResult,
 	TransitionPhase, TransitionRetention, TransitionToken,
 } from "./session-runtime.ts";
 
@@ -56,7 +58,7 @@ export interface LocalTransitionDeps {
 	readonly index: SessionIndex;
 	readonly window: TransitionWindow;
 	readonly records: RuntimeRecords;
-	readonly chat: Pick<ChatRuntime, "sessionOf" | "release">;
+	readonly chat: Pick<ChatRuntime, "sessionOf" | "release" | "showViewOnly">;
 	readonly stop: StopOperations;
 	readonly control: Pick<LocalHostControl, "release" | "dispose">;
 	readonly exit: Pick<LocalExitOperations, "retireBroker">;
@@ -64,6 +66,8 @@ export interface LocalTransitionDeps {
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	readonly launcher: () => OmpHostLauncher;
 	readonly log: Logger;
+	/** One broker-loss watch per runtime; a detach ends the one of the runtime it hands over. */
+	readonly brokerWatches: Pick<WeakMap<SessionHostRuntime, () => void>, "get" | "delete">;
 }
 
 /** What the runtime keeps of one flow's fence between its calls. */
@@ -266,6 +270,86 @@ export class LocalTransitions {
 			return { status: "failed", detail: messageOf(error), ...progress };
 		} finally {
 			if (fence !== undefined) fence.keep = request.stop.kind === "force" ? progress.stopDispatched && !progress.writerGone : progress.stopDispatched;
+		}
+	}
+
+	/**
+	 * Hand the live Chat session of a conversation over to another window (ADR-0080), without stopping it.
+	 *
+	 * One hold of the gate, in this order: the rechecks (a fresh claim read, the run's incarnation, a live driven host, the
+	 * row's intent and recorded host, the editor binding, a Chat runtime, no flow in flight), the fence, the conversation
+	 * dropped without rendering (its broker connection closes), the broker watch and the record's runtime ended (so no later
+	 * event records "OMP ended" for a session this window no longer serves), host control closed with its credentials kept,
+	 * and the claim released by the index. Nothing durable is written here: no intent, no recorded host, no release. The
+	 * fence and the gate are let go before the read-only view is rendered, which reads the transcript and must not delay the claim.
+	 */
+	async detach(request: DetachRequest): Promise<DetachHostResult> {
+		const { index, chat, log } = this.#deps;
+		const tabId = request.conversation;
+		const held = await index.lifecycle.run(tabId, async lease => await this.#detachHeld(request, lease));
+		if (held.note === null) return held.result;
+		try {
+			let reason: string = held.note === "moved" ? "This session was moved to another window." : "This session is open in another window.";
+			if (held.note === "unfinished") {
+				// The note offering a reconnect is true only while this window still holds the claim.
+				const observed = await index.observeOwnership(tabId);
+				const elsewhere = observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id;
+				reason = elsewhere ? "This session is open in another window." : "The move could not finish. Open the session here to reconnect it.";
+			}
+			const row = index.get(tabId);
+			await chat.showViewOnly(tabId, { file: row?.sessionFile ?? null, cwd: row?.cwd ?? held.cwd, title: row?.title ?? null, reason, phase: "blocked" });
+		} catch (error) {
+			log.error(`tab ${tabId}: the view of a handed-over session could not be shown: ${messageOf(error)}`);
+		}
+		return held.result;
+	}
+
+	async #detachHeld(request: DetachRequest, lease: TabLifecycleLease): Promise<{ readonly result: DetachHostResult; readonly note: "moved" | "elsewhere" | "unfinished" | null; readonly cwd: string }> {
+		const { index, chat, control, log } = this.#deps;
+		const tabId = request.conversation;
+		const refused = (code: "not-holder" | "busy" | "terminal") => ({ result: { status: "refused", code } as const, note: null, cwd: "" });
+		const record = this.#deps.records.get(tabId);
+		const runtime = record?.runtime ?? null;
+		if (record === undefined || runtime === null || record.tabId !== tabId) return refused("not-holder");
+		const observed = await index.observeOwnership(tabId);
+		const entry = index.get(tabId);
+		if (!observed.ok || observed.claim === null || entry === null || entry.ownership === null) return refused("not-holder");
+		if (observed.claim.holderId !== index.claimHolder.id || observed.claim.ownerGeneration !== entry.ownership.ownerGeneration) return refused("not-holder");
+		if (sessionIncarnation(entry) !== request.incarnation || !index.hasLiveHost(tabId) || entry.runIntent !== "running") return refused("not-holder");
+		const { identity } = runtime;
+		const host = entry.host;
+		if (host === null || host.pid !== runtime.pid || host.rpc === undefined || host.rpc === null || host.rpc.slot !== identity.slot || host.rpc.brokerId !== identity.brokerId ||
+			host.rpc.brokerGeneration !== identity.brokerGeneration || host.rpc.childPid !== identity.childPid || host.rpc.childCreationTime !== identity.childCreationTime) return refused("not-holder");
+		if (request.binding !== null) {
+			const binding = index.slotBinding(record.slotId);
+			if (binding === null || binding.tabId !== tabId || `${record.slotId}.${binding.generation}` !== request.binding) return refused("not-holder");
+		}
+		if (runtime.kind === "terminal") return refused("terminal");
+		if (record.transitioning) return refused("busy");
+		const expected: DetachExpectation = {
+			pid: runtime.pid, slot: identity.slot, brokerId: identity.brokerId, brokerGeneration: identity.brokerGeneration,
+			childPid: identity.childPid, childCreationTime: identity.childCreationTime,
+		};
+		this.#raise(tabId, true);
+		try {
+			chat.release(tabId);
+			const watch = this.#deps.brokerWatches.get(runtime);
+			this.#deps.brokerWatches.delete(runtime);
+			watch?.();
+			this.#end(record);
+			control.dispose(record);
+			const detached = await index.detachLiveClaim(tabId, expected, lease);
+			switch (detached.status) {
+				case "released": return { result: { status: "detached" }, note: "moved", cwd: runtime.cwd };
+				case "target-changed": return { result: { status: "refused", code: "not-holder" }, note: "elsewhere", cwd: runtime.cwd };
+				case "claim-unreleased": return { result: { status: "failed", code: "claim-unreleased", stillHeld: detached.stillHeld }, note: "unfinished", cwd: runtime.cwd };
+			}
+		} catch (error) {
+			log.error(`tab ${tabId}: handing the session over failed: ${messageOf(error)}`);
+			if (error instanceof SessionIndexError) return { result: { status: "refused", code: "not-holder" }, note: "elsewhere", cwd: runtime.cwd };
+			return { result: { status: "failed", code: "claim-unreleased", stillHeld: true }, note: "unfinished", cwd: runtime.cwd };
+		} finally {
+			this.#raise(tabId, false);
 		}
 	}
 

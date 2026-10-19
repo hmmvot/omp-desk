@@ -30,6 +30,7 @@ import {
 	PENDING_ANSWER_TIMEOUT_MS,
 	RELOAD_ACCEPT_TIMEOUT_MS,
 	REQUEST_ANSWER_TIMEOUT_MS,
+	awaitHandoverAnswer,
 	awaitPendingLaunchAnswer,
 	awaitReloadTakenUp,
 	awaitRequestAnswer,
@@ -37,6 +38,7 @@ import {
 	planFolderLaunch,
 	planWindowFocus,
 	planWindowSwitch,
+	postHandoverRequest,
 	postLaunchRequest,
 	postModelsRequest,
 	postPendingLaunch,
@@ -48,6 +50,8 @@ import {
 	withdrawRequest,
 } from "../host/window-requests.ts";
 import type {
+	HandoverOutcome,
+	HandoverRequest,
 	LaunchAction,
 	LaunchRequest,
 	LaunchWorkspace,
@@ -169,7 +173,23 @@ export interface RoutingNotices {
 	error(message: string): void;
 }
 
-export interface WindowRoutingDeps extends RoutingWindowFacts, RoutingLauncherPort, RoutingEditorPort, RoutingLaunchPort, RoutingNotices {}
+/** What the holder side of a move does in the window itself (ADR-0080): the runtime's detach and the read-only view the editor then shows. */
+export interface RoutingHandoverPort {
+	/**
+	 * Detach this window from the session it runs for the exact run `request` names, without stopping it (the runtime
+	 * renders the read-only view), then notify, repaint and forget the window-local outcome. `asker` is the asking window's label, for the notice.
+	 */
+	handOverSession(index: SessionIndex, request: { readonly tabId: string; readonly incarnation: string; readonly binding: string | null }, asker: string): Promise<HandOverResult>;
+}
+
+/** How the holder's side of a move ended. */
+export type HandOverResult =
+	| { readonly status: "moved" }
+	| { readonly status: "refused"; readonly code: "not-holder" | "busy" | "terminal" }
+	/** The window began the detach and could not finish it. */
+	| { readonly status: "unfinished" };
+
+export interface WindowRoutingDeps extends RoutingWindowFacts, RoutingLauncherPort, RoutingEditorPort, RoutingLaunchPort, RoutingHandoverPort, RoutingNotices {}
 
 /** Where a launch for a folder starts. */
 type LaunchRoute =
@@ -212,6 +232,14 @@ export interface WindowRouting {
 	 * `null` (a command invoked on nothing that names a tab) switches nowhere.
 	 */
 	switchToWindow(index: SessionIndex, tabId: string | null): Promise<void>;
+	/**
+	 * `Move to This Window` (ADR-0080): take a live session from the window that holds it into this one without stopping
+	 * its process, then open it here through the ordinary open path. Asks the holder by a taken-up request that carries
+	 * no focus plan. `null` (a command invoked on nothing that names a tab) moves nothing.
+	 */
+	moveSessionHere(context: vscode.ExtensionContext, index: SessionIndex, tabId: string | null): Promise<void>;
+	/** Serve another window's request to take a live session from this one (ADR-0080). */
+	serveHandoverRequest(index: SessionIndex, request: HandoverRequest, serveContext: ServeContext): Promise<ServeOutcome>;
 	/**
 	 * Start a launch in the window that has the folder open (ADR-0057). `false` when it starts in this
 	 * window, `true` once it was handed over, successfully or not, or the user dismissed the Unity project
@@ -492,6 +520,124 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 			deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
 		} else if (answer === "unfocused") {
 			deps.info("The window holding this session selected its tab, but VS Code did not bring it to the front. Switch to it using the taskbar or VS Code's Window menu.");
+		}
+	}
+
+	/** How a window of the registry is named to the user. */
+	function windowName(label: string | undefined): string {
+		return label === undefined || label.length === 0 ? "That window" : `The window "${label}"`;
+	}
+
+	/**
+	 * `Move to This Window` (ADR-0080): take a live session from the window that holds it, without stopping it.
+	 * The holder is asked by a taken-up request, carries no focus plan (no window is brought forward), and the
+	 * session is then opened here through the ordinary open path, whose claim and attach proofs alone decide
+	 * ownership. Every outcome is a fixed sentence, and "nothing was moved" is said only when that is proved.
+	 */
+	async function moveSessionToThisWindow(context: vscode.ExtensionContext, index: SessionIndex, tabId: string | null): Promise<void> {
+		if (tabId === null) return;
+		const entry = index.get(tabId);
+		if (entry === null) {
+			deps.warn("That OMP session is no longer indexed in this window.");
+			deps.refreshLauncher();
+			return;
+		}
+		try {
+			await deps.registry()?.refresh();
+		} catch (error) {
+			deps.log.warn(`move session: the other windows could not be read afresh: ${messageOf(error)}`);
+		}
+		const observed = await index.observeOwnership(tabId);
+		const claim = observed.ok ? observed.claim : null;
+		const windows = deps.registry()?.windows() ?? [];
+		const plan = planWindowSwitch({
+			claim,
+			incarnation: sessionIncarnation(entry),
+			claimHolderAlive: claim !== null && await holderSeemsAlive(claim, deps.registry()),
+			ownHolderId: index.claimHolder.id,
+			windows,
+		});
+		if (plan.kind === "stale") {
+			deps.info("The session is not open in another window; click it to open it here.");
+			deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
+			return;
+		}
+		const holder = windows.find(window => window.holderId === plan.holderId);
+		const name = windowName(holder?.label);
+		if (holder?.stale === true) {
+			deps.warn(`${name} runs an older OMP Desk than the one installed, so the session was not moved. Reload that window (Developer: Reload Window) and try again.`);
+			return;
+		}
+		const published = holder?.rows[tabId];
+		const status = published !== undefined && published.incarnation === plan.incarnation ? published.status : null;
+		if (status === "starting" || status === "stopping" || status === "restoring") {
+			deps.info(`${name} is busy with this session; try again in a moment.`);
+			return;
+		}
+		if (status === "working" || status === "question") {
+			const move = "Move";
+			const choice = await vscode.window.showWarningMessage(
+				`Move this session to this window while it is ${status === "working" ? "working" : "waiting for your answer"}?`,
+				{
+					modal: true,
+					detail: "The session keeps running and its turn continues. Host-tool calls the other window was serving at this moment fail once (OMP reports a tool error and the turn goes on), a prompt it had sent and not yet seen acknowledged is not resent, and unsent text in its composer stays in its now read-only editor.",
+				},
+				move,
+			);
+			if (choice !== move) return;
+		}
+		const postedAt = Date.now();
+		let requestId: string;
+		try {
+			requestId = await postHandoverRequest(index.claimStorageDir, {
+				to: plan.holderId, from: index.claimHolder.id, tabId, incarnation: plan.incarnation,
+				binding: published !== undefined && published.incarnation === plan.incarnation ? published.binding : null,
+			});
+		} catch (error) {
+			deps.warn(`${name} could not be asked to give up the session: ${messageOf(error)}. Nothing was moved.`);
+			return;
+		}
+		deps.timing("requester: handover posted", `${requestId.slice(0, 8)} ${Date.now() - postedAt} ms`);
+		let outcome: HandoverOutcome;
+		try {
+			outcome = await awaitHandoverAnswer(index.claimStorageDir, plan.holderId, requestId);
+		} catch (error) {
+			deps.warn(`The answer of ${name.charAt(0).toLowerCase()}${name.slice(1)} could not be read: ${messageOf(error)}. The session may have been moved; refresh the Sessions view and check.`);
+			deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
+			return;
+		}
+		deps.timing("requester: handover answer", `${requestId.slice(0, 8)} ${outcome.kind} ${Date.now() - postedAt} ms after posting`);
+		switch (outcome.kind) {
+			case "moved":
+				break;
+			case "refused":
+				if (outcome.reason === "stale-build") deps.warn(`${name} runs an older OMP Desk than the one installed, so the session was not moved. Reload that window (Developer: Reload Window) and try again.`);
+				else if (outcome.reason === "busy") deps.info(`${name} is stopping, closing, restarting or switching the view of this session; try again in a moment.`);
+				else if (outcome.reason === "terminal") deps.info("A Terminal session cannot be moved to another window.");
+				else if (outcome.reason === "unfinished") deps.warn(`${name} began moving the session and could not finish. Its editor shows how to reconnect it there. The session is still running.`);
+				else deps.info(`${name} no longer holds this run of the session (it may have been stopped, restarted or moved already). The Sessions view was refreshed.`);
+				deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
+				return;
+			case "failed":
+				deps.warn(`${name} could not move the session. It is still running there or may have been moved; refresh the Sessions view and check where it is open.`);
+				deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
+				return;
+			case "older-build":
+				deps.warn(`${name} runs an older OMP Desk that does not know this request, so nothing was moved. Reload that window (Developer: Reload Window) and try again.`);
+				return;
+			case "unresponsive":
+				deps.warn(`${name} did not respond, so nothing was moved. It may be busy or run an older OMP Desk.`);
+				return;
+			case "uncertain":
+				deps.warn(`${name} did not confirm the move in time. The session may have been moved, or may still be. Refresh the Sessions view and check where it is open.`);
+				deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
+				return;
+		}
+		try {
+			await deps.openSession(context, index, tabId, "opened", true, true, "row");
+		} catch (error) {
+			deps.log.error(`move session: opening the moved session here failed: ${messageOf(error)}`);
+			deps.error(`The session was released by the other window but could not be opened here: ${messageOf(error)}. It is still running; click it in any window to open it there.`);
 		}
 	}
 
@@ -894,6 +1040,39 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	function serveModelsRequest(): ServeOutcome {
 		deps.refreshProviderModels();
 		return { ok: true, focused: false };
+	}
+
+	/**
+	 * Serve another window's request to take a live session from this window (ADR-0080). It was taken up before this
+	 * runs. This window refuses, from its own state only, when it runs an older build than the installed one, or when
+	 * the asker is not another live window of the registry (a sanity filter, not authentication). The runtime then
+	 * takes the tab's gate, re-reads everything under it and detaches only for the exact run the request names: see
+	 * `handOverSession`. The process is never stopped.
+	 */
+	async function serveHandoverRequest(index: SessionIndex, request: HandoverRequest, serveContext: ServeContext): Promise<ServeOutcome> {
+		const refuse = (reason: string, refusal?: RefusalReason): ServeOutcome => {
+			deps.log.warn(`window request: refused a handover of ${request.tabId}: ${reason}`);
+			return { ok: false, focused: false, ...(refusal === undefined ? {} : { refusal }) };
+		};
+		if (deps.packageChangedOnDisk()) return refuse("this window runs an older OMP Desk than the one installed", "stale-build");
+		try {
+			await deps.registry()?.refresh();
+		} catch (error) {
+			deps.log.warn(`handover request: the other windows could not be read: ${messageOf(error)}`);
+		}
+		const requester = deps.registry()?.windows().find(window => window.holderId === request.from && !window.here);
+		if (requester === undefined || request.from === index.claimHolder.id) return refuse("the asking window is not another open window of this profile", "not-holder");
+		if (!(await serveContext.stillWanted())) return refuse("the requester no longer waits");
+		deps.log.info(`handover request ${request.id.slice(0, 8)} from window ${request.from.slice(0, 8)} for ${request.tabId}`);
+		let result: HandOverResult;
+		try {
+			result = await deps.handOverSession(index, { tabId: request.tabId, incarnation: request.incarnation, binding: request.binding }, requester.label);
+		} catch (error) {
+			deps.log.error(`handover request ${request.id.slice(0, 8)}: ${messageOf(error)}`);
+			return { ok: false, focused: false };
+		}
+		if (result.status === "moved") return { ok: true, focused: false };
+		return refuse(result.status === "refused" ? result.code : "the move could not finish", result.status === "refused" ? result.code : "unfinished");
 	}
 
 	async function announceCredentialsChanged(): Promise<void> {
@@ -1307,6 +1486,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		registry: () => deps.registry(),
 		heldByAnotherWindow,
 		switchToWindow: switchToSessionWindow,
+		moveSessionHere: moveSessionToThisWindow,
 		routeLaunch: routeLaunchToFolderWindow,
 		routeOpen: routeSessionOpen,
 		serveRequests(context, index, folders) {
@@ -1320,7 +1500,9 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 							? serveReloadRequest(request)
 							: request.kind === "models"
 								? serveModelsRequest()
-								: await serveLaunchRequest(context, index, request, requestContext);
+								: request.kind === "handover"
+									? await serveHandoverRequest(index, request, requestContext)
+									: await serveLaunchRequest(context, index, request, requestContext);
 				deps.timing("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
 				return outcome;
 			}, { onError: detail => deps.log.warn(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
@@ -1345,6 +1527,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		announceCredentialsChanged,
 		serveStopRequest,
 		selectHeldTab: selectHeldSessionTab,
+		serveHandoverRequest,
 		openRestoredTabIfUncovered,
 		consumeRequestedSelection,
 		fileWindowColumn,

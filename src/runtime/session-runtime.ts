@@ -222,6 +222,25 @@ export type ReplaceRefusal =
 	| "target-changed" | "facts-changed" | "not-durable" | "no-broker" | "no-control" | "native-refused"
 	| "abort-unconfirmed" | "settle-failed" | "checked-after-stop";
 
+/** The exact run a detach is for: the incarnation of the conversation's session, and the editor binding the requester saw (`<slot>.<generation>`) when it saw one. */
+export interface DetachRequest {
+	readonly conversation: string;
+	readonly incarnation: string;
+	readonly binding: string | null;
+}
+
+/**
+ * `detached`: the connection was dropped and the claim released; the process runs on and nothing durable changed.
+ * `refused`: nothing was touched (`not-holder`: this window no longer serves that run; `busy`: a stop, close, restart or view
+ * switch is in flight; `terminal`: a Terminal session has a PTY frontend, not a connection to hand over), or, as `not-holder`
+ * after the connection was dropped, a claim that was no longer this window's to release.
+ * `failed`: the connection was dropped and the claim could not be released; `stillHeld` says whether this window's claim remains.
+ */
+export type DetachHostResult =
+	| { readonly status: "detached" }
+	| { readonly status: "refused"; readonly code: "not-holder" | "busy" | "terminal" }
+	| { readonly status: "failed"; readonly code: "claim-unreleased"; readonly stillHeld: boolean };
+
 export interface SessionRuntime {
 	readonly conversations: ConversationPort;
 	readonly holder: RuntimeHolder;
@@ -266,6 +285,14 @@ export interface SessionRuntime {
 	stop(request: StopRequest): Promise<StopResult>;
 	/** Stop the writer and open its successor on the same conversation under one hold of the gate. */
 	replaceWriter(request: ReplaceWriterRequest): Promise<ReplaceWriterResult>;
+	/**
+	 * Hand the live Chat session of a conversation over (ADR-0080): under the conversation's gate, re-read that this window drives
+	 * exactly the run the request names, drop the connection to its host, end the record of the runtime, close host control keeping
+	 * its credentials and release the claim, all without stopping the process or writing the run intent, the recorded host or a
+	 * release. Only after the gate and the fence are released does it render the read-only view with the note that says what
+	 * happened. Takes its own gate and fence (a caller must not hold either); never throws for a refusal.
+	 */
+	detach(request: DetachRequest): Promise<DetachHostResult>;
 }
 
 /** Show a stopped, blocked or resyncing session's history read-only. Never claims, launches or writes. */

@@ -185,7 +185,7 @@ import { registerCodeTheme } from "./wiring/code-theme-wiring";
 import { registerKeyHints, type KeyHintsHandle } from "./wiring/key-hints-wiring";
 import type { ContextSession, ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
-import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
+import type { HandOverResult, WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
 import { registerSessionActions } from "./wiring/session-actions";
 import { adoptSessionTitle } from "./wiring/session-title";
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
@@ -1064,6 +1064,7 @@ function windowRoutingDeps(): WindowRoutingDeps {
     revealExistingTab,
     isSessionTabInput: input => windowState().editorPanels.isSessionTabInput(input),
     electLocalController,
+    handOverSession,
     openSession,
     openSessionInMode,
     startNewSession,
@@ -2251,6 +2252,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.openProcess", () => s.sessionActions.openSelectedProcess(context, index)),
     registerDeskCommand("ompDesk.goToSession", () => s.sessionActions.goTo(context, index)),
     registerDeskCommand("ompDesk.switchToSessionWindow", (argument: unknown) => s.routing.switchToWindow(index, tabIdArgument(argument))),
+    registerDeskCommand("ompDesk.moveSessionHere", (argument: unknown) => moveSessionHere(context, index, argument)),
+    registerDeskCommand("ompDesk.moveSessionHere.palette", (argument: unknown) => moveSessionHere(context, index, argument)),
     registerDeskCommand("ompDesk.forgetSession", (argument: unknown) => s.sessionActions.forget(index, argument)),
     registerDeskCommand("ompDesk.deleteSession", (argument: unknown) => s.sessionActions.delete(index, argument)),
     registerDeskCommand("ompDesk.stopSessionHost", (argument: unknown) =>
@@ -3894,6 +3897,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
   });
   const transitions = new LocalTransitions({
     index, records, window: transitionWindow(index), chat, stop, control, exit, writer, attachBrokerClient, launcher, log,
+    brokerWatches: windowState().brokerWatches,
   });
   return {
     index,
@@ -5173,7 +5177,8 @@ function presentRestoreOutcome(
     case "conflict": {
       log.error(`tab ${tabId}: conflict (${outcome.kind}): ${outcome.detail}`);
       presentConflict(index, tabId, outcome.detail);
-      showError(`${CONFLICT_LABEL[outcome.kind]}. ${outcome.detail}`);
+      if (outcome.kind === "claim-conflict") showClaimConflict(tabId, `${CONFLICT_LABEL[outcome.kind]}. ${outcome.detail}`);
+      else showError(`${CONFLICT_LABEL[outcome.kind]}. ${outcome.detail}`);
       return;
     }
     case "failed":
@@ -5194,6 +5199,41 @@ function presentConflict(index: SessionIndex, tabId: string, detail: string): vo
     return;
   }
   s.guestDispatcher.presentUnavailable(index, tabId, detail, "blocked");
+}
+
+/**
+ * The window's part of giving a live session to another window (ADR-0080). The runtime's `detach` takes the tab's
+ * gate, re-reads under it, drops this window's conversation and record of the session, releases the claim without
+ * touching the process, and renders the read-only view with its note. What stays here: forget what this window
+ * remembered of the run, repaint, and tell the user which window asked.
+ */
+async function handOverSession(
+  index: SessionIndex,
+  request: { readonly tabId: string; readonly incarnation: string; readonly binding: string | null },
+  asker: string,
+): Promise<HandOverResult> {
+  const s = windowState();
+  const { tabId } = request;
+  const title = index.get(tabId)?.title ?? null;
+  const result = await s.sessionRuntime.detach({ conversation: tabId, incarnation: request.incarnation, binding: request.binding });
+  if (result.status === "refused") {
+    log.info(`tab ${tabId}: handover refused (${result.code})`);
+    return { status: "refused", code: result.code };
+  }
+  if (result.status === "failed") {
+    log.error(`tab ${tabId}: handover could not release the claim (still held here: ${result.stillHeld})`);
+    refreshGuestContext();
+    refreshLauncher({ ownership: true });
+    return { status: "unfinished" };
+  }
+  log.info(`tab ${tabId}: handed over to window "${asker}"; the process was not stopped`);
+  s.outcomes.delete(tabId);
+  forgetTurnActivity(index, tabId);
+  s.routing.publishSnapshot();
+  refreshGuestContext();
+  refreshLauncher({ ownership: true });
+  showInfo(`The session${title === null ? "" : ` "${title}"`} was moved to ${asker.length === 0 ? "another window" : `the window "${asker}"`}, which asked for it. It keeps running there.`);
+  return { status: "moved" };
 }
 
 // Panels and the guest link
@@ -9894,6 +9934,26 @@ function showWarning(message: string): void {
 
 function showInfo(message: string): void {
   void vscode.window.showInformationMessage(`OMP Desk: ${message}`);
+}
+
+/** The action of the notice a window shows when a session it opened is held by another window (ADR-0080). */
+const MOVE_TO_THIS_WINDOW_ACTION = "Move to This Window";
+
+/** Tell the user another window holds the session, and offer to move it here (`ompDesk.moveSessionHere`). */
+function showClaimConflict(tabId: string, message: string): void {
+  void vscode.window.showErrorMessage(`OMP Desk: ${message}`, MOVE_TO_THIS_WINDOW_ACTION).then(choice => {
+    if (choice === MOVE_TO_THIS_WINDOW_ACTION) void vscode.commands.executeCommand("ompDesk.moveSessionHere", tabId);
+  });
+}
+
+/** `ompDesk.moveSessionHere`: the row's session, else the editor in front, else the active session, as Close and Rename resolve it. */
+async function moveSessionHere(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+  const target = sessionTargetFromArgument(index, argument);
+  if (target === null) {
+    showWarning("Select an OMP session to move.");
+    return;
+  }
+  await windowState().routing.moveSessionHere(context, index, target.tabId);
 }
 
 function messageOf(error: unknown): string {

@@ -18,10 +18,10 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { URI } from "vscode-uri";
 import { sessionIncarnation } from "../host/window-registry.ts";
 import type { WindowRegistry, WindowSnapshot } from "../host/window-registry.ts";
-import { awaitPendingLaunchAnswer, awaitReloadTakenUp, awaitRequestAnswer, pendingKeyOf, postModelsRequest, postPendingLaunch, postReloadRequest, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
+import { awaitHandoverAnswer, awaitPendingLaunchAnswer, awaitReloadTakenUp, awaitRequestAnswer, pendingKeyOf, postHandoverRequest, postModelsRequest, postPendingLaunch, postReloadRequest, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
 import type { LoggedLine } from "../shared/logger.ts";
 import { recordingLogger } from "../shared/logger.ts";
-import type { LaunchAction, LaunchRequest, ServeContext, ServeOutcome, StopRequest, SwitchRequest, WindowRequest } from "../host/window-requests.ts";
+import type { HandoverRequest, LaunchAction, LaunchRequest, ServeContext, ServeOutcome, StopRequest, SwitchRequest, WindowRequest } from "../host/window-requests.ts";
 import type { StubTabGroup } from "./vscode-test-stub.ts";
 import type { RoutedFolder, WindowRouting, WindowRoutingDeps } from "./window-routing.ts";
 
@@ -72,6 +72,9 @@ interface Target {
 	readonly uri: string | null;
 	readonly serve: ServeOutcome | null;
 	readonly pid?: number;
+	readonly label?: string;
+	readonly stale?: boolean;
+	readonly rows?: Record<string, unknown>;
 }
 
 const folderRow = (overrides: Partial<FolderRow> = {}): FolderRow =>
@@ -141,6 +144,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		unityStore: undefined as { get(key: string): unknown; update(key: string, value: unknown): Promise<void> } | undefined,
 		processes: null as { serveStopRequest(rows: readonly unknown[], progress: (done: number) => Promise<void>): Promise<readonly unknown[]> } | null,
 		liveFacts: new Map<string, Record<string, unknown>>(),
+		handOver: (async () => ({ status: "moved" })) as () => Promise<{ status: string; code?: string }>,
 		activity: new Map<string, string>(),
 		viewVisible: false,
 		listed: [] as Array<{ item: { state: string; tabId: string }; folder: string }>,
@@ -149,7 +153,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		setSnapshot: snapshot => { state.published.push(snapshot); return true; },
 		refresh: async () => { state.refreshes++; return false; },
 		flush: async () => { state.flushed++; },
-		windows: () => targets.map(target => ({ holderId: target.holderId, here: false, startedAt: STAMP, windowUri: target.uri, label: target.holderId, folders: [], liveCwds: [], rows: {}, focusedAt: null })),
+		windows: () => targets.map(target => ({ holderId: target.holderId, here: false, startedAt: STAMP, windowUri: target.uri, label: target.label ?? target.holderId, folders: [], liveCwds: [], rows: target.rows ?? {}, focusedAt: null, stale: target.stale ?? false })),
 		liveHolderPid: holderId => targets.find(target => target.holderId === holderId)?.pid ?? null,
 	};
 	const registryHandle = registry as unknown as WindowRegistry;
@@ -172,6 +176,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	const errors: string[] = [];
 	const lines: LoggedLine[] = [];
 	const released: unknown[] = [];
+	const handOvers: Array<{ request: { tabId: string; incarnation: string; binding: string | null }; asker: string }> = [];
 	const refreshedOwnership: string[][] = [];
 	const refreshedLauncher: number[] = [];
 	const providerRefreshes: unknown[] = [];
@@ -221,6 +226,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		startNewSession: async (_context, _index, folder) => { drafts.push({ cwd: folder.path }); },
 		resumeFromFolderHistory: async (_context, _index, _folders, folder, keepLiveView) => { resumed.push({ cwd: folder.path, keepLiveView }); },
 		openTab: async (...args) => { openedTabs.push(args.slice(2)); },
+		handOverSession: async (_index, request, asker) => { handOvers.push({ request, asker }); return state.handOver() as never; },
 		log: recordingLogger(lines),
 		timing: () => {},
 		info: message => { informed.push(message); },
@@ -233,7 +239,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	stub.window.state.focused = true;
 	return {
 		storageDir, served, state, deps, routing, registry, registryHandle, fake, index: fake as never, calls: stub.commands.calls, drafts, resumed, opened, selected, revealed, elected, openedTabs,
-		warnings, informed, errors, get logged(): string[] { return lines.map(line => line.message); }, lines, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
+		warnings, informed, errors, handOvers, get logged(): string[] { return lines.map(line => line.message); }, lines, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
 	};
 }
 
@@ -1198,6 +1204,221 @@ describe("serving another window's request to select a session's tab", () => {
 		w.state.liveHost = false;
 		await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, tabId);
 		assert.deepEqual(w.openedTabs, []);
+	});
+});
+
+describe("moving a live session to this window (ADR-0080)", () => {
+	const TAB = "tab:55555555-2222-4333-8444-555555555555";
+	const HOLDER = "owner-window";
+	const SLOT = "d".repeat(32);
+	const INCARNATION = "gen-1_none";
+	const holding = { verifiable: true, holderId: HOLDER, pid: 4242, ownerGeneration: "gen-1", windowUri: null };
+	const published = (status: string) => ({ [TAB]: { status, incarnation: INCARNATION, binding: `${SLOT}.3`, lastActivityAt: null } });
+	const MOVE = "Move";
+
+	/** This window asking, a holder window that answers `serve` (or never reads), and the claim that names it. */
+	async function asking(serve: ServeOutcome | null, holder: Partial<Target> = {}) {
+		const w = await world([{ holderId: HOLDER, uri: null, serve, pid: 4242, label: "Holder", rows: published("running"), ...holder }]);
+		w.state.entries.set(TAB, { tabId: TAB, cwd: FOLDER, ownership: { ownerGeneration: "gen-1" }, host: null });
+		w.state.claim = holding;
+		return w;
+	}
+	const moveHere = (w: World) => w.routing.moveSessionHere(undefined as never, w.index, TAB);
+	const posted = (w: World) => w.served.flatMap(served => served.kind === "handover" ? [served] : []);
+
+	describe("the window that asks", () => {
+		it("asks the holder for the exact run and binding it published, brings no window forward, and opens the session here through the ordinary open without routing", async () => {
+			const w = await asking({ ok: true, focused: false });
+			await moveHere(w);
+			assert.deepEqual(posted(w).map(request => [request.tabId, request.incarnation, request.binding, request.from]), [[TAB, INCARNATION, `${SLOT}.3`, "this-window"]]);
+			assert.deepEqual(w.calls, [], "no focus plan: no window is brought forward");
+			assert.deepEqual(w.opened, [["open-session", TAB, "opened", true, true, "row"]], "the ordinary open, routing suppressed, live view kept");
+			assert.deepEqual([w.informed, w.warnings, w.errors], [[], [], []], "a move that works is silent");
+		});
+
+		it("says so and posts nothing when nothing is held elsewhere (no claim, this window's claim, or a dead holder)", async () => {
+			const w = await asking({ ok: true, focused: false });
+			for (const claim of [null, { ...holding, holderId: "this-window" }]) {
+				w.state.claim = claim;
+				await moveHere(w);
+			}
+			w.state.claim = { ...holding, verifiable: false };
+			await moveHere(w);
+			assert.equal(w.informed.length, 3);
+			assert.match(w.informed[0]!, /not open in another window/);
+			assert.deepEqual(w.refreshedOwnership, [[TAB], [TAB], [TAB]], "the row is observed again");
+			assert.deepEqual([posted(w), w.opened], [[], []]);
+		});
+
+		it("names a holder on an older build and asks it nothing", async () => {
+			const w = await asking({ ok: true, focused: false }, { stale: true });
+			await moveHere(w);
+			assert.match(w.warnings[0] ?? "", /"Holder" runs an older OMP Desk .*Reload that window/);
+			assert.deepEqual([posted(w), w.opened], [[], []]);
+		});
+
+		for (const status of ["starting", "stopping", "restoring"]) {
+			it(`tells the user to try again when the holder is ${status} the session, and asks it nothing`, async () => {
+				const w = await asking({ ok: true, focused: false }, { rows: published(status) });
+				await moveHere(w);
+				assert.match(w.informed[0] ?? "", /is busy with this session; try again/);
+				assert.deepEqual([posted(w), w.opened], [[], []]);
+			});
+		}
+
+		it("ignores a published status of another run of the session, and posts without a binding", async () => {
+			const w = await asking({ ok: true, focused: false }, { rows: { [TAB]: { status: "starting", incarnation: "gen-0_other", binding: "none", lastActivityAt: null } } });
+			await moveHere(w);
+			assert.deepEqual(posted(w).map(request => request.binding), [null]);
+			assert.equal(w.opened.length, 1);
+		});
+
+		describe("a working or questioning session", () => {
+			const original = stub.window.showWarningMessage;
+			interface Question { readonly options: { readonly modal: boolean; readonly detail: string } }
+			const answering = (answer: string | undefined, asked: Question[]) => {
+				stub.window.showWarningMessage = (async (_message: string, options: Question["options"]) => { asked.push({ options }); return answer; }) as never;
+			};
+			after(() => { stub.window.showWarningMessage = original; });
+
+			for (const status of ["working", "question"]) {
+				it(`asks once, in a modal that states the cost, and moves when the user confirms (${status})`, async () => {
+					const w = await asking({ ok: true, focused: false }, { rows: published(status) });
+					const asked: Question[] = [];
+					answering(MOVE, asked);
+					await moveHere(w);
+					assert.equal(asked.length, 1);
+					assert.equal(asked[0]?.options.modal, true);
+					assert.match(asked[0]?.options.detail ?? "", /keeps running.*Host-tool calls.*fail once.*not resent.*composer/s);
+					assert.deepEqual([posted(w).length, w.opened.length], [1, 1]);
+				});
+			}
+
+			it("asks nothing of the holder when the user dismisses the question", async () => {
+				const w = await asking({ ok: true, focused: false }, { rows: published("working") });
+				answering(undefined, []);
+				await moveHere(w);
+				assert.deepEqual([posted(w), w.opened, w.informed, w.warnings], [[], [], [], []]);
+			});
+
+			it("does not ask about an idle session", async () => {
+				const w = await asking({ ok: true, focused: false }, { rows: published("waiting") });
+				const asked: Question[] = [];
+				answering(MOVE, asked);
+				await moveHere(w);
+				assert.deepEqual([asked, w.opened.length], [[], 1]);
+			});
+		});
+
+		const refusals: Array<[string, RegExp, "info" | "warn"]> = [
+			["not-holder", /no longer holds this run of the session/, "info"],
+			["busy", /stopping, closing, restarting or switching the view of this session; try again/, "info"],
+			["terminal", /A Terminal session cannot be moved/, "info"],
+			["stale-build", /runs an older OMP Desk .*Reload that window/, "warn"],
+			["unfinished", /began moving the session and could not finish\. Its editor shows how to reconnect it there\. The session is still running/, "warn"],
+		];
+		for (const [reason, sentence, level] of refusals) {
+			it(`reports a holder's ${reason} refusal in its own sentence and opens nothing`, async () => {
+				const w = await asking({ ok: false, focused: false, refusal: reason as never });
+				await moveHere(w);
+				assert.match((level === "info" ? w.informed : w.warnings)[0] ?? "", sentence);
+				assert.deepEqual(w.opened, []);
+				assert.deepEqual(w.refreshedOwnership, [[TAB]]);
+			});
+		}
+
+		it("hedges when the holder answers that it could not do it, without saying that nothing was moved", async () => {
+			const w = await asking({ ok: false, focused: false });
+			await moveHere(w);
+			assert.match(w.warnings[0] ?? "", /could not move the session\. It is still running there or may have been moved; refresh/);
+			assert.doesNotMatch(w.warnings[0] ?? "", /nothing was moved/i);
+			assert.deepEqual(w.opened, []);
+		});
+
+		it("says that the session is still running and how to adopt it when the ordinary open throws", async () => {
+			const w = await asking({ ok: true, focused: false });
+			w.deps.openSession = async () => { throw new Error("no editor"); };
+			await moveHere(w);
+			assert.match(w.errors[0] ?? "", /released by the other window but could not be opened here: no editor\. It is still running; click it in any window/);
+		});
+
+		it("moves nothing for a command invoked on no session", async () => {
+			const w = await asking({ ok: true, focused: false });
+			await w.routing.moveSessionHere(undefined as never, w.index, null);
+			assert.deepEqual([posted(w), w.opened, w.informed, w.warnings], [[], [], [], []]);
+		});
+	});
+
+	describe("the window that holds the session", () => {
+		const request = { kind: "handover", version: 1, id: "id-handover-1", to: "this-window", from: "asker", createdAt: STAMP, tabId: TAB, incarnation: INCARNATION, binding: `${SLOT}.3` } as HandoverRequest;
+		const holderWorld = () => world([{ holderId: "asker", uri: null, serve: null, label: "Asker" }]);
+		const serve = (w: World, override: Partial<HandoverRequest> = {}, context: ServeContext = wanted) => w.routing.serveHandoverRequest(w.index, { ...request, ...override }, context);
+
+		it("hands the exact run over and answers ok when the runtime detached, naming the asking window", async () => {
+			const w = await holderWorld();
+			assert.deepEqual(await serve(w), { ok: true, focused: false });
+			assert.deepEqual(w.handOvers, [{ request: { tabId: TAB, incarnation: INCARNATION, binding: `${SLOT}.3` }, asker: "Asker" }]);
+		});
+
+		it("passes a request that names no binding on as such", async () => {
+			const w = await holderWorld();
+			await serve(w, { binding: null });
+			assert.equal(w.handOvers[0]?.request.binding, null);
+		});
+
+		it("refuses stale-build before reading anything else, when the installed package changed under this window", async () => {
+			const w = await holderWorld();
+			w.state.packageChanged = true;
+			assert.deepEqual(await serve(w), { ok: false, focused: false, refusal: "stale-build" });
+			assert.deepEqual([w.handOvers, w.state.refreshes], [[], 0]);
+		});
+
+		it("refuses an asker that is not another live window of the registry, touching nothing", async () => {
+			const w = await holderWorld();
+			assert.deepEqual(await serve(w, { from: "stranger" }), { ok: false, focused: false, refusal: "not-holder" });
+			assert.deepEqual(await serve(w, { from: "this-window" }), { ok: false, focused: false, refusal: "not-holder" });
+			assert.deepEqual(w.handOvers, []);
+		});
+
+		it("does not act for a requester that no longer waits", async () => {
+			const w = await holderWorld();
+			assert.deepEqual(await serve(w, {}, { stillWanted: async () => false, progress: async () => {} }), { ok: false, focused: false });
+			assert.deepEqual(w.handOvers, []);
+		});
+
+		for (const code of ["not-holder", "busy", "terminal"] as const) {
+			it(`answers the runtime's ${code} refusal as that reason`, async () => {
+				const w = await holderWorld();
+				w.state.handOver = async () => ({ status: "refused", code });
+				assert.deepEqual(await serve(w), { ok: false, focused: false, refusal: code });
+			});
+		}
+
+		it("answers a detach that began and could not finish as unfinished", async () => {
+			const w = await holderWorld();
+			w.state.handOver = async () => ({ status: "unfinished" });
+			assert.deepEqual(await serve(w), { ok: false, focused: false, refusal: "unfinished" });
+		});
+
+		it("answers a bare not-ok when the window's own part throws", async () => {
+			const w = await holderWorld();
+			w.state.handOver = async () => { throw new Error("boom"); };
+			assert.deepEqual(await serve(w), { ok: false, focused: false });
+			assert.ok(w.logged.some(line => /handover request .*boom/.test(line)));
+		});
+
+		it("is served from the request directory and answered to the asking window as moved", async () => {
+			const w = await holderWorld();
+			w.routing.serveRequests(undefined as never, w.index, { identityKeyOf: (value: string) => value } as never);
+			try {
+				const id = await postHandoverRequest(w.storageDir, { to: "this-window", from: "asker", tabId: TAB, incarnation: INCARNATION, binding: null });
+				for (let turns = 0; turns < 5; turns++) { w.routing.rescanRequests(); await nextTurn(); }
+				assert.deepEqual(await awaitHandoverAnswer(w.storageDir, "this-window", id), { kind: "moved" });
+				assert.deepEqual(w.handOvers.map(handOver => handOver.asker), ["Asker"]);
+			} finally {
+				w.routing.dispose();
+			}
+		});
 	});
 });
 

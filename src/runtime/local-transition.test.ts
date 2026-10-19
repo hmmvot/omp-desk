@@ -20,15 +20,25 @@ import { build } from "esbuild";
 import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session.ts";
 import type * as Module from "./local-transition.ts";
 import type { RuntimeRecord } from "./runtime-record.ts";
-import type { ReplaceWriterRequest, StopRequest, TransitionPhase, TransitionToken } from "./session-runtime.ts";
+import type { DetachRequest, ReplaceWriterRequest, StopRequest, TransitionPhase, TransitionToken } from "./session-runtime.ts";
+import type * as IndexModule from "../host/session-index.ts";
+import type { DetachLiveClaimResult } from "../host/session-index.ts";
 
-let mod: typeof Module;
 let temp: string;
+let mod: typeof Module;
+let indexMod: typeof IndexModule;
 before(async () => {
 	temp = await mkdtemp(path.join(tmpdir(), "omp-transition-"));
-	const outfile = path.join(temp, "local-transition.mjs");
-	await build({ entryPoints: [fileURLToPath(new URL("./local-transition.ts", import.meta.url))], outfile, bundle: true, platform: "node", format: "esm", target: "node20" });
-	mod = (await import(pathToFileURL(outfile).href)) as typeof Module;
+	// One bundle with a shared chunk, so the index classes the transitions test with are the ones the module checks against.
+	await build({
+		entryPoints: {
+			"local-transition": fileURLToPath(new URL("./local-transition.ts", import.meta.url)),
+			"session-index": fileURLToPath(new URL("../host/session-index.ts", import.meta.url)),
+		},
+		outdir: temp, outExtension: { ".js": ".mjs" }, bundle: true, splitting: true, platform: "node", format: "esm", target: "node20",
+	});
+	mod = (await import(pathToFileURL(path.join(temp, "local-transition.mjs")).href)) as typeof Module;
+	indexMod = (await import(pathToFileURL(path.join(temp, "session-index.mjs")).href)) as typeof IndexModule;
 });
 after(async () => { await rm(temp, { recursive: true, force: true }); });
 
@@ -46,6 +56,9 @@ interface FixtureOptions {
 	readonly broker?: boolean;
 	readonly binding?: { readonly tabId: string; readonly generation: number } | null;
 }
+
+/** What the fixture's chat runtime was asked to render read-only. */
+interface RenderedView { readonly file: string | null; readonly cwd: string; readonly title: string | null; readonly reason: string; readonly phase?: string }
 
 /** One conversation with one runtime, every collaborator recording what it was asked and in which order. */
 interface TransitionFixture {
@@ -66,6 +79,20 @@ interface TransitionFixture {
 	/** Make the next `requestStop` wait for `release`, holding the gate. */
 	blockStop(): { readonly entered: Promise<void>; release(): void };
 	attachment(): number;
+	/** The row the index reports, the views rendered (and whether the gate was held at each), the expectations `detachLiveClaim` was given. */
+	readonly entry: { ownership: { ownerGeneration: string } | null; sessionFile: string | null; cwd: string; title: string; runIntent: string; host: { startedAt: string; pid: number; rpc: Record<string, unknown> } | null };
+	readonly views: RenderedView[];
+	readonly viewedUnderGate: boolean[];
+	readonly detachCalls: unknown[];
+	readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
+	setClaim(next: { ok: boolean; claim: { holderId: string | null; ownerGeneration: string | null } | null }): void;
+	/** What a fresh claim read returns once `detachLiveClaim` ran. */
+	setClaimAfterDetach(next: { ok: boolean; claim: { holderId: string | null; ownerGeneration: string | null } | null }): void;
+	setLive(next: boolean): void;
+	setDetach(next: DetachLiveClaimResult | Error): void;
+	failView(): void;
+	/** The incarnation a requester names for the row. */
+	incarnation(): string;
 }
 
 function fixture(options: FixtureOptions = {}): TransitionFixture {
@@ -80,22 +107,51 @@ function fixture(options: FixtureOptions = {}): TransitionFixture {
 	let checkAnswer = true;
 	const runtime = {
 		kind: options.kind ?? "chat", pid: 4242, cwd: "C:/proj", stopping: options.stopping ?? false,
-		identity: { slot: "host:one", brokerId: "b1", brokerGeneration: "g1", childCreationTime: "created-1" },
+		identity: { slot: "host:one", brokerId: "b1", brokerGeneration: "g1", childPid: 4242, childCreationTime: "created-1" },
 	} as unknown as SessionHostRuntime;
 	const record = {
 		tabId: TAB, slotId: "slot-1", runtime, control: null, controlFailure: null as string | null, endedNotice: null,
 		transitioning: false, nativeWatch: (() => { order.push("watch"); }) as (() => void) | null, pipeline: null,
 	} satisfies RuntimeRecord as RuntimeRecord;
+	const entry = {
+		ownership: { ownerGeneration: "owner-1" }, sessionFile: null as string | null, cwd: "C:/proj", title: "A title", runIntent: "running",
+		host: { startedAt: "2026-10-20T10:00:00.000Z", pid: 4242, rpc: { slot: "host:one", brokerId: "b1", brokerGeneration: "g1", childPid: 4242, childCreationTime: "created-1" } },
+	};
+	let claimRead: { ok: boolean; claim: { holderId: string | null; ownerGeneration: string | null } | null } = { ok: true, claim: { holderId: "holder-1", ownerGeneration: "owner-1" } };
+	let live = true;
+	let detachResult: DetachLiveClaimResult | Error = { status: "released" };
+	let viewFails = false;
+	let claimAfterDetach: typeof claimRead | null = null;
+	let gateHeld = false;
+	const views: RenderedView[] = [];
+	const viewedUnderGate: boolean[] = [];
+	const detachCalls: unknown[] = [];
+	const brokerWatches = new WeakMap<SessionHostRuntime, () => void>();
+	brokerWatches.set(runtime, () => { order.push("broker-watch"); });
 	let tail: Promise<unknown> = Promise.resolve();
 	const index = {
 		lifecycle: {
 			run: <T>(tabId: string, work: (lease: object) => Promise<T>): Promise<T> => {
-				const running = tail.then(async () => { gateHolders.push(tabId); return await work({}); });
+				const running = tail.then(async () => {
+					gateHolders.push(tabId);
+					gateHeld = true;
+					try { return await work({}); } finally { gateHeld = false; }
+				});
 				tail = running.then(() => undefined, () => undefined);
 				return running;
 			},
 		},
-		get: () => ({ ownership: { ownerGeneration: "owner-1" }, sessionFile: null }),
+		claimHolder: { id: "holder-1" },
+		get: () => entry,
+		hasLiveHost: () => live,
+		observeOwnership: async () => claimRead,
+		detachLiveClaim: async (_tab: string, expected: unknown) => {
+			order.push("detach-claim");
+			detachCalls.push(expected);
+			if (claimAfterDetach !== null) claimRead = claimAfterDetach;
+			if (detachResult instanceof Error) throw detachResult;
+			return detachResult;
+		},
 		slotBinding: () => options.binding === undefined ? { tabId: TAB, generation: 3 } : options.binding,
 		setRunIntent: async (_tab: string, intent: string) => { order.push(`intent:${intent}`); },
 		closeSession: async () => { order.push("close"); },
@@ -117,6 +173,12 @@ function fixture(options: FixtureOptions = {}): TransitionFixture {
 		chat: {
 			sessionOf: () => ({ setMutationFence: (reason: string | null) => { mutationFences.push(reason); } }) as never,
 			release: () => { order.push("release-chat"); },
+			showViewOnly: async (_conversation: string, input: { readonly phase?: string; readonly reason: string; readonly file: string | null; readonly cwd: string; readonly title: string | null }) => {
+				order.push(`view:${input.phase}`);
+				views.push(input);
+				viewedUnderGate.push(gateHeld);
+				if (viewFails) throw new Error("the transcript could not be read");
+			},
 		},
 		stop: {
 			requestStop: async (_record, _runtime, mode) => {
@@ -132,6 +194,7 @@ function fixture(options: FixtureOptions = {}): TransitionFixture {
 		attachBrokerClient: async () => options.broker === false ? null : ({}) as never,
 		launcher: () => { throw new Error("The fixture launches nothing."); },
 		log: silentLogger,
+		brokerWatches,
 	});
 	return {
 		transitions, record, runtime, order, gateHolders, fenced, mutationFences, stopCalls,
@@ -146,6 +209,13 @@ function fixture(options: FixtureOptions = {}): TransitionFixture {
 			return { entered: entered.promise, release: () => { blocked = null; released.resolve(); } };
 		},
 		attachment: () => transitions.snapshot(TAB)?.attachment as number,
+		entry, views, viewedUnderGate, detachCalls, brokerWatches,
+		setClaim: (next: typeof claimRead) => { claimRead = next; },
+		setClaimAfterDetach: (next: typeof claimRead) => { claimAfterDetach = next; },
+		setLive: (next: boolean) => { live = next; },
+		setDetach: (next: DetachLiveClaimResult | Error) => { detachResult = next; },
+		failView: () => { viewFails = true; },
+		incarnation: () => "owner-1_2026-10-20T10:00:00.000Z.4242",
 	};
 }
 
@@ -209,9 +279,9 @@ describe("the admission fence", () => {
 				fenced: () => { if (first) { first = false; throw new Error("projection failed"); } },
 				check: () => true, prepare: async () => undefined, endTerminal: () => undefined, stopped: () => undefined,
 			},
-			chat: { sessionOf: () => null, release: () => undefined }, stop: {} as never,
+			chat: { sessionOf: () => null, release: () => undefined, showViewOnly: async () => undefined }, stop: {} as never,
 			control: {} as never, exit: {} as never, writer: { pid: async () => null }, attachBrokerClient: async () => null,
-			launcher: () => { throw new Error("unused"); }, log: silentLogger,
+			launcher: () => { throw new Error("unused"); }, brokerWatches: new WeakMap(), log: silentLogger,
 		});
 		assert.throws(() => failing.beginTransition({ conversation: TAB, target: null }), /projection failed/);
 		assert.equal(f.record.transitioning, false);
@@ -405,5 +475,194 @@ describe("replaceWriter refusals", () => {
 		await holding;
 		await f.transitions.readTransitionFacts({ conversation: TAB, target: f.attachment() });
 		assert.deepEqual(f.order.filter(entry => entry === "replaceHost" || entry === "prepare"), [], "the expired replacement is not served late");
+	});
+});
+
+describe("detach", () => {
+	const request = (f: TransitionFixture, overrides: Partial<DetachRequest> = {}): DetachRequest => ({ conversation: TAB, binding: "slot-1.3", ...overrides, incarnation: overrides.incarnation ?? f.incarnation() });
+	/** What an untouched fixture records: the broker watch is still installed and nothing was asked of a collaborator. */
+	const untouched = (f: TransitionFixture): void => {
+		assert.deepEqual(f.order, [], "no collaborator was asked anything");
+		assert.notEqual(f.record.runtime, null);
+		assert.equal(f.record.transitioning, false);
+		assert.deepEqual(f.views, []);
+		assert.deepEqual(f.detachCalls, []);
+	};
+
+	it("drops the conversation, ends the record and its watches, closes control keeping its credentials, releases the claim, and only then renders", async () => {
+		const f = fixture();
+		const result = await f.transitions.detach(request(f));
+		assert.deepEqual(result, { status: "detached" });
+		assert.deepEqual(f.order, ["release-chat", "broker-watch", "watch", "terminal", "dispose-control", "detach-claim", "view:blocked"]);
+		assert.deepEqual(f.viewedUnderGate, [false], "the read-only view is rendered after the gate is let go");
+		assert.deepEqual(f.gateHolders, [TAB], "one hold of the gate");
+		assert.equal(f.record.runtime, null);
+		assert.equal(f.record.nativeWatch, null);
+		assert.equal(f.brokerWatches.has(f.runtime), false, "the broker watch is disposed and forgotten");
+		assert.deepEqual(f.detachCalls, [{ pid: 4242, slot: "host:one", brokerId: "b1", brokerGeneration: "g1", childPid: 4242, childCreationTime: "created-1" }]);
+		assert.deepEqual(f.views, [{ file: null, cwd: "C:/proj", title: "A title", reason: "This session was moved to another window.", phase: "blocked" }]);
+	});
+
+	it("stops nothing and writes nothing: no stop, no intent, no close, no credential release, no broker retirement", async () => {
+		const f = fixture();
+		await f.transitions.detach(request(f));
+		assert.deepEqual(f.stopCalls, []);
+		for (const forbidden of ["intent:stopped", "intent:running", "close", "promote", "replaceHost", "release-control", "retire", "stopped:session", "stopped:local-copy"]) {
+			assert.ok(!f.order.includes(forbidden), forbidden);
+		}
+	});
+
+	it("holds the fence for the hold of the gate and lowers it on every outcome", async () => {
+		const f = fixture();
+		await f.transitions.detach(request(f));
+		assert.deepEqual([f.record.transitioning, f.fenced, f.mutationFences], [false, [true, false], [mod.TRANSITION_FENCE_REASON, null]]);
+		const unfinished = fixture();
+		unfinished.setDetach({ status: "claim-unreleased", stillHeld: true });
+		await unfinished.transitions.detach(request(unfinished));
+		assert.deepEqual([unfinished.record.transitioning, unfinished.fenced], [false, [true, false]]);
+		const refused = fixture();
+		refused.setDetach(new Error("the claim file is unreadable"));
+		await refused.transitions.detach(request(refused));
+		assert.deepEqual([refused.record.transitioning, refused.fenced], [false, [true, false]]);
+	});
+
+	it("answers not-holder to a second detach in a row and touches nothing for it", async () => {
+		const f = fixture();
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "detached" });
+		const order = [...f.order];
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "refused", code: "not-holder" });
+		assert.deepEqual(f.order, order);
+		assert.equal(f.views.length, 1);
+		assert.equal(f.detachCalls.length, 1);
+	});
+
+	it("serves two queued requests one after the other: the first moves it, the second finds it no longer held here", async () => {
+		const f = fixture();
+		const [first, second] = await Promise.all([f.transitions.detach(request(f)), f.transitions.detach(request(f))]);
+		assert.deepEqual([first, second], [{ status: "detached" }, { status: "refused", code: "not-holder" }]);
+		assert.equal(f.detachCalls.length, 1);
+	});
+
+	it("answers busy while a stop, close, restart or view switch holds the fence, and touches nothing", async () => {
+		const f = fixture();
+		const token = f.transitions.beginTransition({ conversation: TAB, target: f.attachment() });
+		const order = [...f.order];
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "refused", code: "busy" });
+		assert.deepEqual([f.order, f.views, f.detachCalls, f.record.transitioning], [order, [], [], true], "the flow's own fence is not lowered by the refusal");
+		f.transitions.endTransition(token, "none");
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "detached" });
+	});
+
+	it("queues behind a stop in flight and then finds the session no longer held here, never painting 'moved' over a stopped session", async () => {
+		const f = fixture();
+		const target = f.attachment();
+		const token = f.transitions.beginTransition({ conversation: TAB, target });
+		const hold = f.blockStop();
+		const stopping = f.transitions.stop(session(token, target));
+		await hold.entered;
+		const detaching = f.transitions.detach(request(f));
+		hold.release();
+		assert.equal((await stopping).status, "stopped");
+		assert.deepEqual(await detaching, { status: "refused", code: "not-holder" });
+		assert.deepEqual(f.views, []);
+		assert.deepEqual(f.detachCalls, []);
+	});
+
+	it("answers not-holder for a run it does not hold: another incarnation, another editor binding, no runtime, no live host", async () => {
+		const other = fixture();
+		assert.deepEqual(await other.transitions.detach(request(other, { incarnation: `${other.incarnation()}9` })), { status: "refused", code: "not-holder" });
+		untouched(other);
+		const rebound = fixture();
+		assert.deepEqual(await rebound.transitions.detach(request(rebound, { binding: "slot-1.2" })), { status: "refused", code: "not-holder" });
+		assert.deepEqual(await rebound.transitions.detach(request(rebound, { binding: "slot-9.3" })), { status: "refused", code: "not-holder" });
+		untouched(rebound);
+		const moved = fixture({ binding: { tabId: "tab:other", generation: 3 } });
+		assert.deepEqual(await moved.transitions.detach(request(moved)), { status: "refused", code: "not-holder" });
+		untouched(moved);
+		const none = fixture();
+		none.record.runtime = null;
+		assert.deepEqual(await none.transitions.detach(request(none)), { status: "refused", code: "not-holder" });
+		const dead = fixture();
+		dead.setLive(false);
+		assert.deepEqual(await dead.transitions.detach(request(dead)), { status: "refused", code: "not-holder" });
+		untouched(dead);
+		const unbound = fixture({ binding: null });
+		assert.deepEqual(await unbound.transitions.detach(request(unbound, { binding: null })), { status: "detached" }, "a request that names no binding is not fenced to one");
+	});
+
+	it("answers not-holder when the row records another outcome than a running host this window serves", async () => {
+		for (const change of [
+			(f: TransitionFixture) => { f.entry.runIntent = "stopped"; },
+			(f: TransitionFixture) => { f.entry.host = null; },
+			(f: TransitionFixture) => { f.entry.host!.pid = 1; },
+			(f: TransitionFixture) => { f.entry.host!.rpc = { ...f.entry.host!.rpc, brokerGeneration: "g2" }; },
+			(f: TransitionFixture) => { f.entry.host!.rpc = { ...f.entry.host!.rpc, childCreationTime: "created-2" }; },
+			(f: TransitionFixture) => { f.entry.ownership = null; },
+		]) {
+			const f = fixture();
+			const incarnation = f.incarnation();
+			change(f);
+			assert.deepEqual(await f.transitions.detach(request(f, { incarnation })), { status: "refused", code: "not-holder" }, change.toString());
+			untouched(f);
+		}
+	});
+
+	it("answers not-holder unless a fresh claim read names this window and this owner generation", async () => {
+		for (const claim of [
+			{ ok: false, claim: null },
+			{ ok: true, claim: null },
+			{ ok: true, claim: { holderId: "another-window", ownerGeneration: "owner-1" } },
+			{ ok: true, claim: { holderId: "holder-1", ownerGeneration: "owner-2" } },
+			{ ok: true, claim: { holderId: null, ownerGeneration: null } },
+		]) {
+			const f = fixture();
+			f.setClaim(claim);
+			assert.deepEqual(await f.transitions.detach(request(f)), { status: "refused", code: "not-holder" }, JSON.stringify(claim));
+			untouched(f);
+		}
+	});
+
+	it("answers terminal for a Terminal runtime and touches nothing", async () => {
+		const f = fixture({ kind: "terminal" });
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "refused", code: "terminal" });
+		untouched(f);
+	});
+
+	it("says the session was moved elsewhere, and does not call it moved, when the claim is no longer this window's to release", async () => {
+		const f = fixture();
+		f.setDetach({ status: "target-changed" });
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "refused", code: "not-holder" });
+		assert.deepEqual(f.order, ["release-chat", "broker-watch", "watch", "terminal", "dispose-control", "detach-claim", "view:blocked"], "the connection was already dropped");
+		assert.deepEqual(f.views.map(view => view.reason), ["This session is open in another window."]);
+	});
+
+	it("reports an unreleased claim with whether it is still held, and offers a reconnect only while the claim still names this window", async () => {
+		const held = fixture();
+		held.setDetach({ status: "claim-unreleased", stillHeld: true });
+		assert.deepEqual(await held.transitions.detach(request(held)), { status: "failed", code: "claim-unreleased", stillHeld: true });
+		assert.deepEqual(held.views.map(view => view.phase), ["blocked"]);
+		assert.deepEqual(held.views.map(view => view.reason), ["The move could not finish. Open the session here to reconnect it."]);
+		assert.deepEqual(held.viewedUnderGate, [false]);
+		const gone = fixture();
+		gone.setDetach({ status: "claim-unreleased", stillHeld: false });
+		gone.setClaimAfterDetach({ ok: true, claim: { holderId: "another-window", ownerGeneration: "owner-1" } });
+		assert.deepEqual(await gone.transitions.detach(request(gone)), { status: "failed", code: "claim-unreleased", stillHeld: false });
+		assert.deepEqual(gone.views.map(view => view.reason), ["This session is open in another window."]);
+	});
+
+	it("maps a lease the index refuses to not-holder and any other failure to an unfinished handover, never throwing", async () => {
+		const lease = fixture();
+		lease.setDetach(new indexMod.SessionIndexError("invalid-input", "A lifecycle lease for another tab cannot run an operation."));
+		assert.deepEqual(await lease.transitions.detach(request(lease)), { status: "refused", code: "not-holder" });
+		const broken = fixture();
+		broken.setDetach(new Error("disk full"));
+		assert.deepEqual(await broken.transitions.detach(request(broken)), { status: "failed", code: "claim-unreleased", stillHeld: true });
+	});
+
+	it("keeps its answer when the read-only view cannot be rendered", async () => {
+		const f = fixture();
+		f.failView();
+		assert.deepEqual(await f.transitions.detach(request(f)), { status: "detached" });
+		assert.equal(f.record.runtime, null);
 	});
 });

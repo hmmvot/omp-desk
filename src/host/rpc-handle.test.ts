@@ -415,6 +415,47 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 		);
 	});
 
+	it("repeats a refused input claim a bounded number of times when asked, winning it once the previous owner lets go", { timeout: TEST_TIMEOUT_MS }, async () => {
+		const slot = nextSlot();
+		const previous = await launchRpc(slot);
+		await previous.attach({ sinceSeq: 0 });
+		const adopter = await reattach(slot);
+		// A previous window's close reaches the broker after the adopter's first claim: the owner clears a little later.
+		const released = new Promise<void>(resolve => setTimeout(() => { void previous.releaseInput(previous.frontendId).then(resolve); }, 120));
+		await adopter.attach({ sinceSeq: 0, reclaimInput: { attempts: 20, intervalMs: 40 } });
+		await released;
+		assert.equal(adopter.inputOwned, true, "the adopter holds input before its attach returns");
+		assert.equal(previous.inputOwned, false);
+		const seen = watch(adopter);
+		await send(adopter, { type: "mark", name: "from-adopter" });
+		await seen.whenLine(marker("from-adopter"));
+	});
+
+	it("never takes input over: a frontend that keeps it stays the owner, and the retries end after their bound", { timeout: TEST_TIMEOUT_MS }, async () => {
+		const slot = nextSlot();
+		const owner = await launchRpc(slot);
+		await owner.attach({ sinceSeq: 0 });
+		const adopter = await reattach(slot);
+		const started = Date.now();
+		await adopter.attach({ sinceSeq: 0, reclaimInput: { attempts: 3, intervalMs: 30 } });
+		assert.ok(Date.now() - started >= 80, "three retries were made before it settled");
+		assert.equal(adopter.inputOwned, false);
+		assert.equal(owner.inputOwned, true, "the owner was never displaced");
+		await assert.rejects(send(adopter, { type: "mark", name: "nope" }), (error: unknown) => error instanceof RpcWriteError && error.code === "input-not-owner");
+		await send(owner, { type: "mark", name: "still-owner" });
+	});
+
+	it("does not retry a refused claim unless asked to", { timeout: TEST_TIMEOUT_MS }, async () => {
+		const slot = nextSlot();
+		const owner = await launchRpc(slot);
+		await owner.attach({ sinceSeq: 0 });
+		const adopter = await reattach(slot);
+		const started = Date.now();
+		await adopter.attach({ sinceSeq: 0 });
+		assert.ok(Date.now() - started < 500);
+		assert.equal(adopter.inputOwned, false);
+	});
+
 	it("reports input ownership live: takeover, release and disconnect reach the handle at once", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const first = await launchRpc(slot);

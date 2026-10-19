@@ -78,6 +78,16 @@ export type RpcChannelEvent =
 /** Codes a `writeLine` rejection carries in its `code` property. */
 export type RpcWriteErrorCode = "input-not-owner" | "child-exited" | "line-too-long" | "closed";
 
+/**
+ * A bounded wait for a previous frontend's input claim to clear: after a refused claim the handle tries again `attempts`
+ * more times, `intervalMs` apart, and then settles without input (reads work, writes are refused). Never a takeover: a
+ * frontend that really holds input keeps it. Only an attach that is known to follow a handover asks for it.
+ */
+export interface InputReclaim {
+	readonly attempts: number;
+	readonly intervalMs: number;
+}
+
 export interface RpcChannel {
 	/** Whether this frontend holds broker input on its current connection. Live: cleared by every loss. */
 	readonly inputOwned: boolean;
@@ -86,9 +96,10 @@ export interface RpcChannel {
 	/**
 	 * Connect (or reconnect after a `closed` event) and attach with a replay cursor. Idempotent per
 	 * connection: a second call on a live connection re-attaches with the new cursor. The handle claims
-	 * input on attach without takeover.
+	 * input on attach without takeover; `reclaimInput` asks it to repeat a claim the broker refused because another
+	 * frontend still owned input (see {@link InputReclaim}) before the replay is requested.
 	 */
-	attach(request: { sinceSeq: number }): Promise<RpcAttachResult>;
+	attach(request: { sinceSeq: number; reclaimInput?: InputReclaim }): Promise<RpcAttachResult>;
 	/** Write one whole stdin line (no trailing newline). Rejects with an error whose `code` is an {@link RpcWriteErrorCode}. */
 	writeLine(line: string): Promise<void>;
 	/** Subscribe to channel events; returns the unsubscribe function. */

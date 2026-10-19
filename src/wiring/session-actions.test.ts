@@ -165,7 +165,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			endTerminal: () => {},
 			stopped: () => {},
 		},
-		chat: { sessionOf: () => null, release: () => {} },
+		chat: { sessionOf: () => null, release: () => {}, showViewOnly: async () => {} },
 		stop: stopOperations,
 		control: { release: async () => {}, dispose: () => {} },
 		exit: { retireBroker: async () => {} },
@@ -173,6 +173,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		attachBrokerClient: async () => null,
 		launcher: () => { throw new Error("The fixture launches nothing."); },
 		log: silentLogger,
+		brokerWatches: new WeakMap(),
 	});
 	const runtime = new LocalSessionRuntime({
 		index: index as never,

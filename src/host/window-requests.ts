@@ -42,6 +42,10 @@
  * focus or ownership, and one that is not correlated to the request (version, id, shape) is
  * not an answer at all.
  *
+ * A **handover** request (Move to This Window, ADR-0080) names a session this window holds the claim of (`tabId`,
+ * `incarnation`, `binding`): the holder drops its view of the live session and releases its claim without stopping the
+ * process. It is taken up like a stop and answered with a refusal reason when the holder decides not to move the session.
+ *
  * Bringing the owner's window to the front is not done here: it is `vscode.openFolder` on
  * the owner's saved workspace or single-folder URI, planned by {@link planWindowSwitch}.
  */
@@ -109,6 +113,16 @@ export const STOP_WITHDRAW_TIMEOUT_MS = 10_000;
  * tell "the window never took the request up" from "the window took it up, finished and its files were swept".
  */
 export const STOP_STALL_GAP_MS = 5_000;
+
+/** A handover request nobody took up this long after it was posted is dropped by its receiver; the requester withdraws it at {@link HANDOVER_ACCEPT_TIMEOUT_MS}. */
+export const HANDOVER_REQUEST_TTL_MS = 12_000;
+/** How long a requester waits for the holder to take up a handover request before it withdraws it. */
+export const HANDOVER_ACCEPT_TIMEOUT_MS = 8_000;
+/** The handover counterparts of {@link STOP_WITHDRAW_TIMEOUT_MS} and {@link STOP_STALL_GAP_MS}. */
+export const HANDOVER_WITHDRAW_TIMEOUT_MS = STOP_WITHDRAW_TIMEOUT_MS;
+export const HANDOVER_STALL_GAP_MS = STOP_STALL_GAP_MS;
+/** The longest a requester waits for one handover answer, from the post. The holder's own work is not bounded by it. */
+export const HANDOVER_TOTAL_TIMEOUT_MS = 30_000;
 /** An `.accepted` file is take-up evidence for as long as a request can be active (the requester's total wait, with a margin); the ordinary {@link REQUEST_SWEEP_MS} must not erase it. */
 export const STOP_ACCEPTED_SWEEP_MS = STOP_TOTAL_TIMEOUT_MS + 300_000;
 /** Rows one stop request may name; a requester splits a longer list into several requests. */
@@ -208,6 +222,20 @@ export interface ModelsRequest extends RequestBase {
 	readonly kind: "models";
 }
 
+/**
+ * One request to hand a live session over: the claim holder drops its view of the session and releases its claim without
+ * stopping the process, so the requester can open it (ADR-0080). The fields fence the exact run the requester saw, as a
+ * select request's do; the holder acts only while it still holds that run, and the request is taken up before it acts.
+ */
+export interface HandoverRequest extends RequestBase {
+	readonly kind: "handover";
+	readonly tabId: string;
+	/** The run incarnation of the session the requester saw held. */
+	readonly incarnation: string;
+	/** `<editor slot>.<generation>` of the holder's editor binding the requester saw published for that run; `null` when it saw none. */
+	readonly binding: string | null;
+}
+
 /** What a receiver answers for one named row. */
 export type StopRowState =
 	/** The receiver's own flow stopped it and its broker is gone. */
@@ -226,11 +254,15 @@ export interface StopRowAnswer {
 }
 
 /** A request as a window receives it. */
-export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest | ReloadRequest | ModelsRequest;
+export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest | ReloadRequest | ModelsRequest | HandoverRequest;
 
 /** How long a request stays actionable. */
 export function requestTtlMs(request: Pick<WindowRequest, "kind">): number {
-	return request.kind === "launch" ? LAUNCH_REQUEST_TTL_MS : request.kind === "stop" ? STOP_REQUEST_TTL_MS : request.kind === "reload" ? RELOAD_REQUEST_TTL_MS : REQUEST_TTL_MS;
+	return request.kind === "launch" ? LAUNCH_REQUEST_TTL_MS
+		: request.kind === "stop" ? STOP_REQUEST_TTL_MS
+		: request.kind === "reload" ? RELOAD_REQUEST_TTL_MS
+		: request.kind === "handover" ? HANDOVER_REQUEST_TTL_MS
+		: REQUEST_TTL_MS;
 }
 
 /** What the owner did with a request: whether it selected the tab, and whether its window is in front. */
@@ -241,7 +273,9 @@ export interface ServeOutcome {
 	/**
 	 * Why a refusal is definite: the receiver decided before it began anything, so nothing was
 	 * started there. `stale-build`: the window runs an older OMP Desk than the one installed and
-	 * cannot build a view. Only a refusal can carry it.
+	 * cannot build a view. A handover's `not-holder`, `busy` and `terminal` say the same of the
+	 * session. `unfinished` is the one that is not: the holder began a handover and could not
+	 * finish it. Only a refusal can carry a reason.
 	 */
 	readonly refusal?: RefusalReason;
 	/** A stop request's per-row answers, in the order of the request's rows; only a successful outcome carries them. */
@@ -254,7 +288,10 @@ export interface ServeOutcome {
 }
 
 /** The reasons a refusal names; a refusal without one is the ordinary "could not do it". */
-export type RefusalReason = "stale-build";
+export type RefusalReason = "stale-build" | "not-holder" | "busy" | "terminal" | "unfinished";
+
+const REFUSAL_REASONS: readonly RefusalReason[] = ["stale-build", "not-holder", "busy", "terminal", "unfinished"];
+const isRefusalReason = (value: unknown): value is RefusalReason => REFUSAL_REASONS.includes(value as RefusalReason);
 
 /** What `serve` may ask while it works. */
 export interface ServeContext {
@@ -344,7 +381,7 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 		const identities = parseStopRows(rows);
 		return identities === null ? null : { kind, version: VERSION, id, to, from, createdAt, rows: identities };
 	}
-	if (kind !== "select") return null;
+	if (kind !== "select" && kind !== "handover") return null;
 	if (typeof tabId !== "string" || tabId.length === 0 || tabId.length > MAX_TAB_ID) return null;
 	if (typeof incarnation !== "string" || !INCARNATION_RE.test(incarnation)) return null;
 	if (binding !== null && !isBinding(binding)) return null;
@@ -362,8 +399,8 @@ function parseResponse(text: string, id: string): ServeOutcome | null {
 	if (typeof parsed !== "object" || parsed === null) return null;
 	const record = parsed as Record<string, unknown>;
 	if (record.version !== VERSION || record.id !== id || typeof record.ok !== "boolean" || typeof record.focused !== "boolean") return null;
-	// An answer of a build that predates a refusal reason has none; one with a reason this build does not know is no answer.
-	if (record.refusal !== undefined && (record.ok || record.refusal !== "stale-build")) return null;
+	// An answer of a build that predates a refusal reason has none; one with a reason this build does not know, or a reason on a success, is no answer.
+	if (record.refusal !== undefined && (record.ok || !isRefusalReason(record.refusal))) return null;
 	return { ok: record.ok, focused: record.focused, ...(record.refusal === undefined ? {} : { refusal: record.refusal }) };
 }
 
@@ -479,6 +516,36 @@ export async function postStopRequest(
 		from: request.from,
 		createdAt: new Date(now()).toISOString(),
 		rows: request.rows,
+	};
+	await writeRequest(storageDir, record, now);
+	return id;
+}
+
+/**
+ * Ask `to`, the claim holder of `tabId`, to give the live session up without stopping it. Resolves with the request id once the
+ * file is in place; the requester then waits with {@link awaitHandoverAnswer}. A window of a build that does not know the kind
+ * deletes the request and does nothing.
+ */
+export async function postHandoverRequest(
+	storageDir: string,
+	request: { readonly to: string; readonly from: string; readonly tabId: string; readonly incarnation: string; readonly binding: string | null },
+	now: () => number = Date.now,
+): Promise<string> {
+	if (!ID_RE.test(request.to) || !ID_RE.test(request.from)) throw new TypeError("a window request needs holder ids of letters, digits and dashes");
+	if (!INCARNATION_RE.test(request.incarnation)) throw new TypeError("a window request needs the session's run incarnation");
+	if (request.binding !== null && !isBinding(request.binding)) throw new TypeError("a window request names a binding as letters, digits, dots and dashes");
+	if (request.tabId.length === 0 || request.tabId.length > MAX_TAB_ID) throw new TypeError("a window request needs a tab id of at most 200 characters");
+	const id = randomUUID();
+	const record: HandoverRequest = {
+		kind: "handover",
+		version: VERSION,
+		id,
+		to: request.to,
+		from: request.from,
+		tabId: request.tabId,
+		incarnation: request.incarnation,
+		binding: request.binding,
+		createdAt: new Date(now()).toISOString(),
 	};
 	await writeRequest(storageDir, record, now);
 	return id;
@@ -623,7 +690,7 @@ export async function awaitRequestAnswer(
 		if (read.kind !== "missing") {
 			await fsp.rm(response, { force: true });
 			const outcome = read.kind === "text" ? parseResponse(read.text, id) : null;
-			if (outcome !== null) return !outcome.ok ? outcome.refusal ?? "refused" : outcome.focused ? "served" : "unfocused";
+			if (outcome !== null) return !outcome.ok ? (outcome.refusal === "stale-build" ? "stale-build" : "refused") : outcome.focused ? "served" : "unfocused";
 		}
 		if (Date.now() >= deadline) {
 			await fsp.rm(path.join(directory, `${to}.${id}${REQUEST_SUFFIX}`), { force: true });
@@ -675,37 +742,37 @@ export interface StopWaitOptions {
 	readonly now?: () => number;
 }
 
+/** The bounds of one taken-up wait: the module constants of the request kind that is waited for. */
+interface TakenUpBounds {
+	readonly acceptMs: number;
+	readonly withdrawMs: number;
+	readonly progressMs: number;
+	readonly totalMs: number;
+	readonly stallMs: number;
+}
+
+/** A wait that ended without an answer: the request was never taken up (`withdrawn`: this requester deleted it; otherwise it vanished unanswered), or whether the window acted is not known. */
+type TakenUpWait<R> = R | { readonly kind: "not-accepted"; readonly withdrawn: boolean } | { readonly kind: "silent"; readonly reason: string };
+
 /**
- * Wait for the answer to stop request `id`, which names `rowCount` rows.
- *
- * Before the window takes the request up, the requester owns it: at {@link STOP_ACCEPT_TIMEOUT_MS} it
- * deletes the request file, and only a successful delete proves the window never acted (the receiver
- * takes a request up by renaming the file, and exactly one of the two can win). Once the request is
- * taken up the window is working: the wait ends with its answer, or as `silent` once its progress file
- * has not changed for {@link STOP_PROGRESS_TIMEOUT_MS}.
- *
- * The whole wait, before and after take-up, ends by {@link STOP_TOTAL_TIMEOUT_MS}. A request that could not be
- * withdrawn (the delete keeps failing for {@link STOP_WITHDRAW_TIMEOUT_MS}) and a request whose take-up evidence may
- * be gone because this requester was not running for {@link STOP_STALL_GAP_MS} between two looks end as `silent`,
- * never as `not-accepted`: the window may still act, so nothing may be stopped behind its back.
- * Responses that are not a well-formed answer to this request are deleted and ignored.
+ * The state machine behind every taken-up request (a stop, a handover): `parse` turns the text of a response file into
+ * the answer (`null` for anything that is not a well-formed answer to this very request, which is deleted and ignored).
+ * See {@link awaitStopAnswer} for the rules; they are the same for every kind.
  */
-export async function awaitStopAnswer(
+async function awaitTakenUpAnswer<R extends { readonly kind: string }>(
 	storageDir: string,
 	to: string,
 	id: string,
-	rowCount: number,
-	options: StopWaitOptions = {},
-): Promise<StopAnswer> {
+	bounds: TakenUpBounds,
+	options: { readonly pollMs?: number; readonly now?: () => number },
+	maxResponseBytes: number,
+	parse: (text: string) => R | null,
+): Promise<TakenUpWait<R>> {
 	const directory = directoryOf(storageDir);
 	const requestFile = path.join(directory, `${to}.${id}${REQUEST_SUFFIX}`);
 	const acceptedFile = path.join(directory, `${to}.${id}${ACCEPTED_SUFFIX}`);
 	const responseFile = path.join(directory, `${to}.${id}${RESPONSE_SUFFIX}`);
-	const acceptMs = options.acceptTimeoutMs ?? STOP_ACCEPT_TIMEOUT_MS;
-	const withdrawMs = options.withdrawTimeoutMs ?? STOP_WITHDRAW_TIMEOUT_MS;
-	const progressMs = options.progressTimeoutMs ?? STOP_PROGRESS_TIMEOUT_MS;
-	const totalMs = options.totalTimeoutMs ?? STOP_TOTAL_TIMEOUT_MS;
-	const stallMs = options.stallGapMs ?? STOP_STALL_GAP_MS;
+	const { acceptMs, withdrawMs, progressMs, totalMs, stallMs } = bounds;
 	const pollMs = options.pollMs ?? 100;
 	const clock = options.now ?? Date.now;
 	const startedAt = clock();
@@ -719,13 +786,12 @@ export async function awaitStopAnswer(
 		}
 	};
 	/** `null`: no response file. `"unusable"`: a response file was there and is no answer to this request (it is deleted). */
-	const takeResponse = async (): Promise<StopAnswer | "unusable" | null> => {
-		const read = await probeFile(responseFile, MAX_STOP_RESPONSE_BYTES);
+	const takeResponse = async (): Promise<R | "unusable" | null> => {
+		const read = await probeFile(responseFile, maxResponseBytes);
 		if (read.kind === "missing" || read.kind === "busy") return null;
 		await fsp.rm(responseFile, { force: true }).catch(() => {});
-		const outcome = read.kind === "text" ? parseStopResponse(read.text, id, rowCount) : null;
-		if (outcome === null) return "unusable";
-		return outcome === "failed" ? { kind: "silent", reason: "it answered with a report that could not be used" } : { kind: "answered", rows: outcome };
+		const outcome = read.kind === "text" ? parse(read.text) : null;
+		return outcome === null ? "unusable" : outcome;
 	};
 	let accepted = false;
 	let lastProgress = "";
@@ -760,14 +826,14 @@ export async function awaitStopAnswer(
 					look();
 					return stalled
 						? { kind: "silent", reason: "it is not known whether it took the request up: this window was not running while it could have" }
-						: { kind: "not-accepted" };
+						: { kind: "not-accepted", withdrawn: false };
 				}
 				accepted = true;
 				lastProgressAt = now;
 			} else if (now - startedAt >= acceptMs) {
 				try {
 					await fsp.unlink(requestFile);
-					return { kind: "not-accepted" };
+					return { kind: "not-accepted", withdrawn: true };
 				} catch (error) {
 					// Either the window took the request up in this very instant (the next round finds the accepted file) or
 					// the delete is blocked for now; the next round decides, and only a successful delete ever ends the wait as
@@ -795,6 +861,103 @@ export async function awaitStopAnswer(
 		const { promise, resolve } = Promise.withResolvers<void>();
 		setTimeout(resolve, pollMs).unref?.();
 		await promise;
+	}
+}
+
+/**
+ * Wait for the answer to stop request `id`, which names `rowCount` rows.
+ *
+ * Before the window takes the request up, the requester owns it: at {@link STOP_ACCEPT_TIMEOUT_MS} it
+ * deletes the request file, and only a successful delete proves the window never acted (the receiver
+ * takes a request up by renaming the file, and exactly one of the two can win). Once the request is
+ * taken up the window is working: the wait ends with its answer, or as `silent` once its progress file
+ * has not changed for {@link STOP_PROGRESS_TIMEOUT_MS}.
+ *
+ * The whole wait, before and after take-up, ends by {@link STOP_TOTAL_TIMEOUT_MS}. A request that could not be
+ * withdrawn (the delete keeps failing for {@link STOP_WITHDRAW_TIMEOUT_MS}) and a request whose take-up evidence may
+ * be gone because this requester was not running for {@link STOP_STALL_GAP_MS} between two looks end as `silent`,
+ * never as `not-accepted`: the window may still act, so nothing may be stopped behind its back.
+ * Responses that are not a well-formed answer to this request are deleted and ignored.
+ */
+export async function awaitStopAnswer(
+	storageDir: string,
+	to: string,
+	id: string,
+	rowCount: number,
+	options: StopWaitOptions = {},
+): Promise<StopAnswer> {
+	const answer = await awaitTakenUpAnswer<StopAnswer>(storageDir, to, id, {
+		acceptMs: options.acceptTimeoutMs ?? STOP_ACCEPT_TIMEOUT_MS,
+		withdrawMs: options.withdrawTimeoutMs ?? STOP_WITHDRAW_TIMEOUT_MS,
+		progressMs: options.progressTimeoutMs ?? STOP_PROGRESS_TIMEOUT_MS,
+		totalMs: options.totalTimeoutMs ?? STOP_TOTAL_TIMEOUT_MS,
+		stallMs: options.stallGapMs ?? STOP_STALL_GAP_MS,
+	}, options, MAX_STOP_RESPONSE_BYTES, text => {
+		const outcome = parseStopResponse(text, id, rowCount);
+		if (outcome === null) return null;
+		return outcome === "failed" ? { kind: "silent", reason: "it answered with a report that could not be used" } : { kind: "answered", rows: outcome };
+	});
+	return answer.kind === "not-accepted" ? { kind: "not-accepted" } : answer;
+}
+
+/**
+ * How a requester's wait for a handover request ended.
+ * `moved`: the holder released the session. `refused`: it decided before moving anything (`unfinished`: it began, dropped its
+ * connection and could not release the claim, so the session is still running and still held there).
+ * `failed`: it answered `ok: false` with no reason, which only says it could not do it. `older-build`: the request vanished
+ * without take-up while this requester watched (a window of a build that does not know the kind deletes it): nothing moved.
+ * `unresponsive`: it never took the request up within the wait and this requester withdrew it cleanly: nothing moved.
+ * `uncertain`: a blocked withdrawal, a requester that was not running, or a request taken up and not answered in time: the move
+ * may have happened or may still happen.
+ */
+export type HandoverOutcome =
+	| { readonly kind: "moved" }
+	| { readonly kind: "refused"; readonly reason: RefusalReason }
+	| { readonly kind: "failed" }
+	| { readonly kind: "older-build" }
+	| { readonly kind: "unresponsive" }
+	| { readonly kind: "uncertain" };
+
+/** What bounds {@link awaitHandoverAnswer}; every field defaults to the module's handover constant and exists for tests. */
+export interface HandoverWaitOptions {
+	readonly acceptTimeoutMs?: number;
+	readonly withdrawTimeoutMs?: number;
+	readonly totalTimeoutMs?: number;
+	readonly stallGapMs?: number;
+	readonly pollMs?: number;
+	readonly now?: () => number;
+}
+
+/**
+ * Wait for the answer to handover request `id`. This is the stop waiter's state machine with the handover bounds: the
+ * requester owns the request until the holder takes it up (withdrawing it at {@link HANDOVER_ACCEPT_TIMEOUT_MS}), and the
+ * whole wait ends by {@link HANDOVER_TOTAL_TIMEOUT_MS}. A taken-up handover writes no progress, so only the total bounds it.
+ * A response that is not a well-formed answer (a reason that is not one of {@link RefusalReason}, a reason on `ok: true`) is
+ * deleted and ignored; one that was seen and could not be used ends the wait as `uncertain`, never as "nothing moved".
+ */
+export async function awaitHandoverAnswer(
+	storageDir: string,
+	to: string,
+	id: string,
+	options: HandoverWaitOptions = {},
+): Promise<HandoverOutcome> {
+	const totalMs = options.totalTimeoutMs ?? HANDOVER_TOTAL_TIMEOUT_MS;
+	const answer = await awaitTakenUpAnswer<HandoverOutcome>(storageDir, to, id, {
+		acceptMs: options.acceptTimeoutMs ?? HANDOVER_ACCEPT_TIMEOUT_MS,
+		withdrawMs: options.withdrawTimeoutMs ?? HANDOVER_WITHDRAW_TIMEOUT_MS,
+		progressMs: totalMs,
+		totalMs,
+		stallMs: options.stallGapMs ?? HANDOVER_STALL_GAP_MS,
+	}, options, MAX_RESPONSE_BYTES, text => {
+		const outcome = parseResponse(text, id);
+		if (outcome === null) return null;
+		if (outcome.ok) return { kind: "moved" };
+		return outcome.refusal === undefined ? { kind: "failed" } : { kind: "refused", reason: outcome.refusal };
+	});
+	switch (answer.kind) {
+		case "not-accepted": return answer.withdrawn ? { kind: "unresponsive" } : { kind: "older-build" };
+		case "silent": return { kind: "uncertain" };
+		default: return answer;
 	}
 }
 
@@ -927,7 +1090,7 @@ export function startRequestWatch(
 				return;
 			}
 			const acceptedFile = path.join(directory, `${request.to}.${request.id}${ACCEPTED_SUFFIX}`);
-			const takenUp = request.kind === "stop" || request.kind === "reload";
+			const takenUp = request.kind === "stop" || request.kind === "reload" || request.kind === "handover";
 			if (takenUp) {
 				// Take the request up: one atomic rename, so the requester's delete and this claim cannot both win. A request
 				// the requester already withdrew is gone, and nothing is done for it.

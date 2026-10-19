@@ -469,6 +469,16 @@
         "icon": "$(window)"
       },
       {
+        "command": "ompDesk.moveSessionHere",
+        "title": "Move to This Window",
+        "category": "OMP Desk"
+      },
+      {
+        "command": "ompDesk.moveSessionHere.palette",
+        "title": "Move Session to This Window",
+        "category": "OMP Desk"
+      },
+      {
         "command": "ompDesk.openSessionInChat",
         "title": "Open in Chat",
         "category": "OMP Desk",
@@ -1047,6 +1057,10 @@
           "when": "false"
         },
         {
+          "command": "ompDesk.moveSessionHere",
+          "when": "false"
+        },
+        {
           "command": "ompDesk.skills.showGlobal",
           "when": "false"
         },
@@ -1511,6 +1525,11 @@
           "command": "ompDesk.switchToSessionWindow",
           "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.otherWindow\\..*\\.window-switchable$/",
           "group": "1_open@1"
+        },
+        {
+          "command": "ompDesk.moveSessionHere",
+          "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.otherWindow\\./",
+          "group": "1_open@2"
         },
         {
           "command": "ompDesk.forkSession",

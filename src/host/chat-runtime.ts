@@ -41,7 +41,7 @@ import type { PendingKind } from "../shared/pending-operation.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
 import type { HistoryReader } from "./rpc/history-reader.ts";
 import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../protocol/rpc.ts";
-import type { RpcChannel } from "../protocol/rpc.ts";
+import type { InputReclaim, RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { ClearOutcome, NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";
@@ -145,6 +145,8 @@ export interface LiveConversationInput {
 	readonly title: string | null;
 	/** Last broker line seq already folded (0 after a host restart). */
 	readonly initialSeq?: number;
+	/** Adopting a host another window may have just given up: repeat a refused input claim a bounded number of times (never a takeover). */
+	readonly reclaimInput?: InputReclaim;
 }
 
 export interface ChatRuntimeOptions {
@@ -331,6 +333,7 @@ export class ChatRuntime {
 			cwd: input.cwd,
 			hostNonce: nonce,
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
+			...(input.reclaimInput === undefined ? {} : { reclaimInput: input.reclaimInput }),
 			...(this.#options.hostTools === undefined ? {} : { hostTools: this.#options.hostTools }),
 			...(this.#options.log === undefined ? {} : { log: prefixedLogger(this.#options.log, `tab ${tabId}: `) }),
 			...(this.#options.readTodoClearDelay === undefined ? {} : { readTodoClearDelay: () => this.#options.readTodoClearDelay!(tabId, input.cwd) }),

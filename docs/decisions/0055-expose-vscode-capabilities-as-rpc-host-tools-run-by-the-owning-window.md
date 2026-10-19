@@ -30,6 +30,10 @@ This narrowly amends [ADR-0038](0038-host-chat-over-rpc-ui-on-a-broker-pipe-chil
 - Positive: no new transport; the debugger the agent drives is the one the user sees; the channel is reusable.
 - Negative: subagents and terminal sessions do not get the tools; sessions started by an earlier broker must be restarted to get them; a call can wait indefinitely while no window holds its session; retention thresholds are soft.
 
+### Amendment (2026-10-20, [ADR-0080](0080-hand-over-a-live-session-through-a-taken-up-request-that-detaches-the-holder-without-stopping-it.md))
+
+A live session can change windows without being stopped (Move to This Window). The window that serves host tools therefore changes mid-turn: the holder's connection closes, so the one call it was serving at that instant is aborted and gets its single error result (OMP reports a tool error and the turn goes on), and the adopter, once it holds the session and broker input, registers the tools again; calls pinned unanswered in the broker's ring are answered by the adopter as after a reload. The "only the window that holds broker input executes" rule is unchanged.
+
 ## Related Documents
 
 - [Agent debugger tools design](../designs/2026-10-10-agent-debugger-tools.md)

@@ -7,6 +7,7 @@
  * The scripted child answers the commands `RpcSession` sends from its own `entries`/`state`.
  */
 import type {
+	InputReclaim,
 	RpcAttachResult,
 	RpcChannel,
 	RpcChannelEvent,
@@ -68,6 +69,11 @@ export class FakeRpcChannel implements RpcChannel {
 	hostCallOverflow = false;
 	/** Whether `attach` wins the broker's input claim; `false` models a window that attaches while another one holds input. */
 	inputClaimable = true;
+	/** How many claims the broker refuses before it grants input to a claimable window: a previous owner whose close it has not processed yet. */
+	claimRefusals = 0;
+	/** Claims the attaches made, retries included, and the `reclaimInput` each attach asked for. */
+	claimAttempts = 0;
+	readonly reclaimRequests: (InputReclaim | undefined)[] = [];
 	/** What `set_host_tools` answers: the requested names, or a rejection (script a timeout with `handlers.set("set_host_tools", () => "drop")`). */
 	hostToolsAnswer: "names" | "reject" = "names";
 	#owned = true;
@@ -125,11 +131,18 @@ export class FakeRpcChannel implements RpcChannel {
 		this.setOwned(false);
 	}
 
-	async attach(request: { sinceSeq: number }): Promise<RpcAttachResult> {
+	async attach(request: { sinceSeq: number; reclaimInput?: InputReclaim }): Promise<RpcAttachResult> {
 		this.attachRequests.push(request.sinceSeq);
+		this.reclaimRequests.push(request.reclaimInput);
 		if (this.attachError) throw new Error("attach refused");
 		this.#attached = true;
-		this.setOwned(this.inputClaimable);
+		let owned = false;
+		for (let attempt = 0; attempt <= (request.reclaimInput?.attempts ?? 0) && !owned; attempt += 1) {
+			this.claimAttempts += 1;
+			if (this.inputClaimable && this.claimRefusals === 0) owned = true;
+			else if (this.claimRefusals > 0) this.claimRefusals -= 1;
+		}
+		this.setOwned(owned);
 		const replay = this.#ring.filter(line => line.seq > request.sinceSeq);
 		const result: RpcAttachResult = {
 			fromSeq: request.sinceSeq,

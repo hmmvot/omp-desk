@@ -12,6 +12,7 @@ import { silentLogger } from "../shared/logger.ts";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
+import type { LiveConversationInput } from "../host/chat-runtime.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { OmpHostAttachRequest, OmpHostLaunchRequest, SessionIndex } from "../host/session-index.ts";
@@ -74,10 +75,11 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 	const launches: Array<{ forkFrom?: string | null }> = [];
 	const sources = new Map<string, string>();
 	const dropped: string[] = [];
+	const liveInputs: LiveConversationInput[] = [];
 	const deps: LocalLauncherDeps = {
 		index: { get: () => null, setRunIntent: async () => { events.push("setRunIntent"); } } as unknown as SessionIndex,
 		window,
-		chat: { startLive: () => { events.push("startLive"); return undefined as never; } },
+		chat: { startLive: (_tab: string, input: LiveConversationInput) => { events.push("startLive"); liveInputs.push(input); return undefined as never; } },
 		diagnostics,
 		launchRefusal: () => options.refusal ?? null,
 		entries: async () => {
@@ -113,7 +115,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		log: silentLogger,
 	};
 	const launcher = new LocalLauncher(deps);
-	return { launcher, events, recorded, forgotten, runtime, deps, withheld, launches, sources, dropped };
+	return { launcher, events, recorded, forgotten, runtime, deps, withheld, launches, sources, dropped, liveInputs };
 }
 
 describe("launch", () => {
@@ -246,5 +248,20 @@ describe("startConversation", () => {
 		f.deps.brokerWatches.get(f.runtime)?.();
 		assert.equal(f.events.filter(event => event === "attached").length, 2);
 		assert.ok(!f.events.includes("launch"));
+	});
+
+	it("asks the conversation to reclaim input only when it adopts a surviving host, never for a fresh launch or a bare call", async () => {
+		const adopting = fixture({ attachable: true });
+		assert.equal((await adopting.launcher.attach(attachRequest(null))).state, "attached");
+		adopting.deps.brokerWatches.get(adopting.runtime)?.();
+		assert.deepEqual(adopting.liveInputs.map(input => input.reclaimInput), [{ attempts: 10, intervalMs: 200 }], "about ten tries over two seconds");
+		const launching = fixture();
+		assert.equal((await launching.launcher.launch(request)).state, "running");
+		launching.deps.brokerWatches.get(launching.runtime)?.();
+		assert.deepEqual(launching.liveInputs.map(input => input.reclaimInput), [undefined]);
+		const bare = fixture();
+		await bare.launcher.startConversation(TAB, bare.runtime, null, true);
+		bare.deps.brokerWatches.get(bare.runtime)?.();
+		assert.deepEqual(bare.liveInputs.map(input => input.reclaimInput), [undefined], "replaying from the start does not arm it");
 	});
 });

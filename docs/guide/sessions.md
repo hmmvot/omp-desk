@@ -44,8 +44,16 @@ A background process on Bun keeps the `bun.exe` it started from, so after `bun u
 ### Sessions in other windows
 
 - A session open in another window shows the same live status there, and clicking it takes you straight to that window with the session's tab selected, with no question first. If that window cannot be brought forward (for example it has an unsaved multi-root workspace), you are told why.
+- **Move to This Window** (the row's context menu, the **Move to This Window** button on the "another OMP Desk window holds this session" notice, and **OMP Desk: Move Session to This Window** in the Command Palette for the session in front) is the way to bring a running session from another window into this one; a click only ever switches to the holder. Use it, for example, when you reopen a project's window and its session was adopted by a different window.
 - A session that a plain `omp` in a terminal is writing shows **Open in another OMP process**. OMP Desk asks before opening it too.
 - New Session, Resume Session and opening a stopped session of a folder that is open only in another window start in that window; see [`ompDesk.launchInFolderWindow`](settings.md).
+
+#### Move a session to this window
+
+- The other window gives the session up and shows it as a read-only history with a note ("This session was moved to another window."); this window then opens it as it would after a reload and attaches the running process. Nothing is stopped, mid-turn included. The other window's notification names the window that asked.
+- When the session is working or waiting for your answer, OMP Desk asks once first. As after a window reload, a tool call the other window was serving at that moment (for example a VS Code tool) fails once and the turn goes on, a message that window had sent and not yet seen acknowledged is not resent, and unsent text in its composer stays in its now read-only editor.
+- It is refused with a reason when the other window is stopping, closing, restarting or switching the view of the session ("try again"), when it no longer holds that run of the session (it may have been stopped or moved already), when the session is a **Terminal** session (those cannot be moved), or when that window runs an older OMP Desk than the one installed (reload it). A window that does not answer within a few seconds is withdrawn from and nothing is moved; when the outcome cannot be proved either way you are told to check where the session is open.
+- If the other window began the move and could not finish, its editor says so ("Open the session here to reconnect it"), and the session keeps running.
 
 ### Folders
 
@@ -56,6 +64,7 @@ A background process on Bun keeps the `bun.exe` it started from, so after `bun u
 ### Row actions
 
 - **Open**, **Rename**, **Reload**, **Close**, **Forget** and **Delete**. A folder's **Resume Session** lists every saved session.
+- A session shown as open in another window has **Stop**, **Switch to Window**, **Move to This Window** and **Kill** in its context menu. **Move to This Window** takes the running session into the window you used it in **without stopping it**: the OMP process, its turn in progress, queued messages, background jobs and transcript carry on, and only the window that serves the session changes (Stop and Kill end the process; Move does not). See [Move a session to this window](#move-a-session-to-this-window).
 - A running session (one shown in Chat or with its tab closed) also has **Fork Session**, **Branch…** and **Clear Context…** in its context menu: **Fork Session** opens a copy of the session in a new Chat tab beside it while the original keeps running (it is not offered for a session that has not saved a message yet), **Branch…** shows the session in Chat and opens its Rewind picker, and **Clear Context…** asks first and then clears the session's conversation context. They work only while the session is idle, as the same commands typed in the Chat do; see [`/fork`](chat.md#fork) and [Branch and Clear](chat.md#branch-and-clear-from-the-sessions-view).
 - A click that takes time says so at once: the row you clicked reads **Opening…**, **Starting…**, **Closing…**, **Killing…**, **Deleting…**, **Forgetting…** or **Renaming…** with what it is doing (`checking for another OMP process`, `waiting for your answer`), the seconds once it passes five, and a progress bar runs across the view. The composer's **Resume** button shows the same in the Chat. A second click on a row that is already busy changes nothing, and **New Session** on a folder whose new session is still starting just shows that session.
 - **Open Terminal in Folder** starts a plain shell editor in that folder.

@@ -115,7 +115,8 @@ export const window = { state: { focused: true }, errors: [], tabGroups: { all: 
   async showTextDocument(uri, options) { window.openedDocuments.push({ uri, options }); },
   showWarningMessage: async (_message, _options, action) => action,
   infos: [],
-  showInformationMessage: async message => { window.infos.push(message); return undefined; }, showErrorMessage: async message => { window.errors.push(message); }, setStatusBarMessage() {},
+  showInformationMessage: async message => { window.infos.push(message); return undefined; }, errorActions: [], errorChoice: undefined,
+  showErrorMessage: async (message, ...actions) => { window.errors.push(message); window.errorActions.push(actions); return window.errorChoice; }, setStatusBarMessage() {},
   showQuickPick: async () => undefined,
   showInputBox: async () => undefined,
   withProgress: async (_options, task) => task({ report() {} }, { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) }),
@@ -166,7 +167,7 @@ const fixtureContext = undefined as never;
 let fixtureChat = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
-  closeSession, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
+  closeSession, presentRestoreOutcome, handOverSession, openTab, handleChatEvent, restoreTabs,
   // The process services live in the runtime (cut 5); these adapters keep the cases' argument shapes.
   connectHostControl: (context, _index, tabId, owner, runtime, prepared) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.connect(tabId, owner, runtime, prepared); },
   reconnectHostControl: (context, _index, tabId, owner, runtime) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.reconnect(tabId, owner, runtime); },
@@ -278,6 +279,8 @@ export const harness = {
     };
   },
   errors() { return fixtureVscode.window.errors; },
+  errorActions() { return fixtureVscode.window.errorActions; },
+  chooseOnError(choice) { fixtureVscode.window.errorChoice = choice; },
   rowState: fixtureRowState,
   policy(context, ports, hostLauncher, stopPort) {
     const w = fixtureWindow();
@@ -395,6 +398,8 @@ interface WindowFixture {
   launcherSelectedPath: string | null;
   launcherExpandFor: string | null;
   readonly requestSelections: Set<string>;
+  sessionRuntime: { detach: (request: unknown) => Promise<unknown> };
+  readonly outcomes: Map<string, unknown>;
   readonly routing: {
     serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
     selectHeldTab(index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
@@ -533,6 +538,9 @@ interface Harness {
   viewTypeOf(tabId: string, editorId: string): string;
   tabStrip(columns: readonly (readonly string[])[], activeColumn?: number): { viewColumn: number; tabs: { isActive: boolean; group: unknown }[] }[];
   commandHandler(handler: ((command: string, ...args: unknown[]) => void) | null): unknown[][];
+  errorActions(): unknown[][];
+  chooseOnError(choice: string | undefined): void;
+  handOverSession(index: SessionIndex, request: { tabId: string; incarnation: string; binding: string | null }, asker: string): Promise<{ status: string; code?: string }>;
   tabsChanged(): void;
   bindRevived(slot: string, panel: unknown): void;
   markPageRunning(slot: string): void;
@@ -1619,6 +1627,60 @@ describe("native replacement lifecycle", () => {
       assert.equal(client.getSnapshot().phase, "view-only");
       assert.equal(client.resume(), true);
     } finally { runtime.dispose(); await rival.release(); }
+  });
+
+  it("offers Move to This Window on the notice for a session another window holds, runs the move for that tab when chosen, and offers nothing for other conflicts", async () => {
+    const native = runtime(708); const index = indexFixture(native);
+    harness.reset(index, Object.assign(conversation({ phase: "live", start: async () => undefined }), { showLegacy() {}, showViewOnly: async () => undefined }));
+    const calls = harness.commandHandler(() => undefined);
+    const before = harness.errorActions().length;
+    try {
+      harness.chooseOnError("Move to This Window");
+      harness.presentRestoreOutcome(index as never, TAB, { status: "conflict", tabId: TAB, kind: "claim-conflict", detail: "This conversation is already open in another window." });
+      assert.deepEqual(harness.errorActions().slice(before), [["Move to This Window"]]);
+      assert.match(harness.errors().at(-1)!, /Another OMP Desk window holds this session\. This conversation is already open in another window\./);
+      await nextTurn(); await nextTurn();
+      assert.deepEqual(calls, [["ompDesk.moveSessionHere", TAB]], "the command runs for the tab of the notice");
+      calls.length = 0;
+      harness.chooseOnError(undefined);
+      harness.presentRestoreOutcome(index as never, TAB, { status: "conflict", tabId: TAB, kind: "claim-conflict", detail: "again" });
+      await nextTurn(); await nextTurn();
+      assert.deepEqual(calls, [], "dismissing the notice moves nothing");
+      harness.presentRestoreOutcome(index as never, TAB, { status: "conflict", tabId: TAB, kind: "duplicate", detail: "Open elsewhere." });
+      assert.deepEqual(harness.errorActions().at(-1), [], "another conflict carries no action");
+    } finally { harness.chooseOnError(undefined); harness.forgetTurnActivity(index, TAB); }
+  });
+
+  it("hands a session over through the runtime's detach, forgets what this window remembered of the run and says which window asked; a refusal or an unfinished detach claims nothing", async () => {
+    const native = runtime(709); const index = indexFixture(native);
+    harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
+    const w = harness.window();
+    const informed: string[] = [];
+    harness.information(async message => { informed.push(String(message)); });
+    const asked: unknown[] = [];
+    let answer: unknown = { status: "detached" };
+    w.sessionRuntime.detach = async (request: unknown) => { asked.push(request); return answer; };
+    const request = { tabId: TAB, incarnation: "gen_1", binding: "slot.2" };
+    try {
+      w.outcomes.set(TAB, { status: "skipped", tabId: TAB, detail: "x" });
+      assert.deepEqual(await harness.handOverSession(index as never, request, "Other window"), { status: "moved" });
+      assert.deepEqual(asked, [{ conversation: TAB, incarnation: "gen_1", binding: "slot.2" }], "the runtime re-reads the exact run under its own gate");
+      assert.equal(w.outcomes.has(TAB), false, "the window-local outcome is forgotten");
+      await nextTurn();
+      const moved = informed.filter(message => /was moved to the window "Other window", which asked for it\. It keeps running there\./.test(message));
+      assert.equal(moved.length, 1, "one notification names the window that asked");
+
+      w.outcomes.set(TAB, { status: "skipped", tabId: TAB, detail: "x" });
+      for (const code of ["not-holder", "busy", "terminal"]) {
+        answer = { status: "refused", code };
+        assert.deepEqual(await harness.handOverSession(index as never, request, "Other window"), { status: "refused", code });
+      }
+      answer = { status: "failed", code: "claim-unreleased", stillHeld: true };
+      assert.deepEqual(await harness.handOverSession(index as never, request, "Other window"), { status: "unfinished" });
+      assert.equal(w.outcomes.has(TAB), true, "a window that still holds the session forgets nothing");
+      await nextTurn();
+      assert.equal(informed.filter(message => /was moved to the window/.test(message)).length, 1, "no notification for a move that did not happen");
+    } finally { harness.forgetTurnActivity(index, TAB); }
   });
 
   it("keeps credentials and the running intent when Close cannot prove the writer gone", async () => {

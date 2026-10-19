@@ -1,0 +1,54 @@
+---
+status: accepted
+date: 2026-10-20
+---
+
+# ADR-0080: Hand over a live session through a taken-up request that detaches the holder without stopping it
+
+## Context and Problem Statement
+
+A session is written by one window at a time; the window holds a claim (ADR-0039) and other windows may only switch to it (ADR-0056) or end its process (Stop, Kill: ADR-0060). A window that adopts a session whose old window closed, or any window that opened it first, keeps it even when another window, the one that has the session's folder open, wants it. The only way to move it is to end the process, losing the turn in progress and the background work.
+
+The decision is how a live session can change windows without ending, and without a window overriding another's claim.
+
+## Considered Options
+
+- **A taken-up `handover` request; the holder detaches without stopping; the requester then opens it normally.** Reuses the audited request channel and the claim/attach proofs; the process is never touched. Cost: a new request kind, a new holder-side operation and a new index method.
+- **The requester takes the claim over.** One step fewer, but a live holder would keep its broker connection and its runtime, and two windows would act as the writer. Contradicts ADR-0039.
+- **Stop, then Resume in the requester.** No new mechanism; ends the process and its work.
+- **Automatic move to the folder's window.** No user action; windows would contend for rows and move sessions users opened on purpose.
+- **A new transport between windows.** Duplicates the registry and request channel.
+
+## Decision Outcome
+
+Option 1.
+
+- A new request kind `handover` (`{ tabId, incarnation, binding }`, addressed to the claim holder's id) is **taken up** by an atomic rename before the holder acts, like `stop`, so a withdrawal and the holder cannot both win and "never seen" (an older build) is distinguishable from "being served". It is answered with the ordinary response; `RefusalReason` gains `not-holder`, `busy`, `terminal` and `unfinished` (a bare refusal means only that the handler failed).
+- The holder refuses `stale-build` and a requester that is not another live registry window (a sanity filter, not authentication), then **takes the tab's lifecycle gate, holds it from its first recheck to its last recording, and re-reads under it**: it acts only for the exact run it holds (fresh claim read: holder id, owner generation, `sessionIncarnation`, a live driven host, the row still recording `runIntent: running` and the captured host, the named editor binding), only for a Chat (RPC) host, and only when no stop, close, restart, view switch or other transition is in flight; a failed recheck answers without touching the editor. Kill is not gated (ADR-0060), so a Kill that races the detach is not excluded; the under-gate recheck catches one already recorded.
+- The detach is a gated `SessionRuntime` port member (`detach`, in the vscode-free `src/runtime/` layer). Under the hold: the conversation is dropped (the broker connection closes), the window's runtime record, its broker watch and its exit handling end (so nothing can record "OMP ended"), the host-control channel closes with its credentials kept, and a new `SessionIndex.detachLiveClaim`, bound to the exact incarnation and to `runIntent: running`, releases the claim and drops the live entry. After the release and outside the gate, the runtime renders the read-only view itself (a transcript read must not delay the release or hold the gate); the window only notifies, repaints and answers. It writes no `runIntent`, no host change and no `releasedAt`, so nothing in the shared record says the session ended or authorizes a relaunch.
+- The broker clears the holder's input ownership only when it processes the unacknowledged close, and an attach does not retry a refused input claim; the adopter therefore retries the plain (non-takeover) input claim a bounded number of times, only from the attach path of a window that holds the session's claim, and re-registers host tools when it gains input; if the retry runs out the session is readable but not writable until that window reloads.
+- The requester waits with the stop waiter's classification (not accepted, answered, `silent`), carries no focus plan, and then runs the ordinary open of the row (routing suppressed): admission takes the free claim and reconciles and re-adopts the broker exactly as a window reload does. A mid-turn move is allowed; the process is untouched. A working session is confirmed once on the requester.
+- The holder's editor stays as a read-only view with a note; the adopter's controlling binding demotes it.
+- A holder reload between the release and the adopter's claim re-adopts the session in the holder through its own restore; the adopter's open then ends as the ordinary conflict.
+- Surfaces: the Sessions row menu on rows open in another window, the conflict notice, and the Command Palette.
+
+### Consequences
+
+- Positive: a live session, including one mid-turn, changes windows with no loss of the process; the user is no longer forced to Kill to move; ownership decisions stay where they were (claims and the adopter's admission); old-build holders are reported, not mistaken for slow ones.
+- Negative: one more request kind and a holder-side teardown that must stay in step with the runtime's record (a new collaborator added to a window's runtime must be ended by the detach); a short window in which the holder has dropped its connection and not yet released its claim (a failed release leaves the holder with a read-only view and an ordinary open to reconnect); the work a holder's host-tool calls and unacknowledged prompts were doing at that instant fails, as in a reload; Terminal sessions are not movable; a forged request (the live-requester check is a sanity filter) can make a holder release a session it really holds and re-home its host tools, failing one in-flight call (the process is unaffected and the session can be reopened), which is recorded as the worst case for the kind.
+
+### Amendments to other records
+
+ADR-0056's and ADR-0057's lists of request kinds gain `handover` with a pointer here; ADR-0055 gains a note that a move changes the window that serves host tools mid-turn; ADR-0066's port gains `detach`.
+
+## Related Documents
+
+- [Move a live session to this window](../designs/2026-10-20-move-session-to-this-window.md)
+- [ADR-0055](0055-expose-vscode-capabilities-as-rpc-host-tools-run-by-the-owning-window.md), [ADR-0066](0066-extract-a-session-runtime-port-and-enforce-it-with-a-vscode-free-layer.md), [ADR-0031](0031-reattach-a-surviving-managed-host-through-its-broker.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0056](0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md), [ADR-0057](0057-start-a-session-in-the-window-that-suits-its-folder.md), [ADR-0060](0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md)
+
+## Architecture Review
+
+- Reviewer: architect
+- Outcome: accepted after two independent review passes
+- Notes: first pass ACCEPT WITH CHANGES (three material findings: checks outside the gate, the Kill race, the unacknowledged broker input release; five should-fix items and five nits); the revision resolved them in the text and a confirmation pass found one material point (a bare refusal cannot mean "began and could not finish"; it became the `unfinished` reason), four should-fix items (the re-claim is a plain non-takeover claim armed by the claim holder's attach path and re-registers host tools; the render is the runtime's own and happens outside the gate; `detachLiveClaim` takes the lease) and three nits, all applied. Implemented and unit-tested; a two-window smoke test with a real broker is not part of this record.
+

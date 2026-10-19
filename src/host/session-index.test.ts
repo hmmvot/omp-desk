@@ -1531,6 +1531,99 @@ describe("a close that is not the user's stop", () => {
 });
 
 /**
+ * A handover gives a live session's claim up without ending the session (ADR-0080): the claim is released and the live
+ * entry dropped, and nothing in the shared record says the session ended or authorizes a relaunch.
+ */
+describe("detaching a live claim", () => {
+	interface Written { readonly tabId: string; readonly runIntent: string; readonly host: unknown; readonly releasedAt: unknown }
+
+	class WritesStore extends TestStore {
+		readonly writes: Written[][] = [];
+
+		override async update(key: string, value: unknown): Promise<void> {
+			if (key === SESSION_INDEX_STORAGE_KEY) {
+				const snapshot = value as { entries: { tabId: string; runIntent: string; host: unknown; ownership: { releasedAt: unknown } | null }[] };
+				this.writes.push(snapshot.entries.map(row => ({ tabId: row.tabId, runIntent: row.runIntent, host: row.host, releasedAt: row.ownership?.releasedAt ?? null })));
+			}
+			await super.update(key, value);
+		}
+	}
+
+	async function drivenRow(sessionId: string) {
+		const store = new WritesStore();
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = indexFor(store, claimDir);
+		const file = await makeSessionFile(sessionDir, sessionId, cwd);
+		const tab = await managedSession(index, file, cwd);
+		const handle = runningHandle(sessionId);
+		const started = recordingLauncher({ state: "running", host: handle });
+		assert.equal((await index.restoreAll({ reconciler: noRecordedHost, launcher: started.launcher })).restored.length, 1);
+		assert.equal(index.hasLiveHost(tab.tabId), true);
+		const rpc = handle.rpc!;
+		const expected = { pid: handle.pid, slot: rpc.slot, brokerId: rpc.brokerId, brokerGeneration: rpc.brokerGeneration, childPid: rpc.childPid, childCreationTime: rpc.childCreationTime };
+		const detach = (overrides: Partial<typeof expected> = {}) => index.lifecycle.run(tab.tabId, lease => index.detachLiveClaim(tab.tabId, { ...expected, ...overrides }, lease));
+		return { store, claimDir, file, tabId: tab.tabId, index, expected, detach };
+	}
+
+	it("releases the claim and drops the live entry while the row keeps its intent, its host and no release proof", async () => {
+		const { store, claimDir, file, tabId, index, detach } = await drivenRow("S-DETACH");
+		const before = index.get(tabId);
+		store.writes.length = 0;
+
+		assert.deepEqual(await detach(), { status: "released" });
+
+		assert.equal(await readClaim(claimDir, file), null, "the claim is free for the adopter");
+		assert.equal(index.hasLiveHost(tabId), false);
+		assert.equal(store.writes.length, 0, "no catalog write: nothing says the session ended");
+		const after = index.get(tabId);
+		assert.equal(after?.runIntent, "running");
+		assert.deepEqual(after?.host, before?.host);
+		assert.equal(after?.ownership?.releasedAt ?? null, null, "a recorded release would be absence evidence for a relaunch");
+		assert.deepEqual(await detach(), { status: "target-changed" }, "a second detach finds nothing held here");
+	});
+
+	it("refuses another incarnation and leaves the claim and the live entry alone", async () => {
+		const { claimDir, file, tabId, index, detach } = await drivenRow("S-DETACH-OTHER");
+		for (const other of [{ pid: 1 }, { slot: "host:other" }, { brokerId: "other" }, { brokerGeneration: "other" }, { childPid: 7 }, { childCreationTime: "1" }]) {
+			assert.deepEqual(await detach(other), { status: "target-changed" }, JSON.stringify(other));
+		}
+		assert.ok(await readClaim(claimDir, file), "the claim is still held");
+		assert.equal(index.hasLiveHost(tabId), true);
+	});
+
+	it("drops a live entry whose row no longer records the running host, without releasing a claim it no longer serves", async () => {
+		const { claimDir, file, tabId, index, detach } = await drivenRow("S-DETACH-STOPPED");
+		await index.setRunIntent(tabId, "stopped", "recorded while the detach waited");
+
+		assert.deepEqual(await detach(), { status: "target-changed" });
+
+		assert.equal(index.hasLiveHost(tabId), false, "no runtime is served here any more");
+		assert.ok(await readClaim(claimDir, file), "whoever recorded the row settles the claim");
+		assert.equal(index.get(tabId)?.runIntent, "stopped");
+	});
+
+	it("never releases a claim another holder took: the live entry goes and the foreign claim stays", async () => {
+		const { claimDir, file, tabId, index, detach } = await drivenRow("S-DETACH-FOREIGN");
+		const claim = await readClaim(claimDir, file);
+		assert.ok(claim);
+		const record = JSON.parse(await readFile(claim.claimPath, "utf8")) as Record<string, unknown>;
+		await writeFile(claim.claimPath, JSON.stringify({ ...record, holderId: "someone-else" }), "utf8");
+
+		assert.deepEqual(await detach(), { status: "target-changed" });
+
+		assert.equal(index.hasLiveHost(tabId), false);
+		assert.equal((await readClaim(claimDir, file))?.holderId, "someone-else");
+	});
+
+	it("runs under the caller's lease and refuses a lease that does not hold this tab's gate", async () => {
+		const { tabId, index, expected } = await drivenRow("S-DETACH-LEASE");
+		await assert.rejects(index.detachLiveClaim(tabId, expected, { tabId: "tab:other" }), /lifecycle lease/);
+		await assert.rejects(index.detachLiveClaim(tabId, expected, { tabId }), /lifecycle lease/);
+		assert.equal(index.hasLiveHost(tabId), true, "nothing was detached through a fabricated lease");
+	});
+});
+
+/**
  * Activation's attach-only draft restore.
  *
  * A reload leaves a draft's durable row, its reserved claim and its recorded

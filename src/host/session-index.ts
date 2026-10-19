@@ -23,6 +23,7 @@ import { IdentityTurns, RESTORE_CONCURRENCY, RestoreStepTimer, mapBounded } from
 import type { IdentityTurn, OmpHostStepTimings, StepSink } from "./session-restore-trace.ts";
 import {
 	ClaimConflictError,
+	ClaimHolderError,
 	ClaimOwnershipError,
 	acquireClaim,
 	claimHolderMayBeAlive,
@@ -561,6 +562,29 @@ export interface CloseSessionOptions {
 export interface CloseSessionResult {
 	readonly released: boolean;
 	readonly detail: string;
+}
+
+/** The incarnation of a driven host a detach is bound to: what the window serves and what the row must still record. */
+export interface DetachExpectation {
+	/** The OMP child's pid. */
+	readonly pid: number | null;
+	readonly slot: string;
+	readonly brokerId: string;
+	readonly brokerGeneration: string;
+	readonly childPid: number | null;
+	readonly childCreationTime: string | null;
+}
+
+/** What {@link SessionIndex.detachLiveClaim} did. `claim-unreleased`: the release failed and `stillHeld` says whether this window's claim file remains. */
+export type DetachLiveClaimResult =
+	| { readonly status: "released" }
+	| { readonly status: "target-changed" }
+	| { readonly status: "claim-unreleased"; readonly stillHeld: boolean };
+
+/** Whether a host's pid and broker identity are exactly the incarnation a detach names. */
+function isDetachTarget(pid: number | null, rpc: RecordedRpcIdentity | null, expected: DetachExpectation): boolean {
+	return pid === expected.pid && rpc !== null && rpc.slot === expected.slot && rpc.brokerId === expected.brokerId &&
+		rpc.brokerGeneration === expected.brokerGeneration && rpc.childPid === expected.childPid && rpc.childCreationTime === expected.childCreationTime;
 }
 
 /** Sentinel the conditional shared write returns when the committed row no longer records the expected process. */
@@ -2333,6 +2357,45 @@ export class SessionIndex {
 		await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", detail);
 		await this.#persist();
 		return { released: true, detail };
+	}
+
+	/**
+	 * Give up the claim of a session this window drives without ending it (a handover, ADR-0080): the caller has already
+	 * dropped its connection to the host, and the process, the recorded host and the run intent stay exactly as they are.
+	 *
+	 * Under the caller's own lease of the tab's gate (it never queues on a gate its caller holds) the live entry must be this
+	 * window's driven runtime of exactly the incarnation `expected` names, and the row must still record `runIntent: running`
+	 * and that host. The claim is then released and the live entry dropped. It writes **no** run intent, **no** recorded-host
+	 * change and **no** `releasedAt`: a recorded release is absence evidence, and this host is not absent.
+	 *
+	 * `target-changed` ends with nothing released. A live entry of another incarnation is left alone; one of this incarnation
+	 * whose row no longer matches (a stop or a Kill recorded meanwhile) is dropped without a release, because the caller no
+	 * longer serves it and whoever recorded the row settles the claim. A release that fails leaves the claim held: the live
+	 * entry is dropped all the same, so the state says "no runtime here" and an ordinary open adopts this window's own claim
+	 * again; a claim another owner or holder already took is not this window's to release (`target-changed`).
+	 */
+	async detachLiveClaim(tabId: string, expected: DetachExpectation, lease: TabLifecycleLease): Promise<DetachLiveClaimResult> {
+		return await this.withinTabLifecycle(tabId, lease, async () => {
+			const entry = this.#entries.get(tabId);
+			const live = this.#live.get(tabId);
+			if (entry === undefined || live === undefined || !live.driven || !isDetachTarget(live.host.pid, live.host.rpc, expected)) return { status: "target-changed" };
+			if (entry.runIntent !== "running" || entry.host === null || !isDetachTarget(entry.host.pid, entry.host.rpc ?? null, expected)) {
+				this.#live.delete(tabId);
+				return { status: "target-changed" };
+			}
+			try {
+				await live.claim.release();
+			} catch (error) {
+				this.#live.delete(tabId);
+				if (error instanceof ClaimOwnershipError || error instanceof ClaimHolderError) return { status: "target-changed" };
+				this.#log?.error(`session detach claim release failed: ${describeError(error)}`);
+				const observed = await this.#readClaim(live.claim.identity);
+				// A claim that cannot be read is assumed still held: the caller must not say the session left this window.
+				return { status: "claim-unreleased", stillHeld: !observed.ok || observed.claim?.holderId === this.#claimHolder.id };
+			}
+			this.#live.delete(tabId);
+			return { status: "released" };
+		});
 	}
 
 	/**
