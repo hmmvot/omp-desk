@@ -5544,15 +5544,16 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("a typed name becomes a chip once whitespace follows it, a line break counts, and a name still being typed, an unknown command, a path and a denied command stay plain text", async () => {
+		await t.test("a typed name is a chip the moment it is complete and keeps its space or line break when one follows, while an unknown command, a path and a denied command stay plain text", async () => {
 			await chipSetup("chips-typed");
 			await ui.call("Input.insertText", { text: "/compact" });
 			await waitDraft("window.composer.value()==='/compact'");
-			await settleFrames();
-			assert.deepEqual(await commandChips(), [], "a complete name at the end of the draft is still being typed");
+			await waitChips(1);
+			assert.deepEqual([(await commandChips())[0]!.text, (await commandChips())[0]!.spaced], ["/compact", undefined], "a complete name at the end of the draft is a chip with nothing after it");
 			await ui.call("Input.insertText", { text: " " });
 			await waitChips(1);
-			assert.equal((await commandChips())[0]!.text, "/compact ");
+			await waitDraft("window.composer.value()==='/compact '");
+			assert.deepEqual([(await commandChips())[0]!.text, (await commandChips())[0]!.spaced], ["/compact ", "true"]);
 			await setDraft("/compact");
 			await waitDraft("window.composer.value()==='/compact'");
 			await press("Enter", "Enter", 13, { modifiers: 8, commands: ["insertLineBreak"] });
@@ -5560,7 +5561,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await waitChips(1);
 			assert.deepEqual([(await commandChips())[0]!.text, (await commandChips())[0]!.spaced], ["/compact", undefined], "a line break follows the chip and is not part of it");
 			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
-			for (const text of ["/foo bar", "/usr/bin x", "/comp now", "/Compact now", "x /compact now", "/compact/x now", "/worktree now"]) {
+			for (const text of ["/foo bar", "/foo", "/usr/bin x", "/comp now", "/compac", "/compactx", "/Compact", "/Compact now", "x /compact now", "/compact/x now", "/worktree now", "/worktree"]) {
 				await setDraft(text);
 				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
 				await settleFrames();
@@ -5572,6 +5573,82 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await waitChips(1);
 			assert.equal((await commandChips())[0]!.text, "/compact ");
 			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		// A leading name that is exactly a command or a skill is a block at once; the suggestion list stays open with that entry first and selected.
+		const REPORT_COMMANDS = "[{name:'skill:bug-report',source:'skill',description:'Write a bug report'},{name:'skill:report',source:'skill',description:'Report skill'},{name:'reports',source:'extension',description:'Several reports'},{name:'report',source:'custom',description:'File a report'}]";
+		const slashRows = (): Promise<{ labels: string[]; selected: string[] }> => ui.evaluate(`(()=>{const list=document.querySelector('[aria-label="Slash commands"]');if(!list)return{labels:[],selected:[]};return{labels:[...list.querySelectorAll('[role="option"] strong')].map(n=>n.textContent),selected:[...list.querySelectorAll('[role="option"][aria-selected="true"] strong')].map(n=>n.textContent)}})()`);
+		await t.test("an exact name keeps the list open with that command first and selected and is a chip without Space; one more character or one deleted character turns it back into text and completion goes on", async () => {
+			await reset("chips-exact");
+			await ui.evaluate(`window.ui.push({commands:${REPORT_COMMANDS}});window.composer.focus()`);
+			const back = (): Promise<void> => press("Backspace", "Backspace", 8, { commands: ["deleteBackward"] });
+			await ui.call("Input.insertText", { text: "/repor" });
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			assert.deepEqual(await commandChips(), [], "a prefix is text");
+			assert.deepEqual((await slashRows()).labels, ["/reports", "/report", "/skill:bug-report", "/skill:report"], "commands above skills");
+			await ui.call("Input.insertText", { text: "t" });
+			await waitDraft("window.composer.value()==='/report'");
+			await waitChips(1);
+			assert.deepEqual([(await commandChips())[0]!.text, (await commandChips())[0]!.label, (await commandChips())[0]!.spaced], ["/report", "Command report", undefined]);
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			assert.deepEqual(await slashRows(), { labels: ["/report", "/reports", "/skill:bug-report", "/skill:report"], selected: ["/report"] }, "the exact command leads, is the one selected row, and commands stay above skills");
+			assert.deepEqual(await selection(), { start: 7, end: 7 }, "the caret rests after the block");
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			// One more character: text again, and completion continues with the longer query.
+			await ui.call("Input.insertText", { text: "x" });
+			await waitDraft("window.composer.value()==='/reportx'");
+			await waitChips(0);
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]')"), null, "nothing matches /reportx");
+			// Deleting it brings the block back; deleting one more makes the rest text.
+			await back();
+			await waitDraft("window.composer.value()==='/report'");
+			await waitChips(1);
+			assert.deepEqual((await slashRows()).selected, ["/report"]);
+			await back();
+			await waitDraft("window.composer.value()==='/repor'");
+			await waitChips(0);
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			assert.deepEqual(await selection(), { start: 6, end: 6 });
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='/reportx'");
+			await setDraft("/report");
+			await waitDraft("window.composer.value()==='/report'");
+			await waitChips(1);
+			// Delete before the block removes its first character the same way.
+			await setSelection(0, 0);
+			await waitDraft("window.composer.selection().start===0");
+			await press("Delete", "Delete", 46, { commands: ["deleteForward"] });
+			await waitDraft("window.composer.value()==='report'");
+			await waitChips(0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Enter on an exact name accepts it as for any suggestion, so the block takes its space and the next Enter sends; a name that takes arguments still takes a space and the arguments after the block", async () => {
+			await reset("chips-exact-enter");
+			await ui.evaluate(`window.ui.push({commands:${REPORT_COMMANDS.slice(0, -1)},{name:'skill:review',source:'skill',description:'Review code',inputHint:'files'}]});window.composer.focus()`);
+			await ui.call("Input.insertText", { text: "/report" });
+			await waitChips(1);
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await press("Enter", "Enter", 13);
+			await waitDraft("window.composer.value()==='/report '");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.spaced, "true");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "Enter with the list open accepts and does not send");
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]')"), null);
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "/report", "the text sent is the draft");
+			await ui.evaluate("window.ui.sendReply()");
+			await waitDraft("window.composer.value()===''");
+			await ui.call("Input.insertText", { text: "/skill:review" });
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Skill review");
+			await ui.call("Input.insertText", { text: " " });
+			await waitDraft("window.composer.value()==='/skill:review '");
+			await ui.call("Input.insertText", { text: "src/a.ts" });
+			await waitDraft("window.composer.value()==='/skill:review src/a.ts'");
+			assert.deepEqual([(await commandChips())[0]!.text, (await commandChips())[0]!.spaced], ["/skill:review ", "true"], "the arguments follow the block");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -5803,7 +5880,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [["skill", "/skill:backlog "]]);
 			for (const [draft, kind, text] of [
 				["/skill:agents/tracker-cli check it", "skill", "/skill:agents/tracker-cli "],
-				["/skill:brainstorm", "skill", ""],
+				["/skill:brainstorm", "skill", "/skill:brainstorm"],
 				["/compact keep files", "command", "/compact "],
 				["/review focus", "command", "/review "],
 				["/security scan", "command", "/security "],
@@ -5813,7 +5890,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await setDraft(draft);
 				await waitDraft(`window.composer.value()===${JSON.stringify(draft)}`);
 				await settleFrames();
-				assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), text === "" ? [] : [[kind, text]], draft);
+				assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [[kind, text]], draft);
 			}
 			// Picked from the list, typed by hand: the same chip.
 			await setDraft("");

@@ -15,6 +15,22 @@ import { argumentSuggestions, isRewindCommand, missingRequiredArgument, parseArg
  assert.deepEqual(spliceSlash("/rev existing args", 4, found[0]!.name), { text: "/skill:inspect existing args", caret: 15 });
  });
 
+test("suggestions rank an exact name first, then every command before any skill, each in catalogue order", () => {
+ const commands = [
+  { name: "skill:omp-desk-bug-report", source: "skill", description: "Write a bug report" },
+  { name: "skill:report", source: "skill" },
+  { name: "report-card", source: "extension" },
+  { name: "report", source: "custom", description: "File a report" },
+  { name: "reporting", source: "builtin" },
+ ];
+ assert.deepEqual(slashSuggestions(commands, "report").map(command => command.name), ["report", "report-card", "reporting", "skill:omp-desk-bug-report", "skill:report"], "the exact command first, the other commands next, the skills last");
+ assert.deepEqual(slashSuggestions(commands, "skill:report").map(command => command.name), ["skill:report"], "an exact skill name leads its own list");
+ assert.deepEqual(slashSuggestions(commands, "rep").map(command => command.name), ["report-card", "report", "reporting", "skill:omp-desk-bug-report", "skill:report"], "without an exact name, commands lead and the catalogue order holds inside each group");
+ assert.deepEqual(slashSuggestions([{ name: "skill:inspect", aliases: ["review"], source: "skill" }, { name: "review-all", source: "extension" }], "review").map(command => command.name), ["skill:inspect", "review-all"], "an exact alias is an exact match and outranks the commands");
+ assert.deepEqual(slashSuggestions([{ name: "skill:a", source: "skill" }, { name: "b-skill:x" }], "skill:").map(command => command.name), ["b-skill:x", "skill:a"], "a command whose name contains the query still ranks above a skill");
+ assert.equal(slashSuggestions(commands, "")[0]!.source, "OMP Desk", "an empty query has no exact entry; Desk's own commands lead");
+});
+
 test("native settings commands remain discoverable when OMP omits its TUI-only hub catalogue entry", () => {
  assert.equal(slashSuggestions([], "agents")[0]?.name, "agents");
  assert.equal(slashSuggestions([], "model")[0]?.name, "models");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ChatSlashCommand } from "../../chat/model.ts";
-import { commandResolver, findChips, findCommandChips, type ResolveCommand } from "./command-chips.ts";
+import { commandResolver, findChips, findCommandChips, isBareChip, type ResolveCommand } from "./command-chips.ts";
 import { deletionRange, snapSelection } from "./image-references.ts";
 
 const COMMANDS: readonly ChatSlashCommand[] = [
@@ -38,10 +38,28 @@ test("a leading command becomes a chip once whitespace follows its name, taking 
 	assert.deepEqual(spans("\n\n/skill:review x"), [[2, 16, "skill"]]);
 });
 
-test("a name that is still being typed, an unknown command and a path stay plain text", () => {
-	for (const text of ["/compact", "/skill:review", "/comp now", "/foo bar", "/usr/bin/x now", "/compact/x now", "x /compact now", "/Compact now", "/worktree now", "/ now", "", "/"]) {
+test("a leading name that is exactly a command or skill is a bare chip at once, with no space and no line break after it; a prefix of one, an unknown command and a path stay plain text", () => {
+	assert.deepEqual(findCommandChips("/compact", resolve).map(chip => [chip.start, chip.end, chip.kind, chip.bare]), [[0, 8, "command", true]]);
+	assert.deepEqual(findCommandChips("/skill:review", resolve).map(chip => [chip.start, chip.end, chip.kind, chip.bare]), [[0, 13, "skill", true]]);
+	assert.deepEqual(findCommandChips("  /m", resolve).map(chip => [chip.start, chip.end, chip.bare]), [[2, 4, true]], "an alias is exact too, and the send trims the left edge");
+	assert.deepEqual(findCommandChips("/compact x", resolve).map(chip => chip.bare), [false], "a chip with whitespace after it is not bare");
+	for (const text of ["/compactx", "/compac", "/skill:revie", "/skill:review-code", "/comp now", "/foo bar", "/usr/bin/x now", "/compact/x now", "x /compact now", "/Compact now", "/Compact", "/worktree now", "/worktree", "/ now", "", "/"]) {
 		assert.deepEqual(spans(text), [], JSON.stringify(text));
 	}
+});
+
+test("a bare chip reverts to text when a character is added or removed, because the chip is a rule over the text", () => {
+	assert.equal(findCommandChips("/compact", resolve).length, 1);
+	assert.equal(findCommandChips("/compact" + "s", resolve).length, 0);
+	assert.equal(findCommandChips("/compac", resolve).length, 0);
+	assert.deepEqual(spans("/compact "), [[0, 9, "command"]], "a space after it makes it the chip that takes its space");
+});
+
+test("only a command chip with nothing after it is bare: attachment markers and chips with arguments stay atomic", () => {
+	const known = (kind: string, number: number): boolean => kind === "image" && number === 1;
+	assert.deepEqual(findChips("/compact", known, resolve).map(isBareChip), [true]);
+	assert.deepEqual(findChips("/compact [Image #1, 5x5]", known, resolve).map(isBareChip), [false, false]);
+	assert.deepEqual(findChips("[Image #1, 5x5]", known, resolve).map(isBareChip), [false]);
 });
 
 test("a skill is a chip mid-text exactly where OMP would invoke it: the first token, delimited by whitespace", () => {

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Chat: `/` suggestions put commands above skills, keep an exact name in the list and turn it into a block at once.** The list is ranked: the entry named exactly what you typed (or its alias) is first and selected, then every command (OMP's own, file, extension and Desk's own) before any skill, so `/report` is no longer below a `/skill:…` whose name contains `report`. Typing a whole name no longer makes the list disappear: it stays, with that entry first and selected (`Enter` or `Tab` completes it with a space as for any suggestion; the next `Enter` sends). A name at the start of the draft that is exactly a command or a skill of the session is drawn as the command or skill block the moment it is typed, without waiting for Space; adding a character (`/reportx`) or deleting one (`/repor`) turns it back into plain text and completion continues, and `Backspace` or `Delete` next to such a block removes one character instead of the whole block. A block that has its space after it, and a command's arguments after it, work as before.
+
 ## [0.4.9] - 2026-10-19
 
 ### Added

@@ -12,7 +12,7 @@
  * The surface owns every attribute of the element that changes while the user types; React renders the element with a
  * class only and never touches its children or attributes.
  */
-import { findChips, type ChipSpan, type ResolveCommand } from "./command-chips.ts";
+import { findChips, isBareChip, type ChipSpan, type ResolveCommand } from "./command-chips.ts";
 import { findFencedBlocks } from "./code-fence.ts";
 import {
 	LineRenderer,
@@ -240,6 +240,11 @@ export class DraftSurface {
 		return findChips(text, (kind, number, name) => this.#options.isKnownReference(kind, number, name), name => this.#options.resolveCommand(name));
 	}
 
+	/** The chips an edit removes whole: every chip except a bare command chip, which is still being typed and so is deleted and cut into like text. */
+	#atomic(text: string = this.#text): ChipSpan[] {
+		return this.#markers(text).filter(span => !isBareChip(span));
+	}
+
 	#writeDomSelection(selection: SurfaceSelection): void {
 		if (this.#window.open || !this.hasFocus) return;
 		const anchor = locate(this.element, selection.anchor);
@@ -383,7 +388,7 @@ export class DraftSurface {
 		let from = Math.min(Math.max(0, edit.from), text.length);
 		let to = Math.min(Math.max(from, edit.to), text.length);
 		if (edit.selection === undefined) {
-			for (const marker of this.#markers()) {
+			for (const marker of this.#atomic()) {
 				if (from > marker.start && from < marker.end) from = marker.start;
 				if (to > marker.start && to < marker.end) to = marker.end;
 			}
@@ -527,9 +532,11 @@ export class DraftSurface {
 
 	#delete(event: InputEvent, kind: DeleteKind, edit: EditKind): void {
 		const native = this.#targetRange(event);
-		const range = native !== null && native.from !== native.to ? native : deletionTarget(this.#text, this.selectionStart, this.selectionEnd, kind);
+		// The browser takes a non-editable chip whole; a bare command chip is text being typed, so one character goes instead and the chip reverts to text.
+		const bare = this.#markers().find(span => isBareChip(span) && native !== null && span.start === native.from && span.end === native.to);
+		const range = native !== null && native.from !== native.to && (bare === undefined || (kind !== "char-back" && kind !== "char-fwd")) ? native : deletionTarget(this.#text, this.selectionStart, this.selectionEnd, kind);
 		if (range === null) return;
-		const widened = deletionRange(this.#markers(), range.from, range.to, "range");
+		const widened = deletionRange(this.#atomic(), range.from, range.to, "range");
 		this.apply({ from: widened?.start ?? range.from, to: widened?.end ?? range.to, insert: "" }, edit);
 	}
 
@@ -771,7 +778,7 @@ export class DraftSurface {
 			let selection: SurfaceSelection = live === null
 				? { anchor: Math.min(pre.focus + next.length - pre.text.length, next.length), focus: Math.min(pre.focus + next.length - pre.text.length, next.length) }
 				: live.selection;
-			const damaged = this.#markers(pre.text);
+			const damaged = this.#atomic(pre.text);
 			const repaired = repairDamagedReferences(pre.text, next, damaged);
 			if (repaired !== null) {
 				next = repaired.text;

@@ -17,7 +17,8 @@
  * - the rule is shared with the host (`chat/prompt-routing.ts`), which sends a message that starts with a listed command or invokes a
  *   listed skill as a `prompt` with `streamingBehavior` while a turn runs, as OMP's terminal UI does (a `steer` would queue it as
  *   text), so a chip is drawn the same whether or not a turn is running.
- * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it.
+ * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it, except for the
+ * leading token, which is a (bare) chip the moment it ends the draft with a name that is exactly a command or a skill.
  */
 import type { ChatSlashCommand } from "../../chat/model.ts";
 import { SKILL_PREFIX, SKILL_TOKEN, startsWithLocalExecution } from "../../chat/prompt-routing.ts";
@@ -27,12 +28,17 @@ import { slashCatalogue } from "./slash-completion.ts";
 /** A skill is drawn with a book, any other command with a terminal prompt; the chip is the same otherwise. */
 export type CommandKind = "command" | "skill";
 
-/** One command chip: `[start, end)` is the token, plus the single space after it when the token is followed by one. `number` is always 0. */
+/**
+ * One command chip: `[start, end)` is the token, plus the single space after it when the token is followed by one. `number` is always 0.
+ * `bare` is a leading token that ends the draft with nothing after it: the name is exactly a listed command or skill, so it is drawn
+ * as a chip at once, but it is still being typed, so it is edited as text (see `isBareChip`).
+ */
 export interface CommandSpan {
 	readonly start: number;
 	readonly end: number;
 	readonly kind: CommandKind;
 	readonly number: 0;
+	readonly bare: boolean;
 }
 
 /** Everything the draft draws as an atomic chip. */
@@ -71,7 +77,17 @@ function tokenEnd(text: string, from: number): number {
 	return end;
 }
 
-/** The command chip of `text`: at most one, the token OMP acts on, once whitespace follows its name. */
+/** Whether the chip is a bare command chip: drawn as a block, but a character typed after it or deleted from it turns it back into text. */
+export function isBareChip(span: ChipSpan): boolean {
+	return "bare" in span && span.bare;
+}
+
+/**
+ * The command chip of `text`: at most one, the token OMP acts on. A leading token is a chip as soon as its name is complete: when
+ * whitespace follows it, or when it ends the draft (a `bare` chip, so `/report` is a block the moment it is exactly a command's
+ * name and text again once a character is added or removed). A skill in the middle of the text has no completion list, so it still
+ * waits for whitespace after it.
+ */
 export function findCommandChips(text: string, resolve: ResolveCommand): CommandSpan[] {
 	const trimmed = text.trimStart();
 	const lead = text.length - trimmed.length;
@@ -89,10 +105,11 @@ export function findCommandChips(text: string, resolve: ResolveCommand): Command
 		end = match.index + match[0].length;
 		skillOnly = true;
 	}
-	if (start < 0 || end >= text.length || !WHITESPACE.test(text[end]!)) return [];
+	const bare = end >= text.length;
+	if (start < 0 || (bare && skillOnly) || (!bare && !WHITESPACE.test(text[end]!))) return [];
 	const kind = resolve(text.slice(start + 1, end));
 	if (kind === null || (skillOnly && kind !== "skill")) return [];
-	return [{ start, end: text[end] === " " ? end + 1 : end, kind, number: 0 }];
+	return [{ start, end: !bare && text[end] === " " ? end + 1 : end, kind, number: 0, bare }];
 }
 
 /** Every chip of the draft in text order: attachment markers first claim their text, then the command chip takes what they leave. */

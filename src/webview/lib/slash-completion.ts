@@ -36,9 +36,19 @@ export function slashCatalogue(commands: readonly ChatSlashCommand[]): readonly 
  return catalogue.filter(command => DESK_COMMANDS.includes(command) || !classifySlashInput(`/${command.name}`, commands).denied);
 }
 
-/** Denied owners and every advertised alias disappear together; selection dispatches the owner. */
+/**
+ * Denied owners and every advertised alias disappear together; selection dispatches the owner. The list is ranked: the entry whose
+ * name or alias is exactly the query comes first (so a typed full name is the selected row), then every command (OMP's builtins, file,
+ * extension and custom commands, Desk's own) before any skill (`source: "skill"`), each group in catalogue order.
+ */
 export function slashSuggestions(commands: readonly ChatSlashCommand[], query: string): readonly ChatSlashCommand[] {
- return slashCatalogue(commands).filter(command => command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query))).slice(0, 50);
+ const rank = (command: ChatSlashCommand): number => (query.length > 0 && (command.name.toLowerCase() === query || command.aliases?.some(alias => alias.toLowerCase() === query)) ? 0 : command.source === "skill" ? 2 : 1);
+ return slashCatalogue(commands)
+  .filter(command => command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query)))
+  .map((command, index) => ({ command, index, rank: rank(command) }))
+  .sort((a, b) => a.rank - b.rank || a.index - b.index)
+  .slice(0, 50)
+  .map(entry => entry.command);
 }
 
 /** Whether a draft is Chat's own `/rewind` or `/branch` (case-insensitive, nothing after it): the page opens Rewind instead of sending. */
