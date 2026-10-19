@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { SessionEntry } from "@oh-my-pi/pi-wire";
 import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
+import { MAGIC_KEYWORDS } from "../shared/magic-keywords.ts";
 import { createChatModel, reduceChatFrame, snapshotOf } from "../chat/model.ts";
 import type { ChatSnapshotPayload } from "../chat/model.ts";
 import {
@@ -223,6 +224,26 @@ describe("parseChatHostMessage", () => {
 		assert.equal(parseChatHostMessage("omp:chat-state"), null);
 		assert.equal(parseChatHostMessage(null), null);
 	});
+
+	it("carries the magic keywords OMP acts on in table order, drops undeclared fields, and refuses the rest whole", () => {
+		const message = { type: "omp:chat-magic-keywords", keywords: ["ultrathink", "workflow"] };
+		assert.deepEqual(parseChatHostMessage({ ...message, extra: 1 }), message);
+		assert.deepEqual(parseChatHostMessage({ type: "omp:chat-magic-keywords", keywords: [] }), { type: "omp:chat-magic-keywords", keywords: [] });
+		const everything = { type: "omp:chat-magic-keywords", keywords: MAGIC_KEYWORDS.map(keyword => keyword.id) };
+		assert.deepEqual(parseChatHostMessage(everything), everything, "every keyword of the table fits");
+		for (const bad of [
+			{ type: "omp:chat-magic-keywords" },
+			{ type: "omp:chat-magic-keywords", keywords: "ultrathink" },
+			{ type: "omp:chat-magic-keywords", keywords: { 0: "ultrathink", length: 1 } },
+			{ type: "omp:chat-magic-keywords", keywords: ["ultrathink", "workflowz"] },
+			{ type: "omp:chat-magic-keywords", keywords: ["ultrathink", 3] },
+			{ type: "omp:chat-magic-keywords", keywords: ["constructor"] },
+			{ type: "omp:chat-magic-keywords", keywords: ["jevify", "jevify"] },
+			{ type: "omp:chat-magic-keywords", keywords: [...everything.keywords, "ultrathink"] },
+		]) {
+			assert.equal(parseChatHostMessage(bad), null, JSON.stringify(bad));
+		}
+	});
 });
 
 describe("parseChatWebviewMessage", () => {
@@ -429,6 +450,13 @@ describe("parseChatWebviewMessage", () => {
 		assert.equal(parseChatWebviewMessage({ ...restart, epoch: undefined }), null);
 		assert.equal(parseChatWebviewMessage({ ...restart, epoch: { nonce: "", counter: -1 } }), null);
 		assert.equal(parseChatWebviewMessage({ type: "omp:connect", requestId: REQUEST_ID }), null);
+	});
+
+	it("carries the magic-keywords query with no field at all: no id, no epoch, and whatever else a page adds is dropped", () => {
+		const read = { type: "omp:chat-magic-keywords-read" };
+		assert.deepEqual(parseChatWebviewMessage(read), read);
+		assert.deepEqual(parseChatWebviewMessage({ ...read, requestId: REQUEST_ID, epoch: EPOCH, keywords: ["ultrathink"], conversation: "tab:b", extra: 1 }), read);
+		assert.equal(parseChatWebviewMessage({ type: "omp:chat-magic-keywords", keywords: ["ultrathink"] }), null, "the host's answer is not a page message");
 	});
 });
 

@@ -62,6 +62,16 @@ Select text in an assistant reply, one of your own messages or an open thinking 
 - A `[Image #N]` or `[File #N: name]` reference is one unit: the caret hops over it and one `Backspace` removes it with its attachment.
 - A command or a skill that the draft names (`/compact `, `/skill:review `) is the same kind of unit; see [Commands and skills are blocks](#commands-and-skills-are-blocks).
 
+### Magic keywords
+
+OMP reacts to a few standalone words in a prompt (`ultrathink`, `orchestrate`, `workflowz`, `jevify`): it adds a hidden note to that turn, and `ultrathink` also asks for the most thinking. As in OMP's terminal UI, Chat paints such a word with a colour gradient, in the message box while you type and in the messages you have sent, so you can see which words OMP will act on.
+
+- **Which words count.** Only the exact lowercase word, on its own in prose: `orchestrate` glows; `orchestrate()`, `foo-orchestrate`, `path/orchestrate`, `orchestrate.md`, `orchestrates`, `Orchestrate` and `` `orchestrate` `` do not, and neither does a word inside a code block or an HTML tag. This is OMP's own rule, so a word that stays plain is one OMP does not act on either.
+- **Your OMP settings decide.** Chat follows OMP's `magicKeywords.enabled` and the switch of each word (`magicKeywords.ultrathink`, `.orchestrate`, `.workflow`, `.jevify`); turn them off in [OMP Settings](omp-settings.md). A change shows the next time a glowing word is on screen, within about half a minute, or when you click back into the message box or the window.
+- **Not painted:** a word inside a command, skill or file chip of the draft, and messages that an agent wrote on your behalf. Nothing about the text, the caret or the layout changes, and Find still marks its matches over the colour.
+- **Motion.** While the message box has the focus the colours sweep along the word; a sent message stands still. With reduced motion (or forced colours) the gradient stands still too.
+- **Contrast.** The hues are OMP's, with the lightness adjusted for your theme so the word reads like ordinary text. In the High Contrast themes the word is also underlined, as it is under forced colours (Windows contrast themes), so colour is not the only cue.
+
 ### Attaching documents
 
 - **Each file is a chip in the draft and a tile under it** (an icon chosen by the file's extension, `#N`, its name and size, a **✕**). The tile shows no file text. `Ctrl+Z` brings a removed file back. Attaching the same file twice gives two chips. A file that is not text (a PDF, a binary, an image format OMP cannot take) is refused by name and attaches nothing.

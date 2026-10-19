@@ -23,6 +23,7 @@ import { FIGURE_STYLES } from "./figure-styles.ts";
 import { HTML_PAGE_STYLES } from "./html-page-styles.ts";
 import { CHART_STYLES } from "./chart-styles.ts";
 import { MATH_STYLES } from "./math-styles.ts";
+import { MAGIC_KEYWORD_STYLES } from "./magic-keyword-styles.ts";
 
 const CSS = `
 ${BASE_CSS}
@@ -940,6 +941,7 @@ ${HTML_PAGE_STYLES}
 ${CHART_STYLES}
 ${MATH_STYLES}
 ${FIND_STYLES}
+${MAGIC_KEYWORD_STYLES}
 .omp-native-child button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 .omp-native-agent + .omp-native-agent { border-top: 1px solid var(--omp-border); padding-top: 8px; margin-top: 8px; }
 .omp-native-note, .omp-native-muted { color: var(--omp-muted); }

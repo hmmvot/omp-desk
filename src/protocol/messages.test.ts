@@ -389,6 +389,12 @@ describe("parseGuestHostMessage completion answers", () => {
 		assert.equal(parseGuestHostMessage({ type: "omp:anything" }), null);
 	});
 
+	it("routes the magic-keywords query and its answer through the guest vocabulary", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:chat-magic-keywords-read", extra: 1 }), { type: "omp:chat-magic-keywords-read" });
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:chat-magic-keywords", keywords: ["orchestrate"] }), { type: "omp:chat-magic-keywords", keywords: ["orchestrate"] });
+		assert.equal(parseGuestHostMessage({ type: "omp:chat-magic-keywords", keywords: ["nope"] }), null);
+	});
+
 	it("parses the recent-sessions request and the open-recent pick strictly", () => {
 		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:recent-sessions-request", requestId: 4, extra: "x" }), {
 			type: "omp:recent-sessions-request",

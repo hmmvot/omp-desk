@@ -25,6 +25,7 @@
  * | `omp:chat-display-preferences` | tool-call detail and accessibility settings |
  * | `omp:chat-code-theme` | the token rules of the colour themes that may be active (the page picks by its theme id), for fenced code; none means plain code |
  * | `omp:chat-keys` | the key each Desk command of the empty state effectively has (the user's own rebinding or removal applied) and the other commands that may take it; epoch-free, window-wide |
+ * | `omp:chat-magic-keywords` | the magic keywords OMP currently acts on for the tab (the answer to `omp:chat-magic-keywords-read`, to the asking page only); epoch-free |
  * | `omp:chat-operation` | the action the user asked for on this tab that is still being processed (kind, step id, elapsed time, request id), or none, with the end of the last one; epoch-free presentation only |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
@@ -33,7 +34,7 @@
  * | `omp:chat-btw`, `omp:chat-btw-delta`, `omp:chat-btw-result` | `/btw` side questions: records, streamed text and the answer to a panel request (`btw-messages.ts`); never part of the transcript |
  *
  * Page → host: `omp:chat-prompt`, `-steer`, `-follow-up`, `-abort`, `-ui-response`,
- * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-queue-remove`, `-navigate`, `-btw-request`.
+ * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-magic-keywords-read`, `-queue-remove`, `-navigate`, `-btw-request`.
  * Every mutation carries a page-minted `requestId`, which the host uses as the
  * exactly-once key (the rpc command id is `vsc:<requestId>`).
  */
@@ -81,6 +82,7 @@ import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 import { isEmptyStateKeyCommand, MAX_KEY_CONFLICTS, MAX_KEY_HINTS, MAX_KEY_LENGTH, MAX_KEY_SOURCE_LENGTH, type ChatKeyConflict, type ChatKeyHint } from "../shared/key-hints.ts";
+import { isMagicKeywordId, MAGIC_KEYWORDS, type MagicKeywordId } from "../shared/magic-keywords.ts";
 import { parseBtwHostMessage, parseBtwRequest, type ChatBtwHostMessage, type ChatBtwRequestMessage } from "./btw-messages.ts";
 
 // Bounds
@@ -249,6 +251,16 @@ export interface ChatKeysMessage {
 	keys: ChatKeyHint[];
 }
 
+/**
+ * The magic keywords OMP currently acts on for the tab (the master switch and the keyword's own switch on, in OMP's effective settings for
+ * the tab's profile and folder), in OMP's table order without duplicates; none is `[]`. The answer to `omp:chat-magic-keywords-read`, sent
+ * to the asking page only. Not bound to a conversation epoch: the settings belong to the profile and folder, not to one session.
+ */
+export interface ChatMagicKeywordsMessage {
+	type: "omp:chat-magic-keywords";
+	keywords: MagicKeywordId[];
+}
+
 /** One pending user message, named by the queue it waits in and its exact queue-chip text (what OMP matches on). */
 export interface ChatQueuedRef {
 	queue: "steering" | "followUp";
@@ -359,6 +371,7 @@ export type ChatHostMessage =
 	| ChatDisplayPreferencesMessage
 	| ChatCodeThemeMessage
 	| ChatKeysMessage
+	| ChatMagicKeywordsMessage
 	| ChatOperationMessage
 	| ChatStateMessage
 	| ChatSnapshotMessage
@@ -418,6 +431,15 @@ export interface ChatLoadOlderMessage {
 	beforeId: string;
 }
 
+/**
+ * The page asks which magic keywords OMP currently acts on for this tab (a read-only query the page sends lazily, when it first
+ * shows a keyword, and at most once in 30 s). It carries nothing: the host answers the asking page only, with
+ * `omp:chat-magic-keywords`, whether or not the conversation is live or the route is read-only.
+ */
+export interface ChatMagicKeywordsReadMessage {
+	type: "omp:chat-magic-keywords-read";
+}
+
 export interface ChatSubagentRequestMessage {
 	type: "omp:chat-subagent-read";
 	requestId: string;
@@ -464,6 +486,7 @@ export type ChatWebviewMessage =
 	| ChatUiResponseMessage
 	| ChatLoadOlderMessage
 	| ChatSubagentRequestMessage
+	| ChatMagicKeywordsReadMessage
 	| ChatResumeMessage
 	| ChatReconnectMessage
 	| ChatRestartMessage
@@ -1156,6 +1179,15 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 			const themes = parseCodeThemes(value.themes);
 			return themes === null ? null : { type: value.type, themes };
 		}
+		case "omp:chat-magic-keywords": {
+			if (!Array.isArray(value.keywords) || value.keywords.length > MAGIC_KEYWORDS.length) return null;
+			const keywords: MagicKeywordId[] = [];
+			for (const raw of value.keywords) {
+				if (!isMagicKeywordId(raw) || keywords.includes(raw)) return null;
+				keywords.push(raw);
+			}
+			return { type: value.type, keywords };
+		}
 		case "omp:chat-keys": {
 			if (!Array.isArray(value.keys) || value.keys.length > MAX_KEY_HINTS) return null;
 			const keys: ChatKeyHint[] = [];
@@ -1340,6 +1372,8 @@ function isQueuePurpose(value: unknown): value is ChatQueuePurpose {
  */
 export function parseChatWebviewMessage(value: unknown): ChatWebviewMessage | null {
 	if (!isRecord(value) || typeof value.type !== "string") return null;
+	// A read-only query with no fields: the page names nothing (no id, no epoch), so there is nothing to correlate or to fence.
+	if (value.type === "omp:chat-magic-keywords-read") return { type: "omp:chat-magic-keywords-read" };
 	if (!isChatRequestId(value.requestId)) return null;
 	const requestId = value.requestId;
 	switch (value.type) {

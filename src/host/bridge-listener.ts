@@ -85,7 +85,7 @@ const MASK_BYTES = 4;
 /**
  * Bridge exchanges independent from an irreversible OMP/session mutation.
  *
- * Ordered terminal traffic, read-only child history and shared display
+ * Ordered terminal traffic, read-only child history, the read-only magic-keywords query and shared display
  * preferences must not take the one-mutation slot. Each still requires the
  * exact authenticated document/route, is bounded while outstanding and receives
  * its own answer; none grants session writer authority.
@@ -94,6 +94,7 @@ const BRIDGE_STREAM_OPERATIONS: Record<string, true> = {
 	"guest-version": true,
 	"provider-login": true,
 	"chat-subagent-read": true,
+	"chat-magic-keywords-read": true,
 	"terminal-attach": true,
 	"terminal-probe": true,
 	"terminal-copy-reply": true,

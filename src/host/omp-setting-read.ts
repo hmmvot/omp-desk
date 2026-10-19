@@ -42,3 +42,34 @@ export async function readOmpSetting(input: OmpSettingRead): Promise<unknown> {
 	if (!isRecord(parsed) || parsed.key !== input.key || !("value" in parsed)) throw new Error(`omp config get ${input.key} answered for another setting`);
 	return parsed.value;
 }
+
+export interface OmpSettingsRead extends Omit<OmpSettingRead, "key"> {
+	/** The settings wanted; the rest of OMP's list is not looked at. */
+	readonly keys: readonly string[];
+}
+
+/**
+ * Several OMP settings with ONE `omp config list --json` call (an object keyed by setting id, each `{ value?, type, description }`),
+ * run where the session runs, with the session's profile. Read-only. Resolves to the requested `keys` that OMP reports with a
+ * `value`; a key OMP does not know, or lists without a value, is absent from the result (an OMP older than a setting reports
+ * nothing for it). Rejects when OMP cannot run, exits non-zero, or prints something that is not an object of settings. Only the
+ * exit code, never OMP's output, goes into the rejection.
+ */
+export async function readOmpSettings(input: OmpSettingsRead): Promise<Record<string, unknown>> {
+	const result = await input.run(input.executable, ["config", "list", "--json"], SETTING_READ_TIMEOUT_MS, { cwd: input.cwd, env: input.env });
+	if (result.exitCode !== 0) throw new Error(`omp config list exited with ${result.exitCode}`);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(result.stdout);
+	} catch {
+		throw new Error("omp config list printed no JSON");
+	}
+	if (!isRecord(parsed)) throw new Error("omp config list did not print an object of settings");
+	const values: Record<string, unknown> = {};
+	for (const key of input.keys) {
+		if (!Object.hasOwn(parsed, key)) continue;
+		const setting = parsed[key];
+		if (isRecord(setting) && "value" in setting) values[key] = setting.value;
+	}
+	return values;
+}

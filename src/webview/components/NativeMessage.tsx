@@ -1,11 +1,12 @@
-import { useId, useMemo } from "react";
-import type { ChatEntry, ChatMessage, CustomMessage, ExecutionMessage, SummaryMessage } from "../../chat/messages.ts";
+import { useId, useMemo, useRef } from "react";
+import type { ChatEntry, ChatMessage, CustomMessage, ExecutionMessage, SummaryMessage, UserMessage } from "../../chat/messages.ts";
 import { advisorNotes, entryMessage, userSkill, type AdvisorNote } from "../../chat/messages.ts";
 import { isRecord } from "../../shared/guards.ts";
 import { DROPPED_FRAME_NOTICE_SOURCE, EXTENSION_ERROR_NOTICE_SOURCE } from "../../chat/events.ts";
 import { TODO_STATUS_WORD } from "../../chat/hud-summary.ts";
 import { fmtDuration, fmtTokens } from "../../shared/format.ts";
 import { splitUserText } from "../lib/file-block-rows.ts";
+import { useMagicKeywords } from "../lib/use-magic-keywords.ts";
 import { Markdown } from "./Markdown.tsx";
 import { FileBlockRows } from "./FileBlockRow.tsx";
 import { AssistantContentView, MessageContentView } from "./MessageContent.tsx";
@@ -271,14 +272,23 @@ function SummaryView({ summary, superseded = false }: { summary: SummaryMessage 
 	</section>;
 }
 
+/**
+ * What the user sent. OMP's terminal paints the magic keywords of a sent message with their gradient and so does this bubble, over
+ * the Markdown as rendered and never in code (`useMagicKeywords`); agent-attributed input is not the user's own prompt and stays plain.
+ */
+function UserMessageView({ message }: { message: UserMessage }) {
+	const section = useRef<HTMLElement>(null);
+	useMagicKeywords(section, message.synthetic ? null : nativeText(message.content));
+	return <section ref={section} className="omp-native-message omp-user">
+		{message.synthetic ? <NativeDisclosure title="Agent-attributed input"><MessageContentView content={message.content} references quotable /></NativeDisclosure> : <MessageContentView content={message.content} references quotable emphasis={false} />}
+	</section>;
+}
+
 function MessageView({ message, superseded, irc }: { message: ChatMessage; superseded?: boolean; irc?: IrcDisclosure }) {
 	switch (message.role) {
 		// Native developer inputs seed model context, not a user transcript bubble.
 		case "developer": return null;
-		case "user":
-			return <section className="omp-native-message omp-user">
-				{message.synthetic ? <NativeDisclosure title="Agent-attributed input"><MessageContentView content={message.content} references quotable /></NativeDisclosure> : <MessageContentView content={message.content} references quotable emphasis={false} />}
-			</section>;
+		case "user": return <UserMessageView message={message} />;
 		case "custom": case "hookMessage": return <CustomMessageView message={message} irc={irc} />;
 		case "bashExecution": case "pythonExecution": return <ExecutionView message={message} />;
 		case "branchSummary": case "compactionSummary": return <SummaryView summary={message} superseded={superseded} />;

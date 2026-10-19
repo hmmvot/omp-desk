@@ -5,8 +5,9 @@
  * it has no binding, claim, bridge endpoint or restore identity, and the writer cannot be reached
  * through it. The host attaches it to the conversation as a {@link ChatPage} once the
  * document announces itself, so it receives the same epoch-bound state, snapshot and event stream
- * as a chat page; this registry is the gate: it forwards to the conversation only the one read-only
- * child exchange (`omp:chat-subagent-read`) and the announcement, and drops every other message
+ * as a chat page; this registry is the gate: it forwards to the conversation only the two read-only
+ * exchanges (`omp:chat-subagent-read` and `omp:chat-magic-keywords-read`, which the runtime answers to this page alone)
+ * and the announcement, and drops every other message
  * before the runtime sees it. It answers two other messages itself, as presentation that never
  * reaches the runtime: `omp:open-detail` opens or reveals a sibling tab of the same conversation
  * (the roster's rows open that agent's own tab), and `omp:terminal-link-open` with an `http(s)`
@@ -180,7 +181,7 @@ export class DetailTabs {
 				return;
 			}
 		}
-		if (message.type === "omp:chat-subagent-read") {
+		if (message.type === "omp:chat-subagent-read" || message.type === "omp:chat-magic-keywords-read") {
 			const outcome = await this.#host.handleMessage(tab.conversation, message, tab.page);
 			if (outcome !== "accepted") this.#host.log.debug(`detail ${tab.page.id}: ${message.type} was ${outcome}`);
 			return;

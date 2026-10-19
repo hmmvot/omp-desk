@@ -125,7 +125,7 @@ describe("detail tab registry", () => {
 		assert.equal(tabs.open("tab:a", todo), "created", "a closed tab can be opened again");
 	});
 
-	it("serves only the read-only child read; every other request is dropped before the runtime", async () => {
+	it("serves only the two read-only reads; every other request is dropped before the runtime", async () => {
 		const { tabs, panels, handled, logs } = fixture();
 		tabs.open("tab:a", agent("Anna"));
 		const requestId = "a".repeat(32);
@@ -133,16 +133,21 @@ describe("detail tab registry", () => {
 		await panels[0]!.send({ type: "omp:chat-subagent-read", requestId, epoch, subagentId: "Anna", fromByte: 0 });
 		assert.equal(handled.length, 1);
 		assert.equal(handled[0]!.conversation, "tab:a");
+		await panels[0]!.send({ type: "omp:chat-magic-keywords-read", conversation: "tab:b", extra: 1 });
+		assert.equal(handled.length, 2);
+		assert.equal(handled[1]!.conversation, "tab:a", "the read is served under the tab's own conversation, whatever the page names");
+		assert.deepEqual(handled[1]!.message, { type: "omp:chat-magic-keywords-read" }, "the page's extra fields are dropped by the parser");
 		for (const message of [
 			{ type: "omp:chat-prompt", requestId, epoch, text: "hello" },
 			{ type: "omp:chat-abort", requestId, epoch },
 			{ type: "omp:chat-resume", requestId },
 			{ type: "omp:chat-load-older", requestId, epoch },
+			{ type: "omp:chat-magic-keywords", keywords: ["ultrathink"] },
 			{ type: "omp:session-mode", mode: "terminal" },
 			{ type: "omp:control-request", scope: "x".repeat(32), requestId, action: "snapshot" },
 		]) await panels[0]!.send(message);
-		assert.equal(handled.length, 1, "nothing but the child read reached the runtime");
-		assert.ok(logs.length >= 6);
+		assert.equal(handled.length, 2, "nothing but the two reads reached the runtime");
+		assert.ok(logs.length >= 7);
 	});
 
 	it("opens or reveals a sibling tab of the same conversation when a detail page asks, and never reaches the runtime", async () => {

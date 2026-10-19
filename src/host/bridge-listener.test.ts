@@ -541,7 +541,7 @@ describe("bridge listener session", () => {
 				admitted.push(request.operation);
 				// Leave both reads/preferences and the real mutation unanswered:
 				// non-session exchanges must not reserve that mutation's slot.
-				if (admitted.length === 4) allAdmitted.resolve();
+				if (admitted.length === 5) allAdmitted.resolve();
 			},
 		});
 		const client = await TestClient.connect(stream.port);
@@ -563,16 +563,17 @@ describe("bridge listener session", () => {
 		await send("a".repeat(32), "1", "terminal-input", { generation: "b".repeat(32), data: "aGk=" });
 		await send("c".repeat(32), "2", "terminal-resize", { generation: "b".repeat(32), cols: 80, rows: 24 });
 		await send("2".repeat(32), "4", "chat-subagent-read", { subagentId: "Worker", fromByte: 0 });
-		await send("d".repeat(32), "5", "set-model", { a: 1 });
+		await send("3".repeat(32), "5", "chat-magic-keywords-read", { type: "omp:chat-magic-keywords-read" });
+		await send("d".repeat(32), "6", "set-model", { a: 1 });
 		await allAdmitted.promise;
 
-		assert.deepEqual(admitted, ["terminal-input", "terminal-resize", "chat-subagent-read", "set-model"]);
+		assert.deepEqual(admitted, ["terminal-input", "terminal-resize", "chat-subagent-read", "chat-magic-keywords-read", "set-model"]);
 		assert.equal(client.socket.destroyed, false, "slow non-session exchanges must not close the authenticated session");
 
 		// The mutation slot is genuinely held now: a second mutation is a protocol error.
-		await send("e".repeat(32), "6", "set-thinking", { a: 2 });
+		await send("e".repeat(32), "7", "set-thinking", { a: 2 });
 		assert.equal(await client.closed(), true, "a second unanswered mutation closes the session");
-		assert.deepEqual(admitted, ["terminal-input", "terminal-resize", "chat-subagent-read", "set-model"]);
+		assert.deepEqual(admitted, ["terminal-input", "terminal-resize", "chat-subagent-read", "chat-magic-keywords-read", "set-model"]);
 	});
 
 	it("pushes one terminal frame, drops a fenced push and preserves the valid route after a rejected acknowledgement", async () => {

@@ -9,6 +9,7 @@
 import type { MutableRefObject, ReactNode } from "react";
 import { useLayoutEffect, useRef } from "react";
 import { DraftSurface, type SurfaceConfig, type SurfaceOptions } from "../lib/draft-surface";
+import { ComposerKeywords } from "../lib/magic-keyword-views";
 
 export function DraftEditor({ surfaceRef, text, config, options }: {
 	/** Set to the surface while the element is mounted, `null` otherwise. */
@@ -42,7 +43,10 @@ export function DraftEditor({ surfaceRef, text, config, options }: {
 		surface.configure(latest.current.config);
 		applied.current = latest.current.config;
 		surfaceRef.current = surface;
+		// OMP's magic keywords are painted over the draft without a change to its DOM (`lib/magic-keyword-views.ts`).
+		const keywords = new ComposerKeywords(element);
 		return () => {
+			keywords.dispose();
 			// Settles an open composition while the element still has its DOM, then lets go.
 			surface.dispose();
 			surfaceRef.current = null;

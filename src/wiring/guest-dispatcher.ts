@@ -60,7 +60,7 @@ import type { Logger } from "../shared/logger.ts";
 import { fileSearchValue, normalizeSymbolQuery } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
 
-/** The chat commands a page sends; each is deduplicated by its own request id in the conversation. */
+/** The chat commands a page sends; each but the field-less read-only `omp:chat-magic-keywords-read` is deduplicated by its own request id in the conversation. */
 export const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"omp:chat-prompt",
 	"omp:chat-steer",
@@ -74,6 +74,7 @@ export const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"omp:chat-queue-remove",
 	"omp:chat-btw-request",
 	"omp:chat-subagent-read",
+	"omp:chat-magic-keywords-read",
 	"omp:chat-navigate",
 ]);
 
@@ -479,7 +480,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			deps.rememberPrompt(message.text, tabId);
 		}
 		if (outcome !== "accepted" || message.type === "omp:chat-abort") {
-			const line = `tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`;
+			const line = `tab ${tabId}: ${message.type} ${"requestId" in message ? message.requestId.slice(0, 8) : "-"} was ${outcome}`;
 			if (delivered) deps.log.info(line);
 			else deps.log.warn(line);
 		}

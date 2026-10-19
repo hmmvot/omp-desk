@@ -211,6 +211,35 @@ LICENSE. The repository-level MIT text below additionally carries the notice tha
 applies to the adapted collab-web source.
 
 ================================================================================
+@oh-my-pi/pi-tui — magic keyword matcher (source adapted)
+================================================================================
+
+Project:      oh-my-pi
+Repository:   https://github.com/can1357/oh-my-pi
+Upstream dir: packages/tui (pi-tui)
+Version read: 18.12.2 (the installed package the adapted code was read from)
+License:      MIT
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
+
+Adapted file in this repository (it keeps a provenance header naming the
+upstream files it came from):
+
+  src/shared/magic-keywords.ts   from pi-tui src/prompt/magic-keywords.ts and
+                                 src/prompt/markdown-prose.ts
+
+The module reproduces OMP's rule for what counts as a standalone magic keyword
+in prose: the two boundary patterns and the masking of code spans, fenced code
+and HTML/XML markup (`maskNonProse`). It is pinned to a recording of the
+installed OMP by src/omp/magic-keywords.test.ts, so a difference is a test
+failure. The hue gradient arithmetic and the keyword table are restated from
+OMP's behaviour (src/prompt/gradient-highlight.ts, src/prompt/custom-editor.ts
+and the coding-agent magic keyword table); the paint, the colour solver and the
+Webview code are original to this project.
+
+The MIT text applies as reproduced under "MIT License (oh-my-pi)" below.
+
+================================================================================
 Paseo — paced text reveal policy (source adapted)
 ================================================================================
 

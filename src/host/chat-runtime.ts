@@ -61,6 +61,10 @@ import { rewindBlockedReason } from "../chat/rewind-mode.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "../chat/rewind.ts";
 import type { CodeTheme } from "../chat/code-theme.ts";
 import type { ChatKeyHint } from "../shared/key-hints.ts";
+import type { MagicKeywordId } from "../shared/magic-keywords.ts";
+
+/** How long an answer to `omp:chat-magic-keywords-read` is reused for the same tab before OMP's CLI is asked again. */
+const MAGIC_KEYWORDS_REUSE_MS = 5_000;
 
 /** One route that shows a conversation. */
 export interface ChatPage {
@@ -178,6 +182,19 @@ export interface ChatRuntimeOptions {
 	 * it; `undefined` when it cannot be read. Called when a fully closed TODO list needs its timer.
 	 */
 	readonly readTodoClearDelay?: (tabId: string, cwd: string) => Promise<unknown>;
+	/**
+	 * The magic keywords OMP currently acts on for the tab's profile and folder (`omp:chat-magic-keywords-read`), as OMP's own CLI reports
+	 * its settings; `null` when they cannot be read. `cwd` is the tab's conversation folder, `undefined` for a tab with no conversation;
+	 * `profile` is what {@link ChatRuntimeOptions.profileOf} answered when the read was asked for, and is the profile the read MUST use.
+	 */
+	readonly readMagicKeywords?: (tabId: string, cwd: string | undefined, profile: string | null) => Promise<readonly MagicKeywordId[] | null>;
+	/**
+	 * The OMP profile the tab currently runs under, `null` for the default one. Asked once per magic-keywords query: it keys the reuse and
+	 * the in-flight sharing of the answer, and is handed to the read, because a tab entry can be rebound to another profile.
+	 */
+	readonly profileOf?: (tabId: string) => string | null;
+	/** Test seam: the clock of the 5 s reuse of a magic-keywords answer, in milliseconds; defaults to `Date.now`. */
+	readonly now?: () => number;
 }
 
 /**
@@ -225,6 +242,12 @@ export class ChatRuntime {
 	readonly #pages = new Map<string, Map<string, ChatPage>>();
 	#generation = 0;
 	readonly #settingsRequests = new Map<string, Promise<ChatCommandOutcome>>();
+	/**
+	 * The magic-keywords read of each tab in flight, and the last answer of each tab (see {@link ChatRuntime.#serveMagicKeywords}). Both are
+	 * valid for one folder and one profile only (a different one never reuses or joins them) and are forgotten by {@link ChatRuntime.#drop}.
+	 */
+	readonly #magicKeywordReads = new Map<string, { readonly cwd: string | undefined; readonly profile: string | null; readonly read: Promise<readonly MagicKeywordId[] | null> }>();
+	readonly #magicKeywordAnswers = new Map<string, { readonly cwd: string | undefined; readonly profile: string | null; readonly at: number; readonly keywords: readonly MagicKeywordId[] }>();
 
 	readonly #unlistenPending: (() => void) | null;
 
@@ -398,6 +421,8 @@ export class ChatRuntime {
 		this.#unlistenPending?.();
 		for (const tabId of [...this.#conversations.keys()]) this.#drop(tabId);
 		this.#pages.clear();
+		this.#magicKeywordAnswers.clear();
+		this.#magicKeywordReads.clear();
 	}
 
 	/**
@@ -520,6 +545,8 @@ export class ChatRuntime {
 	 * conversation; they may never write to a running session.
 	 */
 	async handleMessage(tabId: string, message: ChatWebviewMessage, origin: ChatPage | null): Promise<ChatCommandOutcome> {
+		// Before every check that refuses a route that cannot write or a tab that has no session: it reads settings and nothing else.
+		if (message.type === "omp:chat-magic-keywords-read") return this.#serveMagicKeywords(tabId, origin);
 		const conversation = this.#conversations.get(tabId);
 		if (conversation === undefined) {
 			// A stopped session whose conversation was released still shows its Resume button; the
@@ -639,6 +666,63 @@ export class ChatRuntime {
 		}
 	}
 
+	/**
+	 * Answer `omp:chat-magic-keywords-read` to the asking page alone. A read-only query about OMP's settings, not about the session: it is
+	 * served on every route (a detail tab, a view-only history, a tab with no live conversation) and writes nothing. One read per tab,
+	 * folder and profile is in flight at a time and every page that asked meanwhile waits for it; an answer is reused for
+	 * {@link MAGIC_KEYWORDS_REUSE_MS}. A read that cannot be made or fails answers nothing, so the page keeps what it has.
+	 */
+	async #serveMagicKeywords(tabId: string, origin: ChatPage | null): Promise<ChatCommandOutcome> {
+		const read = this.#options.readMagicKeywords;
+		if (origin === null) return "ignored";
+		if (read === undefined) {
+			this.#options.log?.debug(`tab ${tabId}: the magic keywords were asked for but this host cannot read them`);
+			return "ignored";
+		}
+		const cwd = this.#conversations.get(tabId)?.cwd;
+		const profile = this.#options.profileOf?.(tabId) ?? null;
+		const clock = this.#options.now ?? Date.now;
+		const now = clock();
+		let keywords: readonly MagicKeywordId[] | null;
+		const reusable = this.#magicKeywordAnswers.get(tabId);
+		const inFlight = this.#magicKeywordReads.get(tabId);
+		if (reusable !== undefined && reusable.cwd === cwd && reusable.profile === profile && now - reusable.at < MAGIC_KEYWORDS_REUSE_MS) {
+			keywords = reusable.keywords;
+		} else if (inFlight !== undefined && inFlight.cwd === cwd && inFlight.profile === profile) {
+			keywords = await inFlight.read;
+		} else {
+			const started = (async (): Promise<readonly MagicKeywordId[] | null> => {
+				try {
+					return await read(tabId, cwd, profile);
+				} catch (error) {
+					this.#options.log?.debug(`tab ${tabId}: the magic keywords could not be read (${error instanceof Error ? error.message : "unknown error"})`);
+					return null;
+				}
+			})();
+			const entry = { cwd, profile, read: started };
+			this.#magicKeywordReads.set(tabId, entry);
+			let current: boolean;
+			try {
+				keywords = await started;
+			} finally {
+				// Still the tab's read: not replaced by a read of another folder or profile, not dropped with its conversation.
+				current = this.#magicKeywordReads.get(tabId) === entry;
+				if (current) this.#magicKeywordReads.delete(tabId);
+			}
+			if (keywords !== null && current) {
+				const at = clock();
+				for (const [key, answer] of this.#magicKeywordAnswers) if (at - answer.at >= MAGIC_KEYWORDS_REUSE_MS) this.#magicKeywordAnswers.delete(key);
+				this.#magicKeywordAnswers.set(tabId, { cwd, profile, at, keywords });
+			}
+		}
+		if (keywords === null) {
+			this.#options.log?.debug(`tab ${tabId}: the magic keywords are unknown; the page keeps what it has`);
+			return "ignored";
+		}
+		origin.post({ type: "omp:chat-magic-keywords", keywords: [...keywords] });
+		return "accepted";
+	}
+
 	#nextNonce(): string {
 		this.#generation += 1;
 		return `${this.#options.hostNonce}-${this.#generation}`;
@@ -689,6 +773,9 @@ export class ChatRuntime {
 	}
 
 	#drop(tabId: string): void {
+		// A replaced conversation never reuses the answer of the old one, nor joins its read in flight.
+		this.#magicKeywordAnswers.delete(tabId);
+		this.#magicKeywordReads.delete(tabId);
 		const existing = this.#conversations.get(tabId);
 		if (existing === undefined) return;
 		existing.disposed = true;

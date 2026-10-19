@@ -35,7 +35,8 @@ import { startLoginSession } from "./host/provider-login-rpc";
 import { createLoginUi } from "./wiring/provider-login-ui";
 import { runOmpCli } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS, UsageFailureNotes } from "./host/provider-usage";
-import { readOmpSetting, TODO_CLEAR_DELAY_SETTING } from "./host/omp-setting-read";
+import { readOmpSetting, readOmpSettings, TODO_CLEAR_DELAY_SETTING } from "./host/omp-setting-read";
+import { enabledMagicKeywords, MAGIC_KEYWORD_SETTING_KEYS } from "./shared/magic-keywords";
 import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./shared/footer-metadata";
@@ -1966,6 +1967,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       } catch (error) {
         log.warn(`tab ${tabId}: ${TODO_CLEAR_DELAY_SETTING} could not be read (${messageOf(error)}); OMP's default applies`);
         return undefined;
+      }
+    },
+    // The magic keywords OMP acts on: the master switch and the keyword's own switch of OMP's effective settings for this tab's profile and folder, in one `omp config list`.
+    // A tab with no conversation has no folder of its own: its indexed folder, else the first workspace folder, else the home folder.
+    // The profile is resolved once per query by `profileOf` and handed to the read, so the reuse and the sharing of an answer are keyed by the profile the read runs under.
+    profileOf: tabId => index.get(tabId)?.scope.profile ?? null,
+    readMagicKeywords: async (tabId, cwd, profile) => {
+      try {
+        const executable = await executableFor(hostOf(stateOf(tabId)) ?? null);
+        const values = await readOmpSettings({
+          run: runOmpCli, executable,
+          cwd: cwd ?? index.get(tabId)?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
+          env: ompCliScopeEnvironment(profile),
+          keys: MAGIC_KEYWORD_SETTING_KEYS,
+        });
+        return enabledMagicKeywords(values);
+      } catch (error) {
+        log.warn(`tab ${tabId}: the magic keyword settings could not be read (${messageOf(error)}); the page keeps what it has`);
+        return null;
       }
     },
   });
@@ -5492,9 +5512,9 @@ function handleBridgeRequest(
       .catch(() => refuseBridgeRequest(session, route.routeGeneration, request.requestId));
     return;
   }
-  if (request.operation === "chat-subagent-read" ||
+  if (request.operation === "chat-subagent-read" || request.operation === "chat-magic-keywords-read" ||
       request.operation === "terminal-link-validate" || request.operation === "terminal-link-symbols" || request.operation === "terminal-link-open") {
-    // Child history and local file navigation are presentation,
+    // Child history, the magic-keywords query and local file navigation are presentation,
     // not writer mutations. The authenticated current document still owns the
     // request; runtime epoch and post-I/O document checks remain authoritative.
     const parsed = parseGuestWebviewMessage({ ...(payload as Record<string, unknown>), type: `omp:${request.operation}` });
@@ -5591,6 +5611,7 @@ const BRIDGE_OPERATIONS: Record<string, true> = {
   "chat-queue-remove": true,
   "chat-btw-request": true,
   "chat-subagent-read": true,
+  "chat-magic-keywords-read": true,
   "terminal-attach": true,
   "terminal-probe": true,
   "terminal-input": true,
@@ -10159,7 +10180,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     return;
   }
   if (parsed.type === "omp:chat-load-older" || parsed.type === "omp:chat-resume" ||
-      parsed.type === "omp:chat-subagent-read") {
+      parsed.type === "omp:chat-subagent-read" || parsed.type === "omp:chat-magic-keywords-read") {
     await s.guestDispatcher.runChatCommand(state.tabId, parsed, panelChatPage(state, panel));
     return;
   }
