@@ -9,7 +9,7 @@
  */
 import { magicGradient, MAGIC_THEME_KINDS, type MagicThemeKind } from "../shared/magic-colour.ts";
 import { MAGIC_GRADIENT_STOPS, MAGIC_KEYWORDS } from "../shared/magic-keywords.ts";
-import { magicHighlightName } from "./lib/magic-keyword-paint.ts";
+import { magicHighlightName } from "./lib/magic-keyword-name.ts";
 
 /** The selector prefix of a theme kind: the dark palette is the base every other kind overrides. */
 const THEME_SELECTOR: Readonly<Record<MagicThemeKind, string>> = {

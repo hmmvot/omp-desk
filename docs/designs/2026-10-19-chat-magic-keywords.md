@@ -1,11 +1,11 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-19
 ---
 
 # Magic keywords in Chat: OMP's gradient on the standalone words of the composer and of sent messages
 
-Requested by the maintainer (2026-10-19) as part of closing the gaps between OMP Desk's Chat and OMP's terminal UI (TUI). Implemented in the working tree; the independent architecture review this repository requires (`docs/README.md`, Required review) has not happened yet, so the status stays `proposed`.
+Requested by the maintainer (2026-10-19) as part of closing the gaps between OMP Desk's Chat and OMP's terminal UI (TUI). Implemented and accepted after one independent architecture review (see Architecture Review).
 
 ## Problem
 
@@ -30,13 +30,14 @@ Read from the installed OMP 18.12.2 sources:
 - The matcher: `pi-tui` `src/prompt/magic-keywords.ts` (the two boundary patterns, `magicKeywordRanges`, `containsMagicKeyword`) over the text with code and markup masked out by `src/prompt/markdown-prose.ts` (`maskNonProse`). A word is case-sensitive and counts only as standalone prose: not after a letter, digit, `_`, `.`, `/`, `\` or `-` or after `::`; not before a letter, digit, `_`, `/`, `\` or `-`, before `.` and a word character, or before `(`; never inside a Markdown code span (any backtick count), a fenced block (backticks or tildes, up to three spaces of indentation, with the closing-fence rules) or an HTML/XML tag, section or comment.
 - The paint: `pi-tui` `src/prompt/gradient-highlight.ts`: 14 stops, stop `k` has hue `round((from + k/14 * (to - from)) mod 360)` and the colour `hsl(hue, 90%, 62%)`; character `i` of an `n`-character word takes stop `floor(((i/n + phase) mod 1) * 14) mod 14`. The editor (`src/prompt/custom-editor.ts`) animates the phase while it has the keyboard focus and a keyword is painted: a frame every 70 ms, one sweep in 1800 ms. A sent message is painted with phase 0.
 - The TUI paints a keyword whether or not the tools its notice needs are enabled.
+- The settings gate: the TUI's editor paints by the master switch alone (its `magicKeywordsEnabled` is `magicKeywords.enabled`) and a sent-message bubble paints without reading the settings; only the session reads each keyword's own switch, when it decides whether to append the notice.
 
 ## Goals and Non-goals
 
 Goals:
 
 - The composer and the user's own sent messages paint the same words by the same rule as OMP, with OMP's hues.
-- Follow OMP's own settings: a keyword OMP is set not to act on is not painted.
+- Follow OMP's own settings: a keyword OMP is set not to act on is not painted. This is deliberately stricter than the TUI, whose paint follows the master switch alone (see What OMP does): Desk paints what OMP acts on.
 - Read as well as ordinary text on every VS Code theme kind.
 - Change nothing about how the composer edits or how a message is rendered.
 
@@ -53,7 +54,7 @@ Non-goals:
 
 - `src/shared/magic-keywords.ts` (pure, no DOM): the table, `findMagicKeywords`, `containsMagicKeyword`, `hasMagicKeyword`, `maskNonProse` (adapted from `markdown-prose.ts`, MIT; provenance header and `THIRD_PARTY_NOTICES.txt`), `enabledMagicKeywords(values)` from the five settings, and the gradient arithmetic (`magicStopHue`, `magicStopAt`, `magicPhaseAt`; `MAGIC_GRADIENT_STOPS` = 14, `MAGIC_TUI_SATURATION` = 90, `MAGIC_TUI_LIGHTNESS` = 62, `MAGIC_SHIMMER_FRAME_MS` = 70, `MAGIC_SHIMMER_PERIOD_MS` = 1800).
 - `src/shared/magic-colour.ts` (pure): HSL to RGB, WCAG luminance and contrast ratio, `MAGIC_THEME_DESIGN`, `magicStopColour`, `magicGradient` (§7).
-- Page: `src/webview/lib/magic-keyword-settings.ts` (the store of enabled ids and the throttled question), `magic-keyword-scan.ts`, `magic-keyword-paint.ts`, `magic-keyword-views.ts` (`ComposerKeywords`, `mountBubbleKeywords`), `use-magic-keywords.ts`; `src/webview/magic-keyword-styles.ts` generates the `::highlight()` rules. Mounted in `components/DraftEditor.tsx` and `components/NativeMessage.tsx` (`UserMessageView`).
+- Page: `src/webview/lib/magic-keyword-settings.ts` (the store of enabled ids, the throttled question and the focus refresh), `magic-keyword-scan.ts`, `magic-keyword-name.ts` (the highlight names: a leaf module the paint engine and the stylesheet generator share), `magic-keyword-paint.ts`, `magic-keyword-views.ts` (`ComposerKeywords`, `mountBubbleKeywords`), `use-magic-keywords.ts`; `src/webview/magic-keyword-styles.ts` generates the `::highlight()` rules. Mounted in `components/DraftEditor.tsx` and `components/NativeMessage.tsx` (`UserMessageView`).
 - Host: `ChatRuntime` (`src/host/chat-runtime.ts`), the wiring in `src/extension.ts` and `src/host/omp-setting-read.ts`.
 - Drift pin: `src/omp/magic-keywords-recorder.ts`, `magic-keywords-corpus.ts`, `fixtures/omp-magic-keywords.json`, `magic-keywords.test.ts`, `magic-keywords.live.test.ts` (§4).
 
@@ -69,11 +70,11 @@ The host serves the question in `ChatRuntime.handleMessage` **before** the check
 Cost control, because that call starts a process:
 
 - **Lazy.** The page asks only when a keyword word stands in the composer or in a sent message, and on the composer's or the window's focus while one does. A page that never shows a keyword never starts the CLI. The host is not asked on every page announce and no config file is watched.
-- **Throttled on the page.** `requestMagicKeywordSettings` posts at most once per 30 s (`MAGIC_KEYWORD_REFRESH_MS`); a post that provably went nowhere does not count as asked.
+- **Throttled on the page.** `requestMagicKeywordSettings` posts at most once per 30 s (`MAGIC_KEYWORD_REFRESH_MS`); a post that provably went nowhere does not count as asked. The one exception is the reader coming back: the composer getting the keyboard focus and the window regaining it, while a keyword is on screen, call `refreshMagicKeywordSettings`, which posts whatever the age of the last question and counts as the last question. A burst of focus events is bounded by the host's sharing and reuse (next bullet), not by the page.
 - **Shared and reused on the host.** Concurrent askers of a tab (with the same folder) share one read; a successful answer is reused for 5 s (`MAGIC_KEYWORDS_REUSE_MS`). A failed read is not cached.
 - **Failure.** A read that cannot be made, a non-zero exit or output that is not a settings object logs a warning, and the host answers nothing: the page keeps what it has.
 
-Until the host answers (and on a route that cannot carry the question) the page counts every keyword as on, as OMP's terminal does before it has judged. A setting changed in OMP is therefore picked up the next time a keyword is on screen and the page asks: at least 30 s after the last question, or on the composer's or window's focus.
+Until the host answers (and on a route that cannot carry the question) every keyword counts as on, as in OMP's terminal UI, whose paint follows the master switch alone (see What OMP does). Once the host has answered, Desk is deliberately stricter than the TUI: it paints a keyword only when the master switch and the keyword's own switch are on, the pair OMP's session uses to decide whether it acts on the word. A setting changed in OMP is picked up the next time a keyword is on screen and the page asks: at least 30 s after the last question, or at once when the composer or the window gets the focus.
 
 Routes: the question is also allowed on the surviving-bridge route (`chat-magic-keywords-read` in `bridge-listener.ts` and the matching table of `extension.ts`, outside the one-mutation slot), through the detail-tab gate (`src/host/detail-tabs.ts`, which forwards it to the conversation under the tab's own conversation id whatever the page names) and `src/wiring/guest-dispatcher.ts`. It is a presentation read, never a writer mutation.
 
@@ -149,7 +150,7 @@ A fixed palette is rejected in the alternatives below.
 - The Custom Highlight API is required (VS Code's Chromium has it).
 - A keyword inside a command, skill or attachment chip is not painted; synthetic input, skill-invocation cards and collab cards are not painted.
 - The colours are solved against worst-case surfaces per theme kind, not each custom theme's exact background: on a theme whose surface is easier the keyword reads better than needed, and a custom theme whose surface is harder than the design surface of its kind may read worse.
-- A setting changed in OMP shows up only when the page asks again: while a keyword is on screen, at least 30 s after the last question (or on focus), and the host may answer from a 5 s reuse.
+- A setting changed in OMP shows up only when the page asks again: while a keyword is on screen, at least 30 s after the last question or at once when the composer or the window gets the focus, and the host may answer from a 5 s reuse.
 - OMP paints regardless of whether its notice's tools are enabled and so does Desk; a painted word does not prove the notice was added.
 - The shimmer is a 70 ms timer while the composer has the focus and shows a keyword: one rebuild of the highlights per frame.
 
@@ -159,7 +160,7 @@ A fixed palette is rejected in the alternatives below.
 - OMP pin: `src/omp/magic-keywords.test.ts` (offline replay of the fixture) and `src/omp/magic-keywords.live.test.ts` (re-record and compare against the installed OMP).
 - Protocol and host: `src/protocol/chat-messages.test.ts`, `src/protocol/messages.test.ts`, `src/host/chat-runtime-magic-keywords.test.ts`, `src/host/omp-setting-read.test.ts`, `src/host/detail-tabs.test.ts`, `src/host/bridge-listener.test.ts`.
 - Page store: `src/webview/lib/magic-keyword-settings.test.ts`.
-- Page, in an owned headless Chromium: `src/webview/magic-keywords-ui.test.ts` (composer boundaries, chips, DOM unchanged, typing, undo and paste, IME composition, bubbles, the settings switch, the throttle, the shimmer and reduced motion, contrast on the four real VS Code theme token sets, no Highlight API).
+- Page, in an owned headless Chromium: `src/webview/magic-keywords-ui.test.ts` (composer boundaries, chips, DOM unchanged, typing, undo and paste, IME composition, bubbles, the settings switch, the throttle and the refresh when the composer or the window gets the focus, the shimmer, a deactivated window, reduced motion and forced colours, contrast on the four real VS Code theme token sets, no Highlight API).
 
 ## Related Decisions
 
@@ -172,9 +173,14 @@ No new ADR: the lasting choices here (a per-theme-kind solved palette, a lazy pa
 
 ## Architecture Review
 
-Not yet done. This design must go to an independent architecture reviewer before it is set to `accepted` (`docs/README.md`, Required review).
+One independent architecture review pass (2026-10-19; a separate reviewer agent, read-only, against the code at `b74fcf2` and the installed OMP 18.12.2's own sources): **REVISE, no must-fix**. The layer direction (`shared` pure, `protocol` declares the pair, the host answers, the page paints), the read-only exchange on every route, the host's cache and in-flight keys, the OMP pin and the timer and observer lifecycle were checked against the code and found sound. Its four findings are applied:
 
-Two independent code reviews of the implementation (2026-10-19, read-only, against the installed OMP 18.12.2's own source) found the matcher, the mask, the gradient arithmetic, the settings gate and the read-only exchange faithful and no leak in the page's observers, timers and highlights. Their findings are resolved in the code and in this text:
+1. (should-fix) The page's throttle stopped the composer's and the window's focus from refreshing the settings, which this design and the guide promised. `refreshMagicKeywordSettings` is a second entry point that posts whatever the age of the last question and counts as the last question; the two focus call sites use it, `requestMagicKeywordSettings` stays throttled for everything else, and the host's in-flight sharing and 5 s reuse still bound a burst of focus events (§2, Limits). The store has unit tests and the page test covers both focus paths.
+2. (nit) The forced-colours behaviour had no test: the shimmer page test now emulates `forced-colors: active` (no frame armed, the static gradient, the underline) and its return.
+3. (nit) §2 compared the all-on default with a judgement the TUI does not make. It now says the TUI's paint follows the master switch alone and that Desk is deliberately stricter once the host has answered (also under What OMP does and Goals).
+4. (nit) `magic-keyword-styles.ts` imported the paint engine for a naming function: `magicHighlightName` moved to the leaf module `magic-keyword-name.ts`.
+
+Before that review, two independent code reviews of the implementation (2026-10-19, read-only, against the installed OMP 18.12.2's own source) found the matcher, the mask, the gradient arithmetic, the settings gate and the read-only exchange faithful and no leak in the page's observers, timers and highlights. Their findings are resolved in the code and in this text:
 
 - A sent message painted a keyword the rendered text joins across an inline element (`[ultra](url)think`) when another keyword mounted its layer, and the `useMagicKeywordSettings` hook had no consumer: the bubble now paints a keyword only if OMP's matcher finds it in the raw text and it lies in one text node (section 6), and the hook and its test are deleted.
 - The composer's shimmer kept running while the operating system had deactivated the window: it now also needs `document.hasFocus()` and resyncs on the window's `focus` and `blur`.

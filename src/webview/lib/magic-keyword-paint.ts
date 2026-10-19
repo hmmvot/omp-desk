@@ -10,12 +10,8 @@
  */
 import { magicStopAt, type MagicKeywordId } from "../../shared/magic-keywords.ts";
 import { canHighlight } from "./find-dom.ts";
-import { requestMagicKeywordSettings } from "./magic-keyword-settings.ts";
-
-/** The highlight of stop `stop` of a keyword's gradient. */
-export function magicHighlightName(id: MagicKeywordId, stop: number): string {
-	return `omp-magic-${id}-${stop}`;
-}
+import { magicHighlightName } from "./magic-keyword-name.ts";
+import { refreshMagicKeywordSettings } from "./magic-keyword-settings.ts";
 
 /** One keyword standing in a layer's text: a range per character, in order, which is what a gradient needs. */
 export interface PlacedKeyword {
@@ -59,8 +55,8 @@ function queueRebuild(): void {
 }
 
 /**
- * A setting changed while the page was away is picked up when the page is back: the window regaining focus asks the host again
- * (throttled by the store) if any layer shows a keyword.
+ * A setting changed while the page was away is picked up when the page is back: the window regaining focus asks the host again,
+ * whatever the age of the last question, if any layer shows a keyword (the host's 5 s answer cache bounds the work).
  */
 function watchWindow(): void {
 	if (watchingWindow || typeof window === "undefined") return;
@@ -68,7 +64,7 @@ function watchWindow(): void {
 	window.addEventListener("focus", () => {
 		for (const layer of layers) {
 			if (!layer.sighted) continue;
-			requestMagicKeywordSettings();
+			refreshMagicKeywordSettings();
 			return;
 		}
 	});

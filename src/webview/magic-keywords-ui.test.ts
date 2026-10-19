@@ -190,6 +190,8 @@ createRoot(document.getElementById("root")).render(<App client={client} />); win
 
 const MOTION_ALLOWED = [{ name: "prefers-reduced-motion", value: "no-preference" }];
 const MOTION_REDUCED = [{ name: "prefers-reduced-motion", value: "reduce" }];
+const COLORS_FORCED = [{ name: "forced-colors", value: "active" }];
+const COLORS_UNFORCED = [{ name: "forced-colors", value: "none" }];
 
 // Skipped when no Chromium-based browser is found; set OMP_TEST_CHROMIUM to point at one.
 test("magic keywords: the composer and the sent messages paint OMP's keywords, and only those", { skip: browserPath === undefined, timeout: 280_000 }, async t => {
@@ -550,6 +552,35 @@ test("magic keywords: the composer and the sent messages paint OMP's keywords, a
 			await noErrors();
 		});
 
+		await t.test("the reader coming back asks the host again inside the throttle's period: the composer getting the focus and the window getting it", async () => {
+			await open("settings-refocus");
+			// The page's clock is the test's, so "less than 30 s later" is a clock value, not a wait.
+			await ui.evaluate("window.clockNow = 0");
+			await ui.evaluate("window.composer.focus()");
+			await showPrompt("ultrathink");
+			await draft("ultrathink orchestrate");
+			assert.equal(await ui.evaluate("window.ui.reads().length"), 1, "one question, asked when the first keyword was shown");
+			await ui.evaluate("window.clockNow = 10000");
+			await draft("ultrathink orchestrate jevify");
+			assert.equal(await composerText(), "ultrathinkorchestratejevify");
+			assert.equal(await ui.evaluate("window.ui.reads().length"), 1, "a keyword shown again inside the period does not ask");
+			// The reader changed a setting in OMP and comes back to the composer: that asks at once, and the new answer is painted.
+			await ui.evaluate("window.composer.blur()");
+			await ui.evaluate("window.composer.focus()");
+			await ui.wait("window.ui.reads().length>=2");
+			await ui.evaluate("window.ui.keywords(['orchestrate'])");
+			assert.equal(await ui.evaluate("window.magic.until('composer','orchestrate')"), "orchestrate", "the composer follows the new answer");
+			assert.equal(await ui.evaluate("window.magic.until('bubble','')"), "", "and so does the message");
+			// The window gets the keyboard back from another application: the same, whatever the age of the last question.
+			const before = await ui.evaluate<number>("window.ui.reads().length");
+			await ui.evaluate("window.clockNow = 20000");
+			await ui.evaluate("window.dispatchEvent(new Event('focus'))");
+			await ui.wait(`window.ui.reads().length>${before}`);
+			await ui.evaluate("window.ui.keywords(['ultrathink','orchestrate','workflow','jevify'])");
+			assert.equal(await ui.evaluate("window.magic.until('bubble','ultrathink')"), "ultrathink");
+			await noErrors();
+		});
+
 		await t.test("the composer's keyword shimmers on OMP's clock while it has the keyboard; a sent message, a blurred field and reduced motion keep it still", async () => {
 			await open("shimmer");
 			// The page's clock is the test's: the phase is whatever `Date.now()` says, so a phase is set, never waited for.
@@ -580,6 +611,15 @@ test("magic keywords: the composer and the sent messages paint OMP's keywords, a
 			assert.equal(await armed(0), 0);
 			await ui.call("Emulation.setEmulatedMedia", { features: MOTION_ALLOWED });
 			assert.equal(await armed(1), 1, "the reader accepts motion again: the frames are back");
+			assert.deepEqual(await onStops("composer", at(0.75)), at(0.75));
+			// Forced colours: the system draws the text in its own palette, so the gradient stands still and the underline carries the signal.
+			await ui.call("Emulation.setEmulatedMedia", { features: [...MOTION_ALLOWED, ...COLORS_FORCED] });
+			assert.equal(await armed(0), 0, "forced colours arm no frame");
+			assert.deepEqual(await onStops("composer", at(0)), at(0), "forced colours: the static gradient");
+			assert.equal(await ui.evaluate("window.magic.decoration('omp-magic-ultrathink-0')"), "underline", "forced colours: underlined");
+			await ui.call("Emulation.setEmulatedMedia", { features: [...MOTION_ALLOWED, ...COLORS_UNFORCED] });
+			assert.equal(await armed(1), 1, "the page's own colours are back, and so are the frames");
+			assert.equal(await ui.evaluate("window.magic.decoration('omp-magic-ultrathink-0')"), "none", "and the underline is gone");
 			assert.deepEqual(await onStops("composer", at(0.75)), at(0.75));
 			// A field without the keyboard shows the static gradient and arms nothing.
 			await ui.evaluate("window.composer.blur()");

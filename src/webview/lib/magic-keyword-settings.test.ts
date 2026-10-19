@@ -12,6 +12,7 @@ import {
 	attachMagicKeywordSettings,
 	getMagicKeywordSettings,
 	MAGIC_KEYWORD_REFRESH_MS,
+	refreshMagicKeywordSettings,
 	requestMagicKeywordSettings,
 	setMagicKeywordSettings,
 	subscribeMagicKeywordSettings,
@@ -114,6 +115,30 @@ describe("asking the host", () => {
 		requestMagicKeywordSettings(10_000 + MAGIC_KEYWORD_REFRESH_MS);
 		assert.equal(host.posted.length, 2, "the period is over: ask again");
 		assert.equal(MAGIC_KEYWORD_REFRESH_MS, 30_000);
+	});
+
+	it("asks again on a refresh inside the period, which then counts as the last question", () => {
+		const host = fakeHost();
+		detach = attachMagicKeywordSettings(host.transport);
+		requestMagicKeywordSettings(10_000);
+		refreshMagicKeywordSettings(10_001);
+		assert.equal(host.posted.length, 2, "the reader came back: no wait for the period");
+		requestMagicKeywordSettings(10_001 + MAGIC_KEYWORD_REFRESH_MS - 1);
+		assert.equal(host.posted.length, 2, "the refresh started a new period");
+		requestMagicKeywordSettings(10_001 + MAGIC_KEYWORD_REFRESH_MS);
+		assert.equal(host.posted.length, 3);
+	});
+
+	it("does not count a refresh that went nowhere, and is silent before the page is attached", () => {
+		refreshMagicKeywordSettings(80_000);
+		let accepted = false;
+		const host = fakeHost({ post: () => accepted });
+		detach = attachMagicKeywordSettings(host.transport);
+		assert.deepEqual(host.posted, [], "nothing was remembered for a later transport");
+		refreshMagicKeywordSettings(80_001);
+		accepted = true;
+		requestMagicKeywordSettings(80_002);
+		assert.equal(host.posted.length, 2, "the refresh that went nowhere started no period");
 	});
 
 	it("does not count a question that went nowhere, whether the route says so or throws", () => {

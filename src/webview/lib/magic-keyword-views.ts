@@ -18,7 +18,7 @@ import {
 } from "../../shared/magic-keywords.ts";
 import { MagicKeywordLayer } from "./magic-keyword-paint.ts";
 import { placeKeywords, scanBubble, scanComposer, withinOneNode, type ScannedText } from "./magic-keyword-scan.ts";
-import { getMagicKeywordSettings, requestMagicKeywordSettings, subscribeMagicKeywordSettings } from "./magic-keyword-settings.ts";
+import { getMagicKeywordSettings, refreshMagicKeywordSettings, requestMagicKeywordSettings, subscribeMagicKeywordSettings } from "./magic-keyword-settings.ts";
 
 /** Whether `text` could hold a keyword: a probe for each word, before anything is parsed. */
 export function mayHoldMagicKeyword(text: string): boolean {
@@ -73,8 +73,8 @@ export class ComposerKeywords {
 		this.#cleanup.push(subscribeMagicKeywordSettings(rescan));
 		const resync = (): void => this.#sync();
 		const focus = (): void => {
-			// The keyboard comes back to a field that shows a keyword: a setting changed meanwhile is picked up.
-			if (this.#layer.sighted) requestMagicKeywordSettings();
+			// The keyboard comes back to a field that shows a keyword: a setting changed meanwhile is picked up, inside the throttle's period too.
+			if (this.#layer.sighted) refreshMagicKeywordSettings();
 			this.#sync();
 		};
 		this.#listen(element, "focus", focus);
