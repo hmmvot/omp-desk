@@ -38,6 +38,8 @@ test("a side question streams beside a running turn, stays out of the transcript
 	// A main turn that streams for several seconds, and a side question asked while it runs.
 	await desk.send(chat, `[slow] main turn ${"x".repeat(180)}`);
 	await expect(chat.getByRole("button", { name: /Stop/ }).first()).toBeVisible({ timeout: 30_000 });
+	// The turn's own user row can arrive after the Stop button; count only once it is in, so the /btw is compared against a settled transcript.
+	await expect(rows.filter({ hasText: "main turn" }), "the running turn's own user row").toHaveCount(1, { timeout: 30_000 });
 	const userRowsBefore = await rows.count();
 	await desk.send(chat, `/btw ${marker} one`);
 	await expect(panel(chat)).toBeVisible({ timeout: 30_000 });
