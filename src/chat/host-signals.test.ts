@@ -71,7 +71,7 @@ describe("fast mode, slow mode and the usage limit", () => {
 		assert.equal(usageLimitLabel({ stage: "wrap_up", extraUsage: true }, now), "limit reached · wrap-up, then extra usage");
 		assert.equal(usageLimitLabel({ stage: "wrap_up", extraUsage: false }, now), "limit reached · wrapping up");
 		assert.match(usageLimitLabel({ stage: "wrap_up", extraUsage: false, resetsAtSec: now / 1000 + 3_600 }, now), /^limit reached · wrapping up · resets \S+/);
-		assert.match(usageLimitLabel({ stage: "low_priority", resetsAtSec: now / 1000 + 3_600, allowanceLeftPercent: 40 }, now), /^low priority until \S+ · 40% left$/);
+		assert.match(usageLimitLabel({ stage: "low_priority", resetsAtSec: now / 1000 + 3_600, allowanceLeftPercent: 40 }, now), /^low priority until \S+(?: [AP]M)? · 40% left$/);
 		assert.doesNotMatch(usageLimitLabel({ stage: "low_priority", resetsAtSec: now / 1000 + 3_600 }, now), /left/);
 	});
 
