@@ -290,10 +290,10 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		{view?.inline}
 		{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
 		{gist.length > 0 && <span className="omp-gist">{gist.map((part, index) => <span key={index} className={`omp-gist-part${part.tone === "plain" ? "" : ` omp-gist--${part.tone}`}${part.optional ? " omp-gist-opt" : ""}`}>{index > 0 && <span aria-hidden="true"> · </span>}{part.text}</span>)}</span>}
+		{jobChip !== null && <JobChip cardJob={jobChip} />}
 		{metaInHead && view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}
 		{metadata.stats && <DiffStatSpans stats={metadata.stats} />}
 		{metadata.counter && <span className="omp-native-tool-meta omp-tool-counter">{metadata.counter}</span>}
-		{jobChip !== null && <JobChip cardJob={jobChip} />}
 		{diagnosticCount > 0 && <span className="omp-chip omp-chip--warn"><span className="codicon codicon-warning" aria-hidden="true" />{diagnosticCount} diagnostics</span>}
 		{/* Failure is conveyed by one status icon; skipped calls retain their readable badge. */}
 		{!pendingAsk && state === "skipped" && <span className="omp-chip">{state}</span>}
@@ -307,10 +307,10 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	if (plainRow) {
 		return <div ref={root} className={`omp-tool omp-native-tool omp-native-tool--static${jobCancel !== null ? " omp-native-tool--job-cancel" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state}>
 			<div className={`omp-tool-head omp-tool-head--static${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} title={title || undefined}><span className="codicon codicon-blank" aria-hidden="true" />{face}</div>
+			{jobCancel !== null && <JobCancel cardJob={jobCancel} />}
 		</div>;
 	}
 	return <div ref={root} className={`omp-tool omp-native-tool${failed ? " omp-tool--error" : ""}${state === "skipped" ? " omp-native-tool--skipped" : ""}${jobCancel !== null ? " omp-native-tool--job-cancel" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state} onKeyDown={event => {
-			{jobCancel !== null && <JobCancel cardJob={jobCancel} />}
 		if (event.key !== "Escape" || !showBody || !root.current?.contains(document.activeElement)) return;
 		event.preventDefault(); event.stopPropagation();
 		collapse();
