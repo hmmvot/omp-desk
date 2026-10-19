@@ -16,6 +16,8 @@ export const TOOL_STYLES = `
 .omp-native-tool .omp-tool-digest { color: var(--vscode-foreground); }
 .omp-native-tool[data-tool-status="complete"] .omp-tool-head > .codicon:not(.codicon-chevron-right):not(.codicon-chevron-down):not(.codicon-blank) { font-size: 14px; color: var(--omp-muted); }
 .omp-native-tool .omp-tool-digest .omp-file-link { color: var(--vscode-foreground); }
+/* Intent first: the target is the muted part, so a link in it is muted too (the rules below it still colour it on hover and focus). */
+.omp-native-tool .omp-tool-head--intent-first .omp-tool-digest .omp-file-link { color: var(--omp-muted); }
 .omp-native-tool .omp-tool-head:hover .omp-tool-digest .omp-file-link, .omp-native-tool .omp-tool-digest .omp-file-link:focus-visible { color: var(--vscode-textLink-foreground); }
 /* The row's muted words are read on the hover surface too: they take the foreground there. */
 .omp-native-tool .omp-tool-head:hover .omp-tool-name, .omp-native-tool .omp-tool-head:focus-visible .omp-tool-name, .omp-native-tool .omp-tool-head:hover .omp-tool-aux, .omp-native-tool .omp-tool-head:hover .omp-native-tool-meta { color: var(--vscode-foreground); }
@@ -173,4 +175,24 @@ export const TOOL_STYLES = `
 .omp-tool-kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 4px 0; }
 .omp-tool-kv > dt { color: var(--omp-muted); }
 .omp-tool-kv > dd { margin: 0; font-variant-numeric: tabular-nums; }
+/*
+ * Intent first (ompDesk.toolIntentDescriptions, a call that has an intent): icon · name · INTENT · target · facts.
+ * The intent explains why the named action is done, so it is the primary text: the foreground colour and its own width,
+ * and the last item to shrink. The target (path or command) is the muted remainder: its flex-basis is 0, so it gets only what
+ * the intent and the facts leave and is the first to give way, down to nothing at a narrow width. The facts (gist, chips,
+ * counters) never shrink for the intent; the gist is capped at half the head.
+ */
+.omp-native-tool .omp-tool-head--intent-first .omp-tool-aux--intent { flex: 0 1 auto; max-width: none; color: var(--vscode-foreground); }
+.omp-native-tool .omp-tool-head--intent-first .omp-tool-digest { flex: 1 1 0; min-width: 0; max-width: none; color: var(--omp-muted); }
+.omp-native-tool .omp-tool-head--intent-first > .omp-gist { flex: none; max-width: 50%; }
+/*
+ * A path is shortened from its start: the directories (.omp-path-dir) give way first and the file name with its line
+ * selector (.omp-path-file) stays, cut at its end only when it alone no longer fits. A right-to-left box with a
+ * left-to-right isolate inside puts the ellipsis at the start of the directories (…ponents/) while the characters keep
+ * their order. A command keeps its end ellipsis.
+ */
+.omp-native-tool .omp-tool-digest--path { display: flex; text-overflow: clip; }
+.omp-native-tool .omp-tool-digest--path > .omp-file-link { display: flex; flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.omp-path-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: rtl; text-align: left; }
+.omp-path-file { flex: none; min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 `;

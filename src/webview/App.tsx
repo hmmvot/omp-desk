@@ -48,6 +48,7 @@ import { TerminalPane } from "./components/TerminalPane";
 import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
 import { adoptTranscriptToggles } from "./lib/transcript-toggles";
 import { setScreenReaderMode } from "./lib/screen-reader";
+import { setToolIntentFirst } from "./lib/tool-intent-first";
 import { ArtifactEpochContext } from "./lib/artifact-opener";
 
 export function App({ client }: { client: ChatClient }): ReactNode {
@@ -162,6 +163,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	// Screen-reader paging is not a menu choice: it follows VS Code's `editor.accessibilitySupport`, which the host pushes with the display preferences.
 	const pagedHistory = preferences.accessibilitySupport;
 	useEffect(() => setScreenReaderMode(preferences.accessibilitySupport), [preferences.accessibilitySupport]);
+	// `ompDesk.toolIntentDescriptions`: the intent leads a tool row's head.
+	useEffect(() => setToolIntentFirst(preferences.toolIntent === true), [preferences.toolIntent]);
 	// The host's remembered thinking default and tool display mode (`ompDesk.toggleThinking`, `ompDesk.toggleToolOutput`, `ompDesk.toggleToolGroups`).
 	useEffect(() => adoptTranscriptToggles(preferences.thinkingExpanded === true, preferences.toolsMode ?? "collapsed"), [preferences.thinkingExpanded, preferences.toolsMode]);
 

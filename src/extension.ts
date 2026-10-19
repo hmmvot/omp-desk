@@ -6805,6 +6805,7 @@ function readChatDisplayPreferences(): ChatDisplayPreferences {
     accessibilitySupport: vscode.workspace.getConfiguration("editor").get<string>("accessibilitySupport", "auto") === "on",
     thinkingExpanded: s.context?.globalState.get<unknown>(THINKING_EXPANDED_KEY) === true,
     toolsMode: toolsModeFromStored(s.context?.globalState.get<unknown>(TOOLS_EXPANDED_KEY)),
+    toolIntent: vscode.workspace.getConfiguration("ompDesk").get<boolean>("toolIntentDescriptions", false),
   };
 }
 
@@ -6835,7 +6836,7 @@ async function toggleToolsMode(key: ToolsModeKey): Promise<void> {
 
 function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
   const s = windowState();
-  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("editor.accessibilitySupport")) {
+  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("ompDesk.toolIntentDescriptions") || event.affectsConfiguration("editor.accessibilitySupport")) {
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
 }

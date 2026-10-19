@@ -135,7 +135,7 @@
         "ompDesk.toolIntentDescriptions": {
           "type": "boolean",
           "default": false,
-          "description": "Ask the model to describe every tool call in the `i` field in terms of your task (what question the call answers or what it changes, naming the feature, bug, file or agent; at most 10 words), instead of OMP's built-in two-to-six-word verb phrase, so the line beside each tool name in Chat says why the tool ran. Adds one paragraph (about 190 tokens) to the system prompt of Chat sessions only; subagents and Terminal sessions are unchanged. Only has an effect while OMP's own `tools.intentTracing` is on. Applies to sessions started or resumed afterwards."
+          "description": "Ask the model to describe every tool call in the `i` field in terms of your task (what question the call answers or what it changes, naming the feature, bug, file or agent; at most 10 words), instead of OMP's built-in two-to-six-word verb phrase, so the line beside each tool name in Chat says why the tool ran. Adds one paragraph (about 190 tokens) to the system prompt of Chat sessions only; subagents and Terminal sessions are unchanged. Only has an effect while OMP's own `tools.intentTracing` is on. Applies to sessions started or resumed afterwards. While it is on, a tool row that has this line shows it first, before the file or command."
         },
         "ompDesk.executablePath": {
           "type": "string",

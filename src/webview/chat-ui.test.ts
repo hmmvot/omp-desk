@@ -1184,6 +1184,130 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("with ompDesk.toolIntentDescriptions on a head with an intent reads icon, name, intent, target; the path loses its directories before the file name and the target everything before the intent; links stay; off or without an intent the head is unchanged", async () => {
+			await reset("tool-intent-first", "detailed");
+			const longIntent = "Checking that a long intent keeps its words in the collapsed head while the path and the command give way to it first";
+			const shortIntent = "Reading the Jobs HUD";
+			const readPath = "src/webview/components/deeply/nested/JobsHud.tsx:28-45";
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 const call=(id,name,args,intent)=>({type:'toolCall',id,name,arguments:args,...(intent?{intent}:{})});
+			 const result=(id,name,text,details)=>row('r-'+id,{role:'toolResult',timestamp:2,toolCallId:id,toolName:name,isError:false,content:[{type:'text',text}],details});
+			 const turn=(id,calls)=>row('a-'+id,{role:'assistant',model:'m',timestamp:2,stopReason:'toolUse',content:calls});
+			 window.ui.push({entries:[
+			  turn('long',[call('ifr-long','read',{path:${JSON.stringify(readPath)}},${JSON.stringify(longIntent)})]),result('ifr-long','read','const a = 1;',{}),
+			  turn('short',[call('ifr-short','read',{path:${JSON.stringify(readPath)}},${JSON.stringify(shortIntent)})]),result('ifr-short','read','const a = 1;',{}),
+			  turn('edit',[call('ifr-edit','edit',{path:'src/webview/components/JobsHud.tsx'},${JSON.stringify(shortIntent)})]),result('ifr-edit','edit','Updated src/webview/components/JobsHud.tsx',{diff:'+1 new',firstChangedLine:3}),
+			  turn('bash',[call('ifr-bash','bash',{command:'npm run typecheck -- --pretty false --incremental false'},${JSON.stringify(longIntent)})]),result('ifr-bash','bash','ok',{exitCode:0}),
+			  turn('none',[call('ifr-none','read',{path:${JSON.stringify(readPath)}})]),result('ifr-none','read','const a = 1;',{})],working:false,settled:true});
+			 window.answered=new Set();
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(message.type!=='omp:terminal-link-validate'||window.answered.has(message.requestId))continue;
+			  window.answered.add(message.requestId);
+			  window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:true});
+			 }},5);
+			})()`);
+			await ui.wait("document.querySelector('[data-tool-call-id=\"ifr-none\"] .omp-tool-head') && document.querySelector('[data-tool-call-id=\"ifr-bash\"] .omp-tool-head')");
+			await ui.wait("document.querySelector('[data-tool-call-id=\"ifr-short\"] .omp-file-link')");
+			const order = (id: string): Promise<string[]> => ui.evaluate(`(()=>{
+			 const kind=node=>node.classList.contains('codicon')?'icon':node.classList.contains('omp-tool-name')?'name':node.classList.contains('omp-tool-aux--intent')?'intent':node.classList.contains('omp-tool-digest')?'target':node.classList.contains('omp-gist')?'gist':'';
+			 return [...document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head').children].map(kind).filter((value,index,all)=>value!==''&&value!==all[index-1]);})()`);
+			const preferences = (toolIntent: boolean): Promise<unknown> => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'detailed',accessibilitySupport:false,toolIntent:${toolIntent}})`);
+			const unchanged = ["icon", "name", "target", "intent"];
+			const leading = ["icon", "name", "intent", "target"];
+			const withoutGist = async (id: string): Promise<string[]> => (await order(id)).filter(kind => kind !== "gist");
+			for (const id of ["ifr-long", "ifr-short", "ifr-edit", "ifr-bash"]) assert.deepEqual(await withoutGist(id), unchanged, `${id}: the setting off keeps icon, name, target, intent`);
+			assert.deepEqual(await withoutGist("ifr-none"), ["icon", "name", "target"]);
+			await preferences(true);
+			await ui.wait("document.querySelector('[data-tool-call-id=\"ifr-long\"] .omp-tool-head--intent-first')");
+			for (const id of ["ifr-long", "ifr-short", "ifr-edit", "ifr-bash"]) {
+				assert.deepEqual(await withoutGist(id), leading, `${id}: the setting on leads with the intent`);
+				const all = await order(id);
+				if (all.includes("gist")) assert.equal(all.at(-1), "gist", `${id}: the facts stay at the right, after the target`);
+			}
+			assert.deepEqual(await withoutGist("ifr-none"), ["icon", "name", "target"], "no intent: today's head");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"ifr-none\"] .omp-tool-head--intent-first')"), null);
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"ifr-none\"] .omp-path-dir')"), null, "no intent: the path is cut at its end as before");
+
+			const geometry = (id: string) => ui.evaluate<{ head: [number, number]; intent: [number, number]; digest: [number, number]; intentClipped: boolean; headOverflow: boolean; colours: { intent: string; digest: string; foreground: string; muted: string }; height: number;
+				path: null | { dir: [number, number] | null; file: [number, number]; fileText: string; dirText: string; fileClipped: boolean; dirClipped: boolean; textRight: number | null; textLeft: number | null } }>(`(()=>{
+			 const head=document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head'),span=node=>{const rect=node.getBoundingClientRect();return[rect.left,rect.right]};
+			 const intent=head.querySelector('.omp-tool-aux--intent'),digest=head.querySelector('.omp-tool-digest'),dir=head.querySelector('.omp-path-dir'),file=head.querySelector('.omp-path-file');
+			 const probe=value=>{const node=document.createElement('span');node.style.color=value;document.body.append(node);const colour=getComputedStyle(node).color;node.remove();return colour};
+			 let textRight=null,textLeft=null;
+			 if(dir){const range=document.createRange();range.selectNodeContents(dir.querySelector('bdi'));const rect=range.getBoundingClientRect();textRight=rect.right;textLeft=rect.left}
+			 return {head:span(head),intent:span(intent),digest:span(digest),intentClipped:intent.scrollWidth>intent.clientWidth,headOverflow:head.scrollWidth>head.clientWidth+1,height:head.getBoundingClientRect().height,
+			  colours:{intent:getComputedStyle(intent).color,digest:getComputedStyle(digest).color,foreground:probe('var(--vscode-foreground)'),muted:probe('var(--omp-muted)')},
+			  path:file?{dir:dir?span(dir):null,file:span(file),fileText:file.textContent,dirText:dir?dir.textContent:'',fileClipped:file.scrollWidth>file.clientWidth,dirClipped:Boolean(dir)&&dir.scrollWidth>dir.clientWidth,textRight,textLeft}:null};})()`);
+			const setWidth = async (width: number): Promise<void> => {
+				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+				await ui.settleGeometry(".omp-transcript");
+			};
+
+			await setWidth(1000);
+			const wide = await geometry("ifr-short");
+			assert.equal(wide.colours.intent, wide.colours.foreground, "the intent is in the foreground colour");
+			assert.equal(wide.colours.digest, wide.colours.muted, "the target is muted");
+			assert.notEqual(wide.colours.foreground, wide.colours.muted);
+			assert.ok(wide.intent[1] <= wide.digest[0] + 0.5, "the target starts after the intent ends");
+			assert.ok(wide.path !== null && !wide.path.dirClipped && !wide.path.fileClipped && wide.path.fileText === "JobsHud.tsx:28-45" && wide.path.dirText === "src/webview/components/deeply/nested/", `room enough: the whole path (${JSON.stringify(wide.path)})`);
+			assert.equal(wide.intentClipped, false);
+
+			// A path shrinks from its start: the directories give way and the file name with its line range stays whole inside the head.
+			await setWidth(480);
+			const narrow = await geometry("ifr-short");
+			assert.ok(narrow.path !== null && narrow.path.dirClipped, `the directories no longer fit (${JSON.stringify(narrow.path)})`);
+			assert.equal(narrow.path.fileText, "JobsHud.tsx:28-45");
+			assert.equal(narrow.path.fileClipped, false, "the file name and its line range are whole");
+			assert.ok(narrow.path.file[0] >= narrow.head[0] && narrow.path.file[1] <= narrow.head[1] + 0.5, "the file name's box is inside the head");
+			assert.ok(narrow.path.file[1] <= narrow.digest[1] + 0.5 && narrow.path.file[0] >= narrow.digest[0] - 0.5, "and inside the target");
+			assert.equal(narrow.intentClipped, false, "the intent is whole while only the target is short");
+			assert.ok(narrow.path.dir !== null && narrow.path.textRight !== null && narrow.path.textLeft !== null && Math.abs(narrow.path.textRight - narrow.path.dir[1]) <= 1.5 && narrow.path.textLeft < narrow.path.dir[0], "the ellipsis is at the start of the directories: their end stays visible");
+			assert.equal(narrow.headOverflow, false);
+			assert.ok(narrow.height < 40, `one line (${narrow.height}px)`);
+
+			// The target gives way completely before the intent loses a character: at no width is the intent cut while the target still shows.
+			for (const width of [1000, 800, 640, 520, 460, 400, 360, 320, 280]) {
+				await setWidth(width);
+				for (const id of ["ifr-long", "ifr-edit", "ifr-bash"]) {
+					const row = await geometry(id);
+					const intentCut = row.intentClipped;
+					assert.ok(!intentCut || row.digest[1] - row.digest[0] <= 1, `${id} at ${width}px: the intent is cut only once the target is gone (target ${row.digest[1] - row.digest[0]}px)`);
+					assert.equal(row.headOverflow, false, `${id} at ${width}px: no overflow`);
+					assert.ok(row.height < 40, `${id} at ${width}px: one line (${row.height}px)`);
+				}
+			}
+			await setWidth(320);
+			const small = await geometry("ifr-long");
+			assert.equal(small.intentClipped, true, "320px: the long intent is cut with an ellipsis");
+			assert.ok(small.digest[1] - small.digest[0] <= 1, "320px: the target collapsed first");
+			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('[data-tool-call-id=\"ifr-bash\"] .omp-tool-digest')).textOverflow"), "ellipsis", "a command keeps its end ellipsis");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"ifr-bash\"] .omp-path-dir')"), null);
+
+			// The path is still a link: the file name is a link target, the full path is the tooltip, a click opens the file at its line and does not toggle the row.
+			await setWidth(480);
+			const link = await ui.evaluate<{ target: string; hit: boolean; title: string; expanded: string | null }>(`(()=>{
+			 const tool=document.querySelector('[data-tool-call-id="ifr-short"]'),link=tool.querySelector('.omp-file-link'),file=link.querySelector('.omp-path-file'),rect=file.getBoundingClientRect();
+			 const hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);
+			 return {target:link.dataset.fileTarget,hit:Boolean(hit&&hit.closest('.omp-file-link')===link),title:tool.querySelector('.omp-tool-digest').title,expanded:tool.querySelector('.omp-tool-head').getAttribute('aria-expanded')}})()`);
+			assert.equal(link.hit, true, "the file name is what a pointer hits");
+			assert.equal(link.title, readPath, "the whole path stays in the tooltip");
+			assert.match(link.target, /JobsHud\.tsx:28$/, "the link opens the file at its first line");
+			await ui.evaluate("document.querySelector('[data-tool-call-id=\"ifr-short\"] .omp-path-file').click()");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:terminal-link-open').map(message=>message.target)"), [link.target]);
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"ifr-short\"] .omp-tool-head').getAttribute('aria-expanded')"), "false", "the link click does not toggle the row");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"ifr-edit\"] .omp-file-link .omp-path-file').textContent"), "JobsHud.tsx", "an edit's single path is a link laid out the same way");
+
+			// Off again: today's order, everywhere.
+			await preferences(false);
+			await ui.wait("!document.querySelector('.omp-tool-head--intent-first')");
+			for (const id of ["ifr-long", "ifr-short", "ifr-edit", "ifr-bash"]) assert.deepEqual(await withoutGist(id), unchanged, `${id}: off again`);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-path-dir')"), null);
+			await ui.call("Emulation.clearDeviceMetricsOverride");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.evaluate("clearInterval(window.answerLinks)");
+		});
+
 		await t.test("slash alias acceptance inserts canonical skill text without sending; next Enter sends, Escape preserves draft", async () => {
 			await reset("paseo-slash");
 			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',aliases:['review'],inputHint:'files',description:'Inspect source'},{name:'worktree',aliases:['sandbox']}]});window.composer.focus()");

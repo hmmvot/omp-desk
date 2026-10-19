@@ -6,7 +6,7 @@ import { isInterruptedToolResult, parseChatContent } from "../../chat/messages";
 import type { DiffStats } from "../../chat/diff-stats";
 import { DEBUG_TOOL_TITLES, toolPresentation } from "../../chat/tool-presentation";
 import { messageText } from "../../shared/format";
-import { ToolTargetText } from "./FileLinks";
+import { isPathTarget, ToolTargetText } from "./FileLinks";
 import { MessageContentView } from "./MessageContent";
 import { lateDiagnosticsFiles, recordRows, stringField } from "./native-message-helpers";
 import { Diagnostics, displayText, JsonOutput, OUTPUT_SCOPE, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
@@ -18,6 +18,7 @@ import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notic
 import { useSecondTick } from "../lib/live-clock";
 import { detectOutput } from "../lib/output-format";
 import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
+import { useToolIntentFirst } from "../lib/tool-intent-first";
 import { useArtifactOpener } from "../lib/artifact-opener";
 import { focusAfter } from "../lib/focus-after";
 import { rawDetailsCopy, rawDetailsView } from "../lib/raw-details";
@@ -65,6 +66,7 @@ function DiffStatSpans({ stats }: { stats: DiffStats }): ReactNode {
 
 /** Stable call identity/disclosure, with family-owned DOM bodies rather than generic JSON output. */
 export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode {
+	const intentSetting = useToolIntentFirst();
 	const [localExpanded, setLocalExpanded] = useState(props.initiallyExpanded ?? false);
 	const expanded = props.expanded ?? localExpanded;
 	const root = useRef<HTMLDivElement>(null);
@@ -260,6 +262,9 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	// A skill load wears the skill-prompt block's book, whether or not its renderer has run yet.
 	const toolIcon = metadata.skill !== null ? "book" : view?.icon ?? TOOL_ICONS[metadata.route.name] ?? "tools";
 	const aux = intent?.replace(/\s+/g, " ").trim() || undefined;
+	// `ompDesk.toolIntentDescriptions`: a call with an intent leads its head with it (icon · name · intent · target); without one, or with the setting off, the head is the one it always was.
+	const intentFirst = intentSetting && aux !== undefined;
+	const intentSpan = aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>;
 	// The head says what a result says at a glance; the digest of agents and the wait face say it themselves.
 	const elapsed = live && props.startedAt !== undefined ? Math.max(0, Date.now() - props.startedAt) : undefined;
 	const gist: readonly GistPart[] = compactTarget !== null || waitFace || pendingAsk || state === "skipped" || state === "queued" || rendererKind === "yield" || rendererKind === "autoresearch" ? []
@@ -268,27 +273,34 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		: toolGist({ name: route.name, args: route.args, details: route.details, body: metadata.skill !== null ? stripSkillHeader(text) : text, notices: split.notices, failed, settled: true, startedAt: props.startedAt, endedAt: props.endedAt, observedMs });
 	if (bare) {
 		const target = compactTarget?.digest ?? metadata.target;
+		const shownTarget = target ? displayText(target) : "";
+		const pathTarget = intentFirst && shownTarget !== "" && isPathTarget(metadata.category, metadata.paths, shownTarget);
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--bare" data-tool-name={name} data-tool-family={metadata.route.name} data-tool-call-id={props.callId ?? result.toolCallId} data-tool-status={state}>
-			<div className="omp-tool-head omp-tool-head--static" title={[metadata.title, compactTarget?.detail ?? target, aux, "no output"].filter(Boolean).join(" · ")}>
+			<div className={`omp-tool-head omp-tool-head--static${intentFirst ? " omp-tool-head--intent-first" : ""}`} title={[metadata.title, compactTarget?.detail ?? target, aux, "no output"].filter(Boolean).join(" · ")}>
 				{/* The empty twistie slot keeps the icon in the column of the rows that disclose. */}
 				<span className="codicon codicon-blank" aria-hidden="true" />
 				<span className={`codicon codicon-${toolIcon}`} aria-hidden="true" />
 				<span className="omp-tool-name">{metadata.title}</span>
-				{target && <span className="omp-tool-digest" title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
-				{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
+				{intentFirst && intentSpan}
+				{target && <span className={`omp-tool-digest${pathTarget ? " omp-tool-digest--path" : ""}`} title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={shownTarget} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} startEllipsis={pathTarget} /></span>}
+				{!intentFirst && intentSpan}
 				<span className="omp-tool-aux omp-tool-aux--none">no output</span>
 				<span className="omp-sr-only" role="status">{state}</span>
 			</div>
 		</div>;
 	}
 	const headTarget = compactTarget?.digest ?? view?.target ?? metadata.target;
+	const shownHeadTarget = headTarget ? displayText(headTarget) : "";
+	// A path leads with its directories only while the intent is first: they give way before the file name does.
+	const pathTarget = intentFirst && shownHeadTarget !== "" && isPathTarget(metadata.category, metadata.paths, shownHeadTarget);
 	const face = <>
 		{!pendingAsk && !(state === "complete" && !failed) && <span className={`codicon codicon-${failed ? "error omp-tool-status--failed" : STATE_ICONS[state]}`} aria-hidden="true" />}
 		<span className={`codicon codicon-${toolIcon}`} aria-hidden="true" />
 		<span className="omp-tool-name">{waitFace && view?.title?.startsWith("Waiting on") ? <><span className="omp-wait-title-full">{view.title}</span><span className="omp-wait-title-short">Wait</span></> : view?.title ?? metadata.title}</span>
-		{headTarget && <span className="omp-tool-digest" title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
+		{intentFirst && intentSpan}
+		{headTarget && <span className={`omp-tool-digest${pathTarget ? " omp-tool-digest--path" : ""}`} title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={shownHeadTarget} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} startEllipsis={pathTarget} /></span>}
 		{view?.inline}
-		{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
+		{!intentFirst && intentSpan}
 		{gist.length > 0 && <span className="omp-gist">{gist.map((part, index) => <span key={index} className={`omp-gist-part${part.tone === "plain" ? "" : ` omp-gist--${part.tone}`}${part.optional ? " omp-gist-opt" : ""}`}>{index > 0 && <span aria-hidden="true"> · </span>}{part.text}</span>)}</span>}
 		{jobChip !== null && <JobChip cardJob={jobChip} />}
 		{metaInHead && view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}
@@ -306,7 +318,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const title = [intent, view?.tooltip].filter(Boolean).join("\n");
 	if (plainRow) {
 		return <div ref={root} className={`omp-tool omp-native-tool omp-native-tool--static${jobCancel !== null ? " omp-native-tool--job-cancel" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state}>
-			<div className={`omp-tool-head omp-tool-head--static${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} title={title || undefined}><span className="codicon codicon-blank" aria-hidden="true" />{face}</div>
+			<div className={`omp-tool-head omp-tool-head--static${aux ? " omp-tool-head--intent" : ""}${intentFirst ? " omp-tool-head--intent-first" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} title={title || undefined}><span className="codicon codicon-blank" aria-hidden="true" />{face}</div>
 			{jobCancel !== null && <JobCancel cardJob={jobCancel} />}
 		</div>;
 	}
@@ -315,7 +327,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		event.preventDefault(); event.stopPropagation();
 		collapse();
 	}}>
-		<button type="button" className={`omp-tool-head${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} aria-expanded={showBody} aria-controls={bodyId} onClick={() => { const next = !expanded; setLocalExpanded(next); props.onExpandedChange?.(next); }} title={title || (showBody ? "Hide tool details" : "Show complete tool details")}>
+		<button type="button" className={`omp-tool-head${aux ? " omp-tool-head--intent" : ""}${intentFirst ? " omp-tool-head--intent-first" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} aria-expanded={showBody} aria-controls={bodyId} onClick={() => { const next = !expanded; setLocalExpanded(next); props.onExpandedChange?.(next); }} title={title || (showBody ? "Hide tool details" : "Show complete tool details")}>
 			<span className={`codicon codicon-${showBody ? "chevron-down" : "chevron-right"}`} aria-hidden="true" />
 			{face}
 		</button>

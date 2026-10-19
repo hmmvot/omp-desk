@@ -167,6 +167,8 @@ describe("parseChatHostMessage", () => {
 		assert.equal(parseChatHostMessage({ ...preferences, thinkingExpanded: "yes" }), null);
 		assert.equal(parseChatHostMessage({ ...preferences, toolsMode: true }), null, "the old boolean is not a mode");
 		assert.equal(parseChatHostMessage({ ...preferences, toolsMode: "everything" }), null);
+		assert.deepEqual(parseChatHostMessage({ ...preferences, toolIntent: true }), { ...preferences, toolIntent: true }, "the tool-intent setting rides along");
+		assert.equal(parseChatHostMessage({ ...preferences, toolIntent: "on" }), null);
 	});
 
 	it("carries the effective key of each empty-state command with its conflicts, drops undeclared fields, and refuses the rest whole", () => {

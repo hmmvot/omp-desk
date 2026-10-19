@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Optional: the reason leads a tool row.** While `ompDesk.toolIntentDescriptions` is on, a tool call that has an intent line shows it right after the tool name, in the normal text colour, and the file or command after it, muted: `Read  Check how the Jobs HUD cuts long paths  src/webview/components/JobsHud.tsx:28-45`. When the row is narrow the file or command gives way first and the intent last: a file path loses its leading folders and keeps the file name and line range, a command is cut at its end, and at about 320 pixels with a long intent the file or command is gone and the intent is cut with `…`. The full path or command stays in the tooltip, and the file name is still a link. Rows without an intent and group summaries are unchanged. The setting now also takes effect in open Chats at once, without restarting them. See [Chat](docs/guide/chat.md#tool-calls-thinking-and-the-overview).
+
 ## [0.4.8] - 2026-10-19
 
 ### Added

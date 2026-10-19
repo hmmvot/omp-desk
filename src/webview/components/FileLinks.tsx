@@ -325,20 +325,53 @@ function CommandText({ text, language, closed }: { text: string; language: strin
 	return runs === null ? text : <CodeRuns runs={runs} />;
 }
 
+/** A `proc://` address (a read of a job's output, a write to it): the target shows the job in the Jobs row; it is never a file. */
+function isProcTarget(category: string, paths: readonly string[], text: string): boolean {
+	return (category === "read" || category === "edit" || category === "other") && paths.every(path => /^proc:\/\//i.test(path)) && detectProcLinks(text).length > 0;
+}
+
+/** An edit's displayed target that is one file: not a rename `a → b`, not a list, not `N files`. */
+function isSingleEditPath(text: string): boolean {
+	return isFileLinkCandidate(text) && !text.includes("→") && !text.includes(", ") && !/^\d+ files?$/.test(text);
+}
+
+/**
+ * Whether a tool row's target is one file path: a read's path, or an edit's single path. A head that leads with the
+ * intent shortens such a target from the start (the directories give way, the file name stays); see {@link PathText}.
+ */
+export function isPathTarget(category: string, paths: readonly string[], text: string): boolean {
+	if (isProcTarget(category, paths, text)) return false;
+	return category === "read" ? paths.length >= 1 : category === "edit" && isSingleEditPath(text);
+}
+
+/**
+ * A path as two parts, so a narrow head can give up the directories first: `.omp-path-dir` is cut from its start (`…ponents/`)
+ * and `.omp-path-file` (the file name and its line selector) keeps its width. The text is the same characters, so a copy or a
+ * Find match reads the whole path. The direction trick lives in the stylesheet (`tool-styles.ts`).
+ */
+function PathText({ text }: { text: string }): ReactNode {
+	const cut = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\")) + 1;
+	return <>
+		{cut > 0 && <span className="omp-path-dir"><bdi dir="ltr">{text.slice(0, cut)}</bdi></span>}
+		<span className="omp-path-file">{text.slice(cut)}</span>
+	</>;
+}
+
 /**
  * A tool row's target text. A read's path becomes a link to that file at its line selector; a skill read's name (and
  * file) a link to the real skill file once the result names it, plain text before; an
  * edit's single path (not a rename `a → b`, not `N files`) links to the file at its first changed
  * line, however the result spells the path (absolute, relative, any drive-letter case). A command is
  * coloured as `language` (`shell` for bash). Anything else links each reference the text names.
+ * With `startEllipsis`, a read's or edit's single path is laid out by {@link PathText} (links unchanged).
  */
-export function ToolTargetText({ category, paths, text, line, revalidate, language, closed = true }: { category: string; paths: readonly string[]; text: string; line?: number; revalidate?: unknown; language?: string; closed?: boolean }): ReactNode {
+export function ToolTargetText({ category, paths, text, line, revalidate, language, closed = true, startEllipsis = false }: { category: string; paths: readonly string[]; text: string; line?: number; revalidate?: unknown; language?: string; closed?: boolean; startEllipsis?: boolean }): ReactNode {
 	if (category === "skill") return paths.length >= 1 ? <FileLink target={paths[0]!} revalidate={revalidate}>{text}</FileLink> : text;
 	// A `proc://` address (a read of a job's output, a write to it) shows the job in the Jobs row; it is never a file.
-	if ((category === "read" || category === "edit" || category === "other") && paths.every(path => /^proc:\/\//i.test(path)) && detectProcLinks(text).length > 0) return <ProcLinkText text={text} revalidate={revalidate} />;
-	if (category === "read" && paths.length >= 1) return <FileLink target={`${paths[0]}${displayedPosition(text)}`} proof={paths[0]} revalidate={revalidate}>{text}</FileLink>;
-	const single = category === "edit" && isFileLinkCandidate(text) && !text.includes("→") && !text.includes(", ") && !/^\d+ files?$/.test(text);
-	if (single) return <FileLink target={line === undefined ? text : `${text}:${line}`} proof={text} revalidate={revalidate}>{text}</FileLink>;
+	if (isProcTarget(category, paths, text)) return <ProcLinkText text={text} revalidate={revalidate} />;
+	const shown = startEllipsis ? <PathText text={text} /> : text;
+	if (category === "read" && paths.length >= 1) return <FileLink target={`${paths[0]}${displayedPosition(text)}`} proof={paths[0]} revalidate={revalidate}>{shown}</FileLink>;
+	if (category === "edit" && isSingleEditPath(text)) return <FileLink target={line === undefined ? text : `${text}:${line}`} proof={text} revalidate={revalidate}>{shown}</FileLink>;
 	if (category === "command" && language !== undefined) return <CommandText text={text} language={language} closed={closed} />;
 	return category === "read" || category === "edit" ? <FileLinkText text={text} revalidate={revalidate} /> : text;
 }
