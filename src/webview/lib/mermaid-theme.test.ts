@@ -61,6 +61,13 @@ describe("the theme a diagram is drawn in", () => {
 		}
 	});
 
+	it("takes a chart hue at full strength when the theme gives it an overlay alpha, as Dark Modern's charts.orange", () => {
+		const base = reader("Dark Modern");
+		const theme = mermaidThemeFrom(variable => (variable === "--vscode-charts-orange" ? "#EA5C0055" : base(variable)), false);
+		const background = parseColor(theme.variables.background!)!.rgb;
+		assert.equal(theme.variables.pie3, toHex(mix(background, { r: 0xea, g: 0x5c, b: 0 }, 0.75)));
+	});
+
 	it("draws High Contrast on its own background with the theme's contrast border and full-strength lines", () => {
 		const theme = mermaidThemeFrom(reader("High Contrast"), true);
 		assert.equal(theme.darkMode, true);

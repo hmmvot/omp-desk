@@ -122,7 +122,9 @@ export function mermaidThemeFrom(read: (name: string) => string, highContrast: b
 	};
 	const foreground = solid(VARIABLES.foreground, defaults.foreground);
 	const accent = solid(VARIABLES.link, defaults.blue);
-	const chart = (key: "red" | "orange" | "yellow" | "green" | "blue" | "purple"): Rgb => solid(VARIABLES[key], defaults[key]);
+	// A chart hue is the colour itself: Dark Modern's `charts.orange` is the find-match highlight `#EA5C0055`, and flattening
+	// its overlay alpha onto the background turns the hue into a dark brown that a node outline or a dot cannot be seen in.
+	const chart = (key: "red" | "orange" | "yellow" | "green" | "blue" | "purple"): Rgb => first(VARIABLES[key])?.rgb ?? rgbOf(defaults[key]);
 
 	// A High Contrast theme draws on its own background with strong edges: no tinted fills, full-strength lines.
 	const surface = highContrast ? background : mix(background, foreground, 0.1);
