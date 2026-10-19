@@ -313,7 +313,7 @@ addEventListener('load',()=>report('scroll',document.documentElement.scrollHeigh
 </script>`));
 			await ui.until("document.querySelector('.omp-htmlpage-more')");
 			await delay(200);
-			assert.equal(await frameHeight(), 480, "collapsed at the cap");
+			assert.equal(await frameHeight(), 800, "collapsed at the cap");
 			assert.equal((await probes()).scroll, "true", "the rest scrolls inside the frame while collapsed");
 			const layout = await ui.evaluate<Record<string, number>>("(()=>{const r=s=>document.querySelector(s).getBoundingClientRect();return{headBottom:r('.omp-htmlpage-head').bottom,frameTop:r('iframe.omp-htmlpage-frame').top,frameBottom:r('iframe.omp-htmlpage-frame').bottom,moreTop:r('.omp-htmlpage-more').top}})()");
 			assert.ok(layout.headBottom! <= layout.frameTop!, `the header (${layout.headBottom}) is above the frame (${layout.frameTop}), never over it`);
@@ -335,7 +335,7 @@ addEventListener('load',()=>report('scroll',document.documentElement.scrollHeigh
 			await ui.until("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height>=3000");
 
 			await ui.evaluate("document.querySelector('.omp-htmlpage-more').click()");
-			await ui.until("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height===480");
+			await ui.until("document.querySelector('iframe.omp-htmlpage-frame').getBoundingClientRect().height===800");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-more').textContent"), "Show full page", "collapse returns to the cap");
 		});
 

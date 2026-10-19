@@ -74,7 +74,7 @@ test("the HTML page rule is in the Chat prompt only when ompDesk.chatHtmlPages i
 	}
 	assert.ok(HTML_PAGE_INJECTION.text.length <= MAX_HTML_PAGE_INJECTION_CHARS, `the rule is ${HTML_PAGE_INJECTION.text.length} characters`);
 	assert.doesNotMatch(HTML_PAGE_INJECTION.text, /\n/);
-	for (const token of ["--bg", "--fg", "--accent", "--c1", "--font-mono", "480px", "100vh", "`data:`", "height fixed", "fixed-height container", "Show full page"]) assert.ok(HTML_PAGE_INJECTION.text.includes(token), token);
+	for (const token of ["--bg", "--fg", "--accent", "--c1", "--font-mono", "800px", "100vh", "`data:`", "height fixed", "fixed-height container", "Show full page"]) assert.ok(HTML_PAGE_INJECTION.text.includes(token), token);
 });
 
 test("the Chat prompt stays within its size budget, one short rule per injection", () => {

@@ -21,7 +21,7 @@ export const MAX_HTML_PAGE_CHARS = 200_000;
 export const HTML_PAGE_INITIAL_HEIGHT = 160;
 export const HTML_PAGE_MIN_HEIGHT = 40;
 /** The most a collapsed page takes (it scrolls inside beyond it); a taller page offers Show full page. */
-export const HTML_PAGE_MAX_HEIGHT = 480;
+export const HTML_PAGE_MAX_HEIGHT = 800;
 /** The most a page's reported content height is believed, expanded or not: a page asking for more scrolls inside. */
 export const HTML_PAGE_MAX_CONTENT_HEIGHT = 30_000;
 
