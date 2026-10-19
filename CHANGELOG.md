@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-10-19
+
 ### Added
 
 - **Chat: OMP's magic keywords glow in the message box and in your sent messages.** `ultrathink`, `orchestrate`, `workflowz` and `jevify`, as standalone lowercase words of prose, are painted with OMP's per-letter hue gradient (it sweeps along the word while the message box has the focus; in a sent message it stands still), by OMP's own rule: `orchestrate()`, `foo-orchestrate`, `path/orchestrate`, `orchestrates` and a word in backticks, a code block or an HTML tag stay plain. Chat follows OMP's `magicKeywords.*` settings (`omp config list` in the tab's folder and profile, asked only while such a word is on screen, at most every 30 s and again when you come back to the message box or the window), so a word switched off in OMP Settings is not painted. The hues are OMP's with the lightness solved per theme kind for ordinary-text contrast (4.5:1, 7:1 in the High Contrast themes); High Contrast and forced colours add an underline, and reduced motion or forced colours stop the sweep. It is drawn with the CSS Custom Highlight API, so the message box, caret, IME and your text are unchanged. See [Chat](docs/guide/chat.md#magic-keywords).
@@ -18,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Chat: the Figure | Source toolbar no longer covers the figure.** On an `svg` figure, an `html` page and a Mermaid diagram the toolbar (view toggle and Copy) sat over the top corner of the drawing and hid part of it. It now has a row of its own above the drawing, still shown on hover or focus.
+- **Chat: the Figure | Source toolbar no longer covers the figure.** On an `svg` figure and a Mermaid diagram the toolbar (view toggle and Copy) sat over the top corner of the drawing and hid part of it. It now has a row of its own above the drawing, still shown on hover or focus.
 - **Sessions: Rename's input no longer vanishes the moment it opens.** Rename opened its name box and a keyboard layout switch (Alt+Shift, or Alt alone, which moves the keyboard to the menu bar) made VS Code dismiss it, because the box hid itself whenever it lost focus; a name typed in the wrong layout could then not be corrected and the session could not be renamed again. The box now stays until you press Enter or Escape, like the other prompts that take typed text.
 - **Chat: a `/compact` typed after a reply puts its divider below that reply.** The `Compacted · 366k → 62.2k tokens` divider appeared above the turns you had just had in that window (above your last message and the reply to it) instead of at the end, and a reload put it right. Each row Chat shows live is placed after the row that came before it, and after a finished turn that is often an entry the session file's reader never returns (a model-usage or title-change record). When Chat re-read the file after the report, those rows lost the row they were placed after and fell to the end of the transcript, below the compaction row that is saved later than they are. They now move to the nearest row the re-read still holds.
 - **Chat: a disclosure row you reach with the keyboard shows the theme's focus ring.** The `Compacted` divider, the thinking block and the other folding rows of a reply drew the browser's default focus outline (a white box on a dark theme, with no relation to the theme's focus colour) when focused; they now draw the same 1 px ring as the tool rows and buttons.
@@ -480,7 +482,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.9...HEAD
+[0.4.9]: https://github.com/hmmvot/omp-desk/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/hmmvot/omp-desk/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/hmmvot/omp-desk/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/hmmvot/omp-desk/compare/v0.4.5...v0.4.6
