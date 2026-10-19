@@ -81,7 +81,9 @@ export class ProcessTreeItem extends vscode.TreeItem {
 		this.accessibilityInformation = {
 			label: `${label}, ${processKindWord(row)} process, ${processStateWord(row, state)}${row.stop.available ? "" : ", cannot be stopped here"}`,
 		};
-		this.command = openTarget === null ? undefined : { command: "ompDesk.openProcess", title: "Open", arguments: [this] };
+		// No argument, as for a session row: VS Code disposes the delegate of a command with arguments the moment the row is
+		// repainted, and this row is repainted whenever its uptime words change. The click reads the view's selection.
+		this.command = openTarget === null ? undefined : { command: "ompDesk.openProcess", title: "Open" };
 	}
 }
 

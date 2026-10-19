@@ -106,7 +106,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		brokerSlots: undefined as BrokerSlotStore | undefined,
 		folders: undefined as unknown,
 		provider: undefined as unknown,
-		view: undefined as { message?: string; visible: boolean } | undefined,
+		view: undefined as { message?: string; visible: boolean; selection?: readonly unknown[] } | undefined,
 		processes: null as { refresh(): Promise<{ rows: unknown[] }>; sync(): void; touch(): void; serveStopRequest(): Promise<never[]> } | null,
 		/** The window's startup restore: `null` once it is over (the default), otherwise what the Processes poll waits for. */
 		restoreOver: null as Promise<void> | null,
@@ -390,6 +390,37 @@ describe("clicking a session row", () => {
 		await w.actions.click(w.state.context, w.index, sessionRow(TAB, "stopped"));
 		assert.deepEqual(w.opened, []);
 	});
+
+	it("takes the row of the row's own click from the view's selection, so a double click's two commands both find it after the repaint between them", async t => {
+		// The row's command has no argument (VS Code disposes the delegate of a command with arguments at each repaint of the row, and the
+		// second click of a double click arrives in that gap: "Actual command not found"). The workbench selects the row before it runs the command.
+		t.mock.timers.enable({ apis: ["Date"], now: 1_000 });
+		const w = await world(fakeIndex([stopped()]));
+		const row = sessionRow(TAB, "stopped");
+		w.state.view = { visible: true, selection: [row] };
+		try {
+			await w.actions.clickSelected(w.state.context, w.index);
+			t.mock.timers.tick(100);
+			await w.actions.clickSelected(w.state.context, w.index);
+		} finally {
+			t.mock.timers.reset();
+		}
+		assert.deepEqual(w.opened.map(call => [call[0], call[1], call[4]]), [[row, "opened", "row"], [row, "resumed", "row"]]);
+	});
+
+	it("does nothing for a click when the view selects no row, several rows, or a row that is not a session", async () => {
+		const w = await world(fakeIndex([stopped(), stopped(OTHER_TAB)]));
+		await w.actions.clickSelected(w.state.context, w.index);
+		w.state.view = { visible: true };
+		await w.actions.clickSelected(w.state.context, w.index);
+		w.state.view = { visible: true, selection: [] };
+		await w.actions.clickSelected(w.state.context, w.index);
+		w.state.view = { visible: true, selection: [sessionRow(TAB, "stopped"), sessionRow(OTHER_TAB, "stopped")] };
+		await w.actions.clickSelected(w.state.context, w.index);
+		w.state.view = { visible: true, selection: [processRow({}, "stats")] };
+		await w.actions.clickSelected(w.state.context, w.index);
+		assert.deepEqual([w.opened, w.commands], [[], []]);
+	});
 });
 
 describe("opening a process row", () => {
@@ -403,6 +434,20 @@ describe("opening a process row", () => {
 		const w = await world();
 		await w.actions.openProcess(w.state.context, w.index, processRow({}, null));
 		await w.actions.openProcess(w.state.context, w.index, sessionRow(TAB, "running"));
+		assert.deepEqual([w.opened, w.commands, w.infos, w.warnings], [[], [], [], []]);
+	});
+
+	it("takes the row of the process row's own click from the view's selection, and ignores a selection that is not one process row", async () => {
+		const w = await world();
+		await w.actions.openSelectedProcess(w.state.context, w.index);
+		w.state.view = { visible: true, selection: [processRow({}, "stats")] };
+		await w.actions.openSelectedProcess(w.state.context, w.index);
+		assert.deepEqual(w.commands, [["ompDesk.openStats"]]);
+		w.commands.length = 0;
+		w.state.view = { visible: true, selection: [processRow({}, "stats"), processRow({}, "stats")] };
+		await w.actions.openSelectedProcess(w.state.context, w.index);
+		w.state.view = { visible: true, selection: [sessionRow(TAB, "running")] };
+		await w.actions.openSelectedProcess(w.state.context, w.index);
 		assert.deepEqual([w.opened, w.commands, w.infos, w.warnings], [[], [], [], []]);
 	});
 

@@ -202,8 +202,16 @@ interface CapturedSessionStop {
 export interface SessionActions {
 	/** Tree clicks keep history immediate; only a stopped same-row second click requests a launch. */
 	click(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, origin?: PendingOrigin): Promise<void>;
+	/**
+	 * The Sessions view's own click on a session row (`ompDesk.clickSession`). The row's command carries no argument (VS Code
+	 * disposes the delegate of a command with arguments when the row is repainted, and a click in that gap fails), and VS Code
+	 * selects a row before it runs the row's command, so the row is the one the view has selected.
+	 */
+	clickSelected(context: vscode.ExtensionContext, index: SessionIndex): Promise<void>;
 	/** Click a process row: open what it stands for. */
 	openProcess(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void>;
+	/** The Sessions view's own click on a process row (`ompDesk.openProcess`): the selected row, as for {@link clickSelected}. */
+	openSelectedProcess(context: vscode.ExtensionContext, index: SessionIndex): Promise<void>;
 	/** `ompDesk.goToSession`: a searchable list of every session the Sessions view shows. */
 	goTo(context: vscode.ExtensionContext, index: SessionIndex): Promise<void>;
 	/** Drop one launcher entry, without touching the OMP session file. */
@@ -242,6 +250,16 @@ function messageOf(error: unknown): string {
 export function registerSessionActions<Tab extends SessionTab>(deps: SessionActionsDeps<Tab>): SessionActions {
 	/** Clicks on session rows, told apart by their interval. */
 	const sessionClicks = new SessionClickRecognizer();
+
+	/**
+	 * The row a click on the Sessions view means: the single selected one. The workbench selects a row before it runs the row's
+	 * command, and sends the selection to the extension host ahead of the command on the same channel, so a double click's two
+	 * commands both find the row, whatever the repaint of it in between did to the host's per-node command delegates.
+	 */
+	function selectedRow(): unknown {
+		const selection = deps.launcherView()?.selection ?? [];
+		return selection.length === 1 ? selection[0] : undefined;
+	}
 
 	/** Tree clicks keep history immediate; only a stopped same-row second click requests a launch. */
 	async function clickSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, origin: PendingOrigin = "row"): Promise<void> {
@@ -929,7 +947,9 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	}
 	return {
 		click: clickSession,
+		clickSelected: (context, index) => clickSession(context, index, selectedRow()),
 		openProcess,
+		openSelectedProcess: (context, index) => openProcess(context, index, selectedRow()),
 		goTo: goToSession,
 		forget: forgetSession,
 		stopHost: stopSessionHost,

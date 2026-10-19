@@ -586,8 +586,9 @@ function hold(state: SessionItemState, row: SessionRowPresentation): string | nu
  * One conversation row.
  *
  * The provider keeps the instances it created until the next refresh, so
- * `TreeView.reveal` always receives an element the view already knows; commands
- * receive the same instance as their argument and read `tabId` from it.
+ * `TreeView.reveal` always receives an element the view already knows; the menu
+ * commands receive the same instance as their argument and read `tabId` from it.
+ * The row's own click command receives nothing: it reads the view's selection.
  */
 export class SessionTreeItem extends vscode.TreeItem {
 	readonly tabId: string;
@@ -620,8 +621,12 @@ export class SessionTreeItem extends vscode.TreeItem {
 		super("", vscode.TreeItemCollapsibleState.None);
 		this.tabId = entry.tabId;
 		this.id = entry.tabId;
-		// Commands and TreeView.reveal retain this element across presentation changes.
-		this.command = { command: "ompDesk.clickSession", title: "Open", arguments: [this] };
+		// The click command carries no argument, on purpose. VS Code replaces a command that has arguments by a
+		// delegate it registers per tree node and disposes the moment the row is repainted (`fire(row)`), before the
+		// workbench has taken the repainted row; a click that lands in that gap (for example the second click of a double
+		// click, right after the first one's own repaint) fails with "Actual command not found". VS Code selects the row
+		// before it runs the row's command, so the command reads the view's selection instead.
+		this.command = { command: "ompDesk.clickSession", title: "Open" };
 		this.update(entry, state, row);
 	}
 

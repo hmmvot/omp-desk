@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Chat: `/` suggestions put commands above skills, keep an exact name in the list and turn it into a block at once.** The list is ranked: the entry named exactly what you typed (or its alias) is first and selected, then every command (OMP's own, file, extension and Desk's own) before any skill, so `/report` is no longer below a `/skill:…` whose name contains `report`. Typing a whole name no longer makes the list disappear: it stays, with that entry first and selected (`Enter` or `Tab` completes it with a space as for any suggestion; the next `Enter` sends). A name at the start of the draft that is exactly a command or a skill of the session is drawn as the command or skill block the moment it is typed, without waiting for Space; adding a character (`/reportx`) or deleting one (`/repor`) turns it back into plain text and completion continues, and `Backspace` or `Delete` next to such a block removes one character instead of the whole block. A block that has its space after it, and a command's arguments after it, work as before.
 
+### Fixed
+
+- **Sessions: a click on a row no longer fails with "Actual command not found, wanted to execute ompDesk.clickSession".** A row's click command carried the row as an argument, and VS Code keeps such a command only until the row is next repainted; Desk repaints a row in place whenever it changes (the clicked row at once, to show "Opening…"), so a click that reached the extension host in the short gap after a repaint (for example the second click of a double click, the one that resumes a stopped session) found the command already gone, showed that error and did nothing. The click commands of session rows and of process rows now carry no argument and take the row the view has selected, which VS Code selects before it runs the command, so no repaint can disown a click.
+
 ## [0.4.9] - 2026-10-19
 
 ### Added

@@ -635,7 +635,7 @@ describe("launcher tree", () => {
 		const stopped = rows.find(row => row.tabId === "tab:stopped")!;
 		assert.equal(open.command?.command, "ompDesk.clickSession");
 		assert.equal(stopped.command?.command, "ompDesk.clickSession");
-		assert.equal(stopped.command?.arguments?.[0], stopped);
+		assert.equal(stopped.command?.arguments, undefined, "no argument: VS Code disposes the delegate of a command with arguments when the row is repainted");
 		assert.equal(stopped.id, "tab:stopped");
 	});
 
@@ -1729,6 +1729,19 @@ describe("launcher tree", () => {
 			terminals.setProcesses(snapshot());
 			assert.deepEqual(await terminals.getChildren(), []);
 		});
+
+		it("gives a process row a click command without an argument, so repainting it cannot disown a click in flight", async () => {
+			const terminals = provider("terminals");
+			const shell = process();
+			terminals.setProcesses(snapshot(shell));
+			const [item] = (await terminals.getChildren()) as Array<InstanceType<typeof ProcessTreeItem>>;
+			const changed: unknown[] = [];
+			terminals.onDidChangeTreeData(element => changed.push(element));
+			terminals.setProcesses(snapshot({ ...shell, uptimeMs: 3_600_000 }));
+			assert.ok(changed.includes(item), "the row is repainted in place, which is what makes VS Code dispose its command delegate");
+			assert.equal(item!.command?.command, "ompDesk.openProcess");
+			assert.equal(item!.command?.arguments, undefined, "VS Code disposes the delegate of a command with arguments at that repaint");
+		});
 	});
 });
 
@@ -1808,6 +1821,23 @@ describe("a row whose action is being processed", () => {
 			assert.ok(!changed.includes(b), "a row with no operation is not repainted");
 			provider.setPending([]);
 			assert.equal(a.description, "Stopped");
+		});
+
+		it("repaints a row with a click command that has no argument: VS Code disposes the delegate of a command with arguments at each repaint, and a click in that gap fails with 'Actual command not found'", async () => {
+			const provider = await build(new Set());
+			const [folderRow] = await rootsOf(provider);
+			const rows = await rowsOf(provider, folderRow!);
+			const a = rows.find(row => row.tabId === "tab:a")!;
+			const changed: unknown[] = [];
+			provider.onDidChangeTreeData(element => changed.push(element));
+			provider.setPending([{ key: "tab:a", kind: "open", step: "ownership", startedAt: 20_000, still: false }]);
+			assert.ok(changed.includes(a), "the click's own feedback repaints the clicked row in place");
+			provider.setPending([]);
+			for (const element of changed) {
+				if (!(element instanceof sessionTree.SessionTreeItem)) continue;
+				assert.equal(element.command?.command, "ompDesk.clickSession");
+				assert.equal(element.command?.arguments, undefined, "a row that is repainted in place never carries command arguments");
+			}
 		});
 
 		it("keeps a row in the group it was in when its operation began, even when its state changes under it", async () => {
