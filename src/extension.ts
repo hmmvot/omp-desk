@@ -11302,13 +11302,22 @@ function sessionTargetFromArgument(
 /** The longest session title the control channel, the tree and the slot all accept. */
 const MAX_SESSION_TITLE_CHARS = 200;
 
-/** Ask for a session's stored name, validated by the same rules every writer uses. */
+/**
+ * Ask for a session's stored name, validated by the same rules every writer uses.
+ *
+ * The box ignores focus loss: Windows' Alt+Shift (and Alt alone) layout switch, the menu bar's Alt focus, a toast or a page
+ * that focuses itself all move the keyboard out of an input box, and VS Code then dismisses a box that does not ignore it
+ * (the rename input "opened and immediately disappeared" for a user who switched the keyboard layout to correct a name typed
+ * in the wrong one). A title is typed text the user may have to switch layouts or look elsewhere to compose, so only Enter
+ * and Escape end it, as for the other prompts of this extension that take typed text.
+ */
 async function promptSessionTitle(entry: SessionIndexEntry): Promise<string | undefined> {
   windowState().pending.step(entry.tabId, "confirm", "rename");
   const proposed = await vscode.window.showInputBox({
     title: `Rename ${path.basename(entry.cwd)}`,
     prompt: "The name OMP stores for this session, shown in its own TUI and in OMP's history.",
     value: entry.title ?? "",
+    ignoreFocusOut: true,
     validateInput: value => {
       const trimmed = value.trim();
       if (trimmed.length === 0) return "A session name cannot be empty.";

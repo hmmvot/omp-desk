@@ -206,6 +206,11 @@ export const harness = {
     fixtureVscode.window.showQuickPick = handler;
     return () => { fixtureVscode.window.showQuickPick = previous; };
   },
+  inputBox(handler) {
+    const previous = fixtureVscode.window.showInputBox;
+    fixtureVscode.window.showInputBox = handler;
+    return () => { fixtureVscode.window.showInputBox = previous; };
+  },
   sessionModelAvailability: tabId => fixtureWindow().footerBindings.get(tabId)?.message.hasAvailableModels,
   handlePassiveSlotMessage, passiveReasonForSlot,
   footerIdle: () => Promise.all([...fixtureWindow().footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
@@ -451,6 +456,7 @@ interface Harness {
   signInProvider(...args: unknown[]): Promise<string>;
   logoutProviderFromPalette(...args: unknown[]): Promise<void>;
   profilePicker(handler: (items: any, options?: any, token?: any) => Promise<any>): () => void;
+  inputBox(handler: (options: { ignoreFocusOut?: boolean }) => Promise<string | undefined>): () => void;
   infos(): string[];
   providerModelsIdle(): Promise<void>;
   closeLoginTerminal(name: string): void;
@@ -2292,6 +2298,19 @@ describe("verified-owned-writer policy fixtures", () => {
       assert.deepEqual(f.operations, ["launch rpc"]);
       assert.deepEqual(f.dialogs, [], "no release or uncertainty confirmation");
     } finally { f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+  });
+
+  it("Rename's input box survives losing focus (Alt, Alt+Shift layout switch), so a name can be typed again", async () => {
+    const f = await legacyFixture("rename-focus", false, false);
+    const prompts: { ignoreFocusOut?: boolean }[] = [];
+    const restore = harness.inputBox(async options => { prompts.push(options); return `Name ${prompts.length}`; });
+    try {
+      await harness.renameSession(storage().context, f.index, TAB);
+      await harness.renameSession(storage().context, f.index, TAB);
+      assert.equal(prompts.length, 2, "an already renamed empty session is prompted again");
+      assert.deepEqual(prompts.map(p => p.ignoreFocusOut), [true, true], "VS Code hides a box without ignoreFocusOut as soon as the keyboard leaves it");
+      assert.equal(f.index.get(TAB)?.title, "Name 2");
+    } finally { restore(); f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
   });
 
   /** A stand-in for the lease observer: reports exactly what a terminal omp would make the real probe see. */
