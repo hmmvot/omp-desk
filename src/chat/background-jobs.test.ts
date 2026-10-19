@@ -217,11 +217,23 @@ describe("jobsViewOf", () => {
 		assert.equal(jobsViewOf(source([], { asyncPaused: true })).pending, true);
 	});
 
-	it("is incomplete when older history is unloaded or a task job runs", () => {
+	it("is incomplete only when older history is unloaded", () => {
 		assert.equal(jobsViewOf(source(two)).incomplete, false);
 		assert.equal(jobsViewOf(source(two, { olderCount: 3 })).incomplete, true);
-		assert.equal(jobsViewOf(source(chain(started("c1", 1_000, "bg_1", "task")))).incomplete, true);
-		assert.equal(jobsViewOf(source(chain(started("c1", 1_000, "bg_1", "task"), delivered(2_000, "bg_1")))).incomplete, false, "an ended task is no unknown");
+		assert.equal(jobsViewOf(source(chain(started("c1", 1_000, "bg_1", "task")))).incomplete, false, "an agent is the Agents row's, not an unknown job");
+	});
+
+	it("leaves a running agent (a task job) to the Agents row, and shows no row when the pending work may be the agent alone", () => {
+		const agent = chain(started("c1", 1_000, "bg_1", "task"));
+		const alone = jobsViewOf(source(agent, { state: { hasPendingAsyncWork: true } }));
+		assert.deepEqual(alone.running, []);
+		assert.equal(alone.agentsRunning, true);
+		assert.equal(alone.shown, false);
+		assert.equal(alone.byId.get("bg_1")?.type, "task", "the agent's card still reads its job");
+		const mixed = jobsViewOf(source(chain(started("c1", 1_000, "bg_1", "task"), started("c2", 2_000, "bg_2")), { state: { hasPendingAsyncWork: true } }));
+		assert.deepEqual(mixed.running.map(job => job.id), ["bg_2"]);
+		assert.equal(mixed.shown, true);
+		assert.equal(jobsViewOf(source(chain(started("c1", 1_000, "bg_1", "task"), delivered(2_000, "bg_1")), { state: { hasPendingAsyncWork: true } })).shown, true, "with the agent ended, unnamed pending work is shown again");
 	});
 
 	it("reads the gone map", () => {

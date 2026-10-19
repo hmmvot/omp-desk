@@ -61,7 +61,7 @@ export function jobsSummary(view: JobsView, now: number): JobsSummary {
 	const age = jobAgeMs(newest, now);
 	const count = view.running.length === 1 && !view.incomplete ? "1 background job" : `${view.incomplete ? "at least " : ""}${view.running.length} background job${view.running.length === 1 ? "" : "s"}`;
 	const text = [count, jobTitle(newest), age === null ? "" : fmtDuration(age)].filter(part => part.length > 0).join(" · ");
-	return { text, ...(view.incomplete ? { detail: "This chat's list is a lower bound: older history is not loaded, or a task may have started jobs no result names." } : {}), warn: false };
+	return { text, ...(view.incomplete ? { detail: "This chat's list is a lower bound: older history is not loaded." } : {}), warn: false };
 }
 
 export interface JobsWindow {

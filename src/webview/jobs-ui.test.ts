@@ -369,12 +369,13 @@ test("background jobs in the Jobs row, the working row, tool cards and proc:// l
 			assert.deepEqual(await prompts(), ["/jobs kill bg_1"]);
 		});
 
-		await t.test("a list that may be missing jobs says so, and pending work no job names is not a count of zero", async () => {
-			await setup("jobs-incomplete", "{id:'bg_2',label:'agent run',ago:60000,type:'task'}", { expand: false });
-			await ui.wait("document.querySelector('.omp-hud--jobs .omp-hud-summary')");
-			assert.match(await text(".omp-hud--jobs .omp-hud-summary"), /^at least 1 background job · task: agent run · \d+m( \d+s)?$/);
+		await t.test("a list that may be missing jobs says so, an agent is left to the Agents row, and pending work no job names is not a count of zero", async () => {
+			await setup("jobs-incomplete", JOB, { expand: false });
 			await ui.evaluate("window.ui.jobs([" + JOB + "], {pending:true,olderCount:12})");
 			await ui.wait("/^at least 1 background job · bash: npm run dev/.test(document.querySelector('.omp-hud--jobs .omp-hud-summary')?.textContent??'')");
+			// A running agent is a task job: the Agents row shows it, and pending work that may be its alone draws no Jobs row.
+			await ui.evaluate("window.ui.jobs([{id:'bg_2',label:'agent run',ago:60000,type:'task'}], {pending:true,olderCount:0})");
+			await ui.wait("!document.querySelector('.omp-hud--jobs')");
 			await ui.evaluate("window.ui.jobs([], {pending:true,olderCount:0})");
 			await ui.wait("document.querySelector('.omp-hud--jobs .omp-hud-summary')?.textContent==='Background work is pending · no job is named in this chat'");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-hud--jobs .omp-hud-summary').className.includes('warn') || document.querySelector('.omp-hud--jobs').outerHTML.includes('warn')"), true, "drawn as a warning");

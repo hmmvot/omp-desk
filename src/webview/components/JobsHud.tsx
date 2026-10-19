@@ -33,7 +33,8 @@ export function JobsHud({ jobs, expanded, onToggle, lines }: JobsHudProps): Reac
 	useSecondTick(view.running.length > 0);
 	const summary = jobsSummary(view, Date.now());
 	const busy = state.pending !== null;
-	const canCancelAll = cancelBlocked === null && (view.running.length > 0 || view.pending);
+	// OMP's `/jobs kill all` also stops the agents the Agents row shows, so it is not offered while one runs.
+	const canCancelAll = cancelBlocked === null && !view.agentsRunning && (view.running.length > 0 || view.pending);
 
 	const focusId = state.focus?.id ?? null;
 	const focused = focusId === null ? null : view.byId.get(focusId) ?? null;

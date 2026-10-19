@@ -99,3 +99,7 @@ One change: `src/chat/background-jobs.ts`, `jobs-hud.ts`, reducer, snapshot and 
 ## Architecture Review
 
 Independent review (`JobsDesignReview`, a separate reviewer agent): the first pass of the first draft was accept with changes; its two material findings (job ids restart per OMP process; `/jobs kill` can fall through to the model) and nine should-fix items are resolved in this text. A confirmation pass of the revision required five changes (the replacement rule for a record with no call id, the task-frame wording, the note rule, the anchored reply match and the status vocabulary); all five are applied and the reviewer's final read answered ACCEPT. No material issue remains, so the status is `accepted`.
+
+## Amendment 2026-10-19: agents are not jobs in the row
+
+A background `task` is an agent, which the Agents row already lists, so the Jobs row showed it twice. `JobsView.running` now holds `bash` and `eval` jobs only; task jobs stay in `byId` for their cards' chips. `agentsRunning` says an agent runs: pending work with no job named draws no Jobs row then (OMP's flag may be the agent's alone), and Cancel all (`/jobs kill all`, which also stops agents) is not offered. `incomplete` no longer counts a running task, since the jobs a task starts are agents too; it is true only while older history is not loaded. This supersedes the task parts of the incomplete-list rule above.

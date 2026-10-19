@@ -310,11 +310,13 @@ export interface JobsView {
 	shown: boolean;
 	/** OMP's own flag: background work is pending. */
 	pending: boolean;
-	/** Jobs the transcript and frames show running, newest first. */
+	/** Bash and eval jobs the transcript and frames show running, newest first. A task job is an agent: the Agents row shows it. */
 	running: readonly JobRecord[];
-	/** Every job seen, running or ended, by id (the latest job that used the id). */
+	/** Every job seen, running or ended, by id (the latest job that used the id), task jobs included for their cards. */
 	byId: ReadonlyMap<string, JobRecord>;
-	/** Known to be a lower bound: older history is not loaded, or a task spawn may have started jobs no result names. */
+	/** An agent (a task job) is running: OMP's pending flag may be its alone, and `/jobs kill all` would stop it too. */
+	agentsRunning: boolean;
+	/** Known to be a lower bound: older history is not loaded. */
 	incomplete: boolean;
 }
 
@@ -331,20 +333,24 @@ export interface JobsSource {
 
 export function jobsViewOf(model: JobsSource, gone: GoneJobs = NO_GONE): JobsView {
 	const jobs = scanJobs(model.entries, model.jobFrames, gone);
-	const running = jobs.filter(job => job.state === "running").reverse();
+	const live = jobs.filter(job => job.state === "running").reverse();
+	const running = live.filter(job => job.type !== "task");
+	const agentsRunning = live.length > running.length;
 	const pending = model.asyncPaused || model.state?.hasPendingAsyncWork === true;
 	return {
-		shown: model.phase === "live" && (pending || !model.settled && running.length > 0),
+		// Pending work with no job named is shown only while no agent runs: the agent may be all OMP is waiting for.
+		shown: model.phase === "live" && (running.length > 0 ? pending || !model.settled : pending && !agentsRunning),
 		pending,
 		running,
 		byId: new Map(jobs.map(job => [job.id, job])),
-		incomplete: model.olderCount > 0 || running.some(job => job.type === "task"),
+		agentsRunning,
+		incomplete: model.olderCount > 0,
 	};
 }
 
 /** Whether two views would draw the same: the page keeps the previous object then, so a card re-renders only when a job changed. */
 export function sameJobsView(left: JobsView, right: JobsView): boolean {
-	if (left.shown !== right.shown || left.pending !== right.pending || left.incomplete !== right.incomplete) return false;
+	if (left.shown !== right.shown || left.pending !== right.pending || left.incomplete !== right.incomplete || left.agentsRunning !== right.agentsRunning) return false;
 	if (left.byId.size !== right.byId.size) return false;
 	for (const [id, job] of left.byId) {
 		const other = right.byId.get(id);
