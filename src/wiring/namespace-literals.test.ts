@@ -24,6 +24,7 @@ const KEPT = new Map<string, string>([
 	["omp.sessionIndex.local.v1", "per-window Memento key of the session index"],
 	["omp.brokerSlots.v1", "broker slot record"],
 	["omp.shellSlots.v1", "shell slot record"],
+	["omp.editorSlotWatch.v1", "per-window Memento key of the slot ids whose editor this window saw close, until each is settled"],
 	["omp.workspaceFolders.v1", "pinned folder record"],
 	["omp.windowFolderCollapsed.v1", "collapsed state of window folders"],
 	["omp.unityProjectChoice.v1", "remembered Unity project choice"],
