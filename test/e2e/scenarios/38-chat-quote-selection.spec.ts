@@ -4,11 +4,16 @@
  * "Quote Selection" item is offered in a menu the workbench renders, that it inserts the same text, and that a
  * sent draft carries the `>` lines to the model and shows as a quote followed by the comment.
  *
- * User messages render through the same Markdown component as replies, so the test messages are short Markdown the mock server
- * records whole (it keeps the first 200 characters).
+ * The quoted text comes from the assistant reply, which renders `**bold**` and `` `code` `` as styling; the user's own message keeps `**`
+ * literal (a sent message is shown as typed), so it holds no `strong` to select. The mock server echoes the sent text in its reply
+ * (it keeps the first 200 characters). The sent quote itself is the user's text: its `blockquote` shows the quoted source literally.
  */
 import type { FrameLocator, Locator } from "@playwright/test";
 import { expect, test } from "../support/fixtures.ts";
+
+/** The styled parts of the assistant reply (the user's rows are `.omp-user` and show Markdown emphasis as typed). */
+const REPLY_STRONG = ".omp-md:not(.omp-user .omp-md) strong";
+const REPLY_CODE = ".omp-md:not(.omp-user .omp-md) code";
 
 /** Selects all the text of the first element `selector` matches in the transcript, as a user's drag would. */
 async function select(chat: FrameLocator, selector: string): Promise<void> {
@@ -34,7 +39,7 @@ test("selected Chat text is quoted into the draft by Alt+Q and the context menu,
 	await expect.poll(draft).toBe("");
 
 	// No Quote button is drawn: the key and the menu are the only triggers.
-	await select(chat, ".omp-user .omp-md strong");
+	await select(chat, REPLY_STRONG);
 	await expect(chat.getByRole("button", { name: /^Quote/ })).toHaveCount(0);
 
 	// Alt+Q quotes the source of exactly the selection and puts the caret under it, with the focus in the composer.
@@ -44,7 +49,7 @@ test("selected Chat text is quoted into the draft by Alt+Q and the context menu,
 
 	// Alt+Q with a second selection, after a comment: the quote lands at the end after a blank line.
 	await box.pressSequentially("my comment");
-	await select(chat, ".omp-user .omp-md code");
+	await select(chat, REPLY_CODE);
 	await page.keyboard.press("Alt+q");
 	await expect.poll(draft).toBe("> **bold**\nmy comment\n\n> `code`\n");
 	await expect(box).toBeFocused();
@@ -72,8 +77,8 @@ test("selected Chat text is quoted into the draft by Alt+Q and the context menu,
 	await expect.poll(draft, "the quote and its line break went, the comment stayed").toBe("my comment");
 
 	// The context menu of the selection offers Quote Selection and inserts the same text.
-	await select(chat, ".omp-user .omp-md strong");
-	await chat.locator(".omp-user .omp-md strong").first().click({ button: "right" });
+	await select(chat, REPLY_STRONG);
+	await chat.locator(REPLY_STRONG).first().click({ button: "right" });
 	// The item carries its key in its name ("Quote Selection Alt+Q"), so it is found by prefix rather than through desk.clickMenuItem.
 	const item = page.locator(".monaco-menu").getByRole("menuitem", { name: /^Quote Selection/ });
 	await item.hover({ timeout: 30_000 });
@@ -88,7 +93,7 @@ test("selected Chat text is quoted into the draft by Alt+Q and the context menu,
 	await expect(chat.getByText(/Mock reply to: my comment/), "the draft was sent and answered").toBeVisible({ timeout: 120_000 });
 	const sent = chat.locator(".omp-user").filter({ hasText: "why this?" });
 	await expect(sent.locator("blockquote")).toHaveCount(1);
-	await expect(sent.locator("blockquote strong")).toHaveText("bold");
+	await expect(sent.locator("blockquote"), "a user's quote shows the quoted source as typed").toHaveText("**bold**");
 	await expect(sent.locator("blockquote + p"), "the comment under the quote is its own paragraph, not part of the quote").toHaveText("why this?");
 	const requests: { lastUserText: string }[] = await (await fetch(`${state.mockUrl}/__requests`)).json();
 	expect(requests.some(request => request.lastUserText === "my comment\n\n> **bold**\nwhy this?")).toBe(true);
