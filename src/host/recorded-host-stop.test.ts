@@ -217,6 +217,7 @@ function ports(overrides: Partial<OwnerReconcilePorts> = {}): OwnerReconcilePort
     readProcessIdentity: async () => ({ kind: "unknown", detail: "not read in this case" }),
     isProcessAlive: () => false,
     brokerSlot: () => SLOT,
+    conversationBrokerSlot: () => SLOT,
     brokerProvenance: () => ({ kind: "slot", slot: SLOT }),
     probeRpc: async () => ({ kind: "no-record" }),
     probeBrokerSlot: async () => ({ kind: "missing" }),

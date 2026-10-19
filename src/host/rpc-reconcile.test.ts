@@ -754,6 +754,7 @@ function reconcilePorts(overrides: Partial<OwnerReconcilePorts> = {}): OwnerReco
 		readProcessIdentity: async () => ({ kind: "unknown", detail: "no creation time was read in this case" }),
 		isProcessAlive: () => false,
 		brokerSlot: () => null,
+		conversationBrokerSlot: () => null,
 		brokerProvenance: () => ({ kind: "none" }),
 		probeRpc: async () => ({ kind: "no-record" }),
 		probeBrokerSlot: async () => ({ kind: "idle" }),
@@ -904,9 +905,10 @@ describe("reconciliation of a recorded rpc row", () => {
  * the attach) instead of refusing it as a rival writer.
  */
 describe("reconciliation of an unread launch attempt", () => {
-	function ports(probe: BrokerSlotProbeResult, probed: Array<{ readonly slot: string; readonly pid: number | null }> = []) {
+	function ports(probe: BrokerSlotProbeResult, probed: Array<{ readonly slot: string; readonly pid: number | null }> = [], conversationSlot: string | null = SLOT) {
 		return reconcilePorts({
 			brokerSlot: () => SLOT,
+			conversationBrokerSlot: () => conversationSlot,
 			probeBrokerSlot: async (slot, pid) => {
 				probed.push({ slot, pid });
 				return probe;
@@ -931,6 +933,28 @@ describe("reconciliation of an unread launch attempt", () => {
 		assert.equal(native.kind, "live", "an rpc child is not a native launch's survivor");
 		const pidRecorded = await verdictOf(ports({ kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" }), reconcileRequest({ ...UNIDENTIFIED, pid: CHILD_PID }));
 		assert.equal(pidRecorded.kind, "live");
+	});
+
+	it("does not adopt a slot reached only through an editor's mapping, though a same-kind child runs under it", async () => {
+		const probed: Array<{ readonly slot: string; readonly pid: number | null }> = [];
+		const live: BrokerSlotProbeResult = { kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" };
+		// The controlling editor's mapping answers both the slot fallback and the row's provenance; the conversation has none.
+		const editorOnly = reconcilePorts({
+			brokerSlot: () => SLOT,
+			conversationBrokerSlot: () => null,
+			brokerProvenance: () => ({ kind: "slot", slot: SLOT }),
+			probeBrokerSlot: async (slot, pid) => {
+				probed.push({ slot, pid });
+				return live;
+			},
+		});
+		const verdict = await verdictOf(editorOnly, reconcileRequest(UNIDENTIFIED));
+		assert.equal(verdict.kind, "live", "an editor that once ran something here is not this row's launch");
+		assert.deepEqual(probed, [{ slot: SLOT, pid: null }]);
+
+		// A conversation mapping that names another slot does not vouch for this one either.
+		const other = await verdictOf(ports(live, [], "host:other-slot"), reconcileRequest(UNIDENTIFIED));
+		assert.equal(other.kind, "live");
 	});
 
 	it("does not adopt a slot that is idle, absent or unreadable", async () => {

@@ -271,14 +271,10 @@ describe("availability policy", () => {
 			assert.deepEqual(classified.attachPin, provenPin(handle));
 		});
 
-		it("still refuses a host of another transport, and a session id that differs from the one recorded", () => {
+		it("still refuses a host of another transport", () => {
 			const handle = runningHandle("S-ATTACH");
-			const entry = attempt(recordedEntry(handle));
-			assert.equal(attachable(entry, { ...handle, transport: "native" }).attachableHost, null);
+			assert.equal(attachable(attempt(recordedEntry(handle)), { ...handle, transport: "native" }).attachableHost, null);
 			assert.equal(attachable(attempt(recordedEntry(handle), "native"), { ...handle, transport: "rpc" }).attachableHost, null);
-			const switched = attachable(entry, { ...runningHandle("S-OTHER"), transport: "rpc" });
-			assert.equal(switched.attachableHost, null);
-			assert.match(switched.detail, /does not match the recorded one/);
 		});
 
 		it("does not relax the comparison for a row that recorded a process: that pid must still be the host's", () => {

@@ -129,6 +129,12 @@ export interface OwnerReconcilePorts {
 	/** The durable broker slot this row's host was started under, or `null`. */
 	brokerSlot(request: OwnerReconcileRequest): string | null;
 	/**
+	 * The broker slot recorded for this conversation itself, never one reached through an editor's mapping, or `null`.
+	 * A launch reserves it for the conversation before anything starts, so it is what ties a running child to an
+	 * attempt that recorded no identity.
+	 */
+	conversationBrokerSlot(request: OwnerReconcileRequest): string | null;
+	/**
 	 * The row's recorded broker provenance, without loss: an unreadable provenance is
 	 * uncertainty, never absence.
 	 */
@@ -805,10 +811,11 @@ async function reconcileOwner(request: OwnerReconcileRequest, ports: OwnerReconc
 			// A launch of this build whose window ended before it read the outcome: the broker it started under the slot it
 			// reserved still runs the child, and nothing was recorded that could name it. The broker's own proof (its record,
 			// generation and the child's creation time, re-proved at the attach) is the identity, so the row adopts that child
-			// instead of refusing its own survivor. A pid-recorded or legacy row, or a slot holding another kind of host, is
-			// still only reported as running.
+			// instead of refusing its own survivor. Only a slot the launch recorded for this conversation counts: a slot reached
+			// through an editor's mapping alone is a hint about where the editor once ran something, not this row's launch. A
+			// pid-recorded or legacy row, or a slot holding another kind of host, is still only reported as running.
 			const hostKind = recorded.transport === "native" ? "managed-omp" : "managed-rpc";
-			if (isUnreadLaunchAttempt(recorded) && probe.hostKind === hostKind) {
+			if (isUnreadLaunchAttempt(recorded) && probe.hostKind === hostKind && slot === ports.conversationBrokerSlot(request)) {
 				const pin = probe.pin;
 				return {
 					kind: "attachable",

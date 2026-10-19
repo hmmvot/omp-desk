@@ -254,8 +254,8 @@ export interface SessionClassification {
  * the broker and child identity, and the OMP session id that were recorded. A launch
  * its window left mid-way (an unread attempt) recorded no process and no identity, so
  * there is nothing to compare: the slot the launch reserved and the broker's own pin
- * proof, which the attach re-proves, are its identity, and only the transport and a
- * session id that was recorded are checked here.
+ * proof, which the attach re-proves, are its identity, and only the transport is
+ * checked here.
  */
 function describeAttachMismatch(
 	entry: SessionIndexEntry,
@@ -268,26 +268,29 @@ function describeAttachMismatch(
 		if (host.pid === null || host.rpc === null || (host.transport ?? "rpc") !== recorded.transport) {
 			return "the recorded managed transport does not match the attached host";
 		}
-	} else {
-		if (host.pid === null || recorded.pid === null || host.pid !== recorded.pid) {
-			return "the reported process id does not match the recorded one";
-		}
-		if (!isManagedHost(recorded) || recorded.rpc == null || host.rpc === null || (host.transport ?? "rpc") !== recorded.transport) {
-			return "the recorded managed transport does not match the attached host";
-		}
-		const identity = recorded.rpc;
-		const reported = host.rpc;
-		if (
-			identity.slot !== reported.slot ||
-			identity.brokerId !== reported.brokerId ||
-			identity.brokerGeneration !== reported.brokerGeneration ||
-			identity.childPid === null ||
-			identity.childPid !== reported.childPid ||
-			identity.childCreationTime === null ||
-			identity.childCreationTime !== reported.childCreationTime
-		) {
-			return "the reported broker and child identity do not match the recorded one";
-		}
+		// Nothing else can differ: the reconciler names the adopted host by the id this very record carries. The id is
+		// fenced where a process can report it: the attach hands it to the Chat as the expected id, and the session's own
+		// identity check refuses a different one (a row's file is checked the same way).
+		return null;
+	}
+	if (host.pid === null || recorded.pid === null || host.pid !== recorded.pid) {
+		return "the reported process id does not match the recorded one";
+	}
+	if (!isManagedHost(recorded) || recorded.rpc == null || host.rpc === null || (host.transport ?? "rpc") !== recorded.transport) {
+		return "the recorded managed transport does not match the attached host";
+	}
+	const identity = recorded.rpc;
+	const reported = host.rpc;
+	if (
+		identity.slot !== reported.slot ||
+		identity.brokerId !== reported.brokerId ||
+		identity.brokerGeneration !== reported.brokerGeneration ||
+		identity.childPid === null ||
+		identity.childPid !== reported.childPid ||
+		identity.childCreationTime === null ||
+		identity.childCreationTime !== reported.childCreationTime
+	) {
+		return "the reported broker and child identity do not match the recorded one";
 	}
 	// Native identity is best-effort readback, not attachment authority.
 	if (recorded.transport === "native") return null;

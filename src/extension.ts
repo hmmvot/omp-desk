@@ -1846,6 +1846,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       return null;
     },
+    // The conversation's own mapping only (no editor fallback): what a launch of this conversation reserved.
+    conversationBrokerSlot: request => s.brokerSlots?.forConversation(request.entry.tabId) ?? null,
     // Unreadable provenance proves no ownership; the user's actions remain available.
     brokerProvenance: request => windowState().sessionRuntime.brokerProvenance(request.entry.tabId),
     // Proves one rpc row's recorded child from a read-only broker attachment.
