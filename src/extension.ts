@@ -34,6 +34,7 @@ import { startLoginSession } from "./host/provider-login-rpc";
 import { createLoginUi } from "./wiring/provider-login-ui";
 import { runOmpCli } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS, UsageFailureNotes } from "./host/provider-usage";
+import { readOmpSetting, TODO_CLEAR_DELAY_SETTING } from "./host/omp-setting-read";
 import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./shared/footer-metadata";
@@ -1945,6 +1946,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (kind === "omp") { await ompConfigEditors.open(await ompConfigBinding(tabId)); return; }
       const binding = await settingsBinding(tabId);
       await settingsEditors.open(kind, kind === "agents" ? { folder: null, profile: binding.profile, ...(binding.executable ? { executable: binding.executable } : {}) } : binding);
+    },
+    // The terminal UI clears a fully closed TODO list after OMP's `tasks.todoClearDelay`; Chat reads the same setting, as OMP's CLI reports it for this tab's profile and folder.
+    readTodoClearDelay: async (tabId, cwd) => {
+      try {
+        const executable = await executableFor(hostOf(stateOf(tabId)) ?? null);
+        return await readOmpSetting({ run: runOmpCli, executable, cwd, env: ompCliScopeEnvironment(index.get(tabId)?.scope.profile ?? null), key: TODO_CLEAR_DELAY_SETTING });
+      } catch (error) {
+        log.warn(`tab ${tabId}: ${TODO_CLEAR_DELAY_SETTING} could not be read (${messageOf(error)}); OMP's default applies`);
+        return undefined;
+      }
     },
   });
   s.sessionRuntime = createSessionRuntime(index, chat);

@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import { useState, useSyncExternalStore } from "react";
 import type { ChatModel } from "../../chat/model";
-import { hudSectionLines, todoSummary } from "../../chat/hud-summary";
+import { hudSectionLines } from "../../chat/hud-summary";
+import { todoRowShown } from "../../chat/todo-hud";
 import { RunningAgents } from "./RunningAgents";
 import { TodoHud } from "./TodoHud";
 
@@ -21,7 +22,7 @@ export function HudDock({ model }: { model: ChatModel }): ReactNode {
 	const [todoOpen, setTodoOpen] = useState(false);
 	const [agentsOpen, setAgentsOpen] = useState(false);
 	const height = useSyncExternalStore(subscribeViewport, viewportHeight);
-	const todoShown = todoSummary(model.todo?.phases ?? []) !== null;
+	const todoShown = todoRowShown(model.todo);
 	const agentsShown = model.agents.size > 0;
 	if (!todoShown && !agentsShown) return null;
 	const lines = hudSectionLines(height, Number(todoShown) + Number(agentsShown), Number(todoShown && todoOpen) + Number(agentsShown && agentsOpen));

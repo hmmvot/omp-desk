@@ -119,7 +119,7 @@ The installed union is `pi-coding-agent/src/session/agent-session-events.ts:13-8
 | retry_fallback_applied / succeeded | Distinct fallback transcript notices, including from/to/role/reason or successful model/role. |
 | ttsr_triggered | Rule notification; merge only consecutive transcript-tail notices. |
 | todo_reminder | Transcript reminder with todos/attempt/maxAttempts, not a canonical todo replacement. |
-| todo_auto_clear | Refresh authoritative get_state; do not blank canonical phases. |
+| todo_auto_clear | Refresh authoritative get_state; do not blank canonical phases. (OMP 18.11.1 never sends it over RPC; the host's own clock hides a closed list's row, see the 2026-10-19 paragraph of the architecture.) |
 | irc_message | Native custom card, live/persisted deduplication. |
 | notice | Visible transcript notice with level/source, not restored history of the removed notices panel. |
 | goal_updated | Shared goal metadata and native goal display where relevant. |
@@ -182,7 +182,7 @@ The native internal URL scheme spec is a host-installed runtime registry (`pi-tu
 
 AGENTS collapsed label is the count of native running-registry members (a terminal progress row may transiently remain until lifecycle removal). Expanded rows show one compact icon/human-name/type/status/activity/elapsed/native-counter row per agent, followed by one ellipsized description line and lazy read-only child access. Native task progress `id` is its allocated human task name, not an opaque transport field; source/index/parent identities, raw timestamps, full task/assignment and raw progress/result archives never render here. The roster has a bounded internal scrollbar. Finished agents remain available in transcript task cards after native removal, not in the running HUD.
 
-TODO uses authoritative snapshots/results/edits. Closed means completed or abandoned; pending/live-agent matches are active display hints, never status mutations. Current phase is first nonempty pending/in_progress phase, otherwise last nonempty phase. Current task is independently first in_progress anywhere, otherwise first pending anywhere, never blocked; show settled context when neither exists. The requested collapsed HUD is a single phase/task/count row, not the TUI's terminal preview of phase/task rows. Expanded phases preserve every task/status/blocker/details/note. As requested, the HUD exists whenever tasks exist: it does not reproduce interactive-only persisted dismissal/auto-clear hiding or successful-subagent writer side effects. No Plan panel remains.
+TODO uses authoritative snapshots/results/edits. Closed means completed or abandoned; pending/live-agent matches are active display hints, never status mutations. Current phase is first nonempty pending/in_progress phase, otherwise last nonempty phase. Current task is independently first in_progress anywhere, otherwise first pending anywhere, never blocked; show settled context when neither exists. The requested collapsed HUD is a single phase/task/count row, not the TUI's terminal preview of phase/task rows. Expanded phases preserve every task/status/blocker/details/note. As requested, the HUD exists whenever tasks exist and does not reproduce successful-subagent writer side effects. It originally also left out the interactive persisted dismissal/auto-clear hiding; since 2026-10-19 a fully closed list leaves the row after `tasks.todoClearDelay`, and a `todo_hud_state` dismissal is honoured (presentation only, nothing is written). No Plan panel remains.
 
 ### Clean cutover
 

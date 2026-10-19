@@ -173,6 +173,11 @@ export interface ChatRuntimeOptions {
 	readonly hostTools?: HostToolProvider;
 	/** Diagnostics sink handed to every live session. */
 	readonly log?: Logger;
+	/**
+	 * OMP's effective `tasks.todoClearDelay` in seconds for the tab's profile and the folder its session runs in, as OMP's own CLI reports
+	 * it; `undefined` when it cannot be read. Called when a fully closed TODO list needs its timer.
+	 */
+	readonly readTodoClearDelay?: (tabId: string, cwd: string) => Promise<unknown>;
 }
 
 /**
@@ -305,6 +310,7 @@ export class ChatRuntime {
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
 			...(this.#options.hostTools === undefined ? {} : { hostTools: this.#options.hostTools }),
 			...(this.#options.log === undefined ? {} : { log: prefixedLogger(this.#options.log, `tab ${tabId}: `) }),
+			...(this.#options.readTodoClearDelay === undefined ? {} : { readTodoClearDelay: () => this.#options.readTodoClearDelay!(tabId, input.cwd) }),
 		});
 		const conversation: Conversation = {
 			tabId,

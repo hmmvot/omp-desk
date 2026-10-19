@@ -14,7 +14,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { assistantPersistenceKey, entryMessage, isInterruptedToolResult, type AssistantMessage, type ChatEntry, type ChatMessage, type RetryErrorUpdate } from "./messages.ts";
-import { latestTodoFromEntries, parseTodoPhases, todoPhasesFromEntry, todoPhasesFromToolResult, type TodoProjection } from "./todos.ts";
+import { latestTodoFromEntries, parseTodoPhases, projectTodo, todoPhasesFromEntry, todoPhasesFromToolResult, type TodoProjection } from "./todos.ts";
 import { reduceAgentFrame, reduceAgentLiveness, reduceAgentRoster, taskSpawnIdentity, withRegistryRows, type AgentActivity, type AgentIdentities, type AgentIdentity, type RunningAgent, type SpawnLookup, type SubagentFrame } from "./agents.ts";
 import type { LiveAgent } from "./agent-liveness.ts";
 import type { ClearDeferrable } from "./clear.ts";
@@ -378,6 +378,8 @@ export type ChatEventFrame = SubagentFrame | NativeEventFrame
 	| { type: "config_update"; model?: ChatLiteModel | null; thinkingLevel?: string | null }
 	| { type: "session_info_update"; title?: string }
 	| { type: "todo_auto_clear" }
+	/** The host's clock cleared the TODO row of the list the model holds (`src/host/rpc/todo-hud.ts`); presentation only. */
+	| { type: "todo_hud_hide" }
 	| { type: "available_commands_update"; commands: readonly ChatSlashCommand[] }
 	| { type: "command_output"; text: string }
 	| { type: "ui_status"; key: string; text: string | null }
@@ -437,6 +439,8 @@ export interface ChatSnapshotPayload {
 	uiRequests: readonly ChatUiRequest[];
 	todoSeed: unknown;
 	todoAuthoritative: boolean;
+	/** The Chat's TODO row no longer shows the list `todoSeed` holds. */
+	todoHidden: boolean;
 	agents: readonly RunningAgent[];
 	agentActivity: readonly { id: string; activity: AgentActivity }[];
 	agentIdentities?: readonly (AgentIdentity & { id: string })[];
@@ -706,7 +710,7 @@ function reproject(model: ChatModel, clock: ChatClock): ChatModel {
 	if (model.todoAuthoritative) return model;
 	const candidate = latestTodoFromEntries(model.entries);
 	const phases = candidate?.phases ?? (model.entries.some(entry => entry.type === "reset_boundary") ? [] : parseTodoPhases(model.todoSeed));
-	return { ...model, todo: phases === null ? null : { phases, entryId: candidate?.entryId ?? null, appliedAt: clock.now ?? 0 } };
+	return { ...model, todo: phases === null ? null : projectTodo(model.todo, phases, candidate?.entryId ?? null) };
 }
 
 function withPending(model: ChatModel, durable: readonly ChatEntry[], pending: ReadonlyMap<string, PendingRow>, pendingEntries: readonly ChatEntry[]): ChatModel {
@@ -845,7 +849,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			uiRequest: head ?? null,
 			uiQueue: rest,
 			todoSeed: snapshot.todoSeed,
-			todo: todoPhases === null ? null : { phases: todoPhases, entryId: null, appliedAt: clock.now ?? 0 },
+			todo: todoPhases === null ? null : { phases: todoPhases, entryId: null, hidden: snapshot.todoHidden },
 			todoAuthoritative: snapshot.todoAuthoritative,
 			agents,
 			agentActivity: new Map(snapshot.agentActivity.filter(row => agents.has(row.id)).map(row => [row.id, row.activity])),
@@ -888,7 +892,7 @@ export function applyChatLiteState(model: ChatModel, state: ChatLiteState, todoS
 		displayTurns: settled ? finishDisplayTurn(model.displayTurns, clock.now ?? 0) : model.displayTurns,
 		activeTools: state.isStreaming ? model.activeTools : EMPTY_TOOLS,
 		todoSeed: phases ?? model.todoSeed,
-		todo: phases === null ? model.todo : { phases, entryId: null, appliedAt: clock.now ?? 0 },
+		todo: phases === null ? model.todo : projectTodo(model.todo, phases, null),
 		todoAuthoritative: true,
 	};
 }
@@ -1051,7 +1055,7 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			tools.delete(frame.toolCallId);
 			const phases = frame.toolName === "todo" && frame.isError !== true ? todoPhasesFromToolResult(frame.result) : null;
 			return { ...model, activeTools: tools,
-				...(phases !== null ? { todoSeed: phases, todo: { phases, entryId: null, appliedAt: now } } : {}),
+				...(phases !== null ? { todoSeed: phases, todo: projectTodo(model.todo, phases, null) } : {}),
 			};
 		}
 		case "prompt_result":
@@ -1109,6 +1113,8 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		case "todo_auto_clear":
 			// Native auto-clear is conditional; only the following get_state cut establishes its result.
 			return model;
+		case "todo_hud_hide":
+			return model.todo === null || model.todo.hidden ? model : { ...model, todo: { ...model.todo, hidden: true } };
 		case "available_commands_update":
 			return { ...model, commands: frame.commands.slice(0, MAX_COMMANDS) };
 		case "command_output": {
@@ -1198,7 +1204,7 @@ function reduceMessageEnd(model: ChatModel, messageId: string, message: ChatMess
 	else rows.push(entry);
 	const next = withPending({ ...cleared, transcriptEventSeq: Math.max(cleared.transcriptEventSeq, seq) }, durableRows(cleared), pending, rows);
 	const phases = todoPhasesFromEntry(entry);
-	return phases === null ? reproject(next, clock) : { ...next, todoSeed: phases, todo: { phases, entryId: rowId, appliedAt: clock.now ?? 0 } };
+	return phases === null ? reproject(next, clock) : { ...next, todoSeed: phases, todo: projectTodo(next.todo, phases, rowId) };
 }
 
 /** The pending id a live `irc:incoming` observation takes, so the agent's own message_end for the same record updates that row. */
@@ -1526,6 +1532,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		uiRequests: model.uiRequest === null ? [] : [model.uiRequest, ...model.uiQueue],
 		todoSeed: model.todoSeed,
 		todoAuthoritative: model.todoAuthoritative,
+		todoHidden: model.todo?.hidden === true,
 		agents: [...model.agents.values()],
 		agentActivity: [...model.agentActivity].map(([id, activity]) => ({ id, activity })),
 		agentIdentities: [...model.agentIdentity].map(([id, identity]) => ({ id, ...identity })),

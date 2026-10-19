@@ -563,6 +563,27 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a fully closed list leaves the Chat HUD when the host clears it, comes back when the list changes, and the TODO tab keeps showing it", async () => {
+			const closedList = `[{name:'Wrap up',tasks:[${tasks("Shipped", 2, "completed")},{content:'Dropped',status:'abandoned'}]}]`;
+			await open("rows-hidden");
+			await ui.evaluate(`window.ui.push({agents:${agents(1)},agentAvailability:'available',todoSeed:${closedList},entries:[${message("h", null, "hello")}]})`);
+			await ui.wait("document.querySelector('.omp-hud--todo') && document.querySelector('.omp-hud--agents')");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-event',epoch:{nonce:'host-ui-test',counter:1},frame:{type:'todo_hud_hide'}})");
+			await ui.wait("document.querySelector('.omp-hud--todo') === null");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-hud--agents') !== null"), true, "only the TODO row goes");
+			await ui.evaluate(`window.ui.push({todoHidden:true,todoSeed:${closedList}})`);
+			await ui.wait("document.querySelector('.omp-hud--agents') !== null");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-hud--todo')"), null, "a snapshot that carries the clearing keeps it");
+			await ui.evaluate(`window.ui.push({todoHidden:false,todoSeed:[{name:'Wrap up',tasks:[${tasks("Shipped", 2, "completed")},{content:'Follow-up',status:'pending'}]}]})`);
+			await ui.wait("document.querySelector('.omp-hud--todo')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-hud--todo').textContent"), /Follow-up/, "a changed list shows the row again");
+			await open("detail-todo");
+			await ui.evaluate(`window.ui.push({todoHidden:true,todoSeed:${closedList},agents:${agents(1)},agentAvailability:'available'})`);
+			await ui.wait("document.querySelector('.omp-detail-task')");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-detail-task').length"), 3, "the TODO tab lists the cleared list");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the TODO tab shows every task with its blocker, details and notes", async () => {
 			await open("detail-todo");
 			await ui.evaluate(`window.ui.push({todoSeed:${todoSeed},agents:${agents(1)},agentAvailability:'available'})`);

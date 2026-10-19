@@ -5,7 +5,25 @@ import type { ChatEntry } from "./messages.ts";
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 export interface TodoTask { content: string; status: TodoStatus; blocker?: string; details?: string; notes?: readonly string[] }
 export interface TodoPhase { name: string; tasks: readonly TodoTask[] }
-export interface TodoProjection { phases: readonly TodoPhase[]; entryId: string | null; appliedAt: number }
+/**
+ * The list the model holds. `hidden` is presentation only: the Chat's TODO row no longer shows this exact list
+ * (`src/chat/todo-hud.ts`); the detail tab and every other reader still see `phases`.
+ */
+export interface TodoProjection { phases: readonly TodoPhase[]; entryId: string | null; hidden: boolean }
+
+/** The terminal UI's "same list" check: equal `JSON.stringify(phases)`, so a changed note or detail counts as a change. */
+export function sameTodoPhases(a: readonly TodoPhase[], b: readonly TodoPhase[]): boolean {
+	return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Apply `phases` over the list the model held. The same list keeps its `hidden`; any other list is shown again, which is how a
+ * changed list re-appears in the TUI after its row was cleared.
+ */
+export function projectTodo(previous: TodoProjection | null, phases: readonly TodoPhase[], entryId: string | null): TodoProjection {
+	if (previous === null || !sameTodoPhases(previous.phases, phases)) return { phases, entryId, hidden: false };
+	return previous.entryId === entryId ? previous : { ...previous, entryId };
+}
 
 export function parseTodoPhases(value: unknown): TodoPhase[] | null {
 	if (!Array.isArray(value)) return null;

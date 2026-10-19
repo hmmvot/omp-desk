@@ -782,6 +782,7 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 		case "session_settled":
 		case "model_changed":
 		case "todo_auto_clear":
+		case "todo_hud_hide":
 			return { type: value.type };
 		case "agent_end": {
 			for (const key of ["isTerminal", "yielded", "awaitingAsyncWork"]) {
@@ -979,7 +980,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 
 	const commands = parseCommands(value.commands);
 	if (commands === null) return null;
-	if (typeof value.todoAuthoritative !== "boolean" || !isCount(value.transcriptEventSeq)) return null;
+	if (typeof value.todoAuthoritative !== "boolean" || typeof value.todoHidden !== "boolean" || !isCount(value.transcriptEventSeq)) return null;
 	const agents = parseAgentRoster(value.agents);
 	if (agents === null || !Array.isArray(value.agentActivity) || (value.agentAvailability !== "loading" && value.agentAvailability !== "available" && value.agentAvailability !== "unavailable")) return null;
 	const agentIds = new Set(agents.map(agent => agent.id));
@@ -1063,6 +1064,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		uiRequests,
 		todoSeed: value.todoSeed,
 		todoAuthoritative: value.todoAuthoritative,
+		todoHidden: value.todoHidden,
 		agents,
 		agentActivity,
 		agentIdentities,

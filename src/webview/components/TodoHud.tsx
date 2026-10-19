@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useId } from "react";
 import type { ChatModel } from "../../chat/model";
 import { runningAgentDescriptions, TODO_STATUS_WORD, todoNoteMarker, todoSummary, todoWindowWithin } from "../../chat/hud-summary";
+import { todoRowShown } from "../../chat/todo-hud";
 import { HudHeader, useDetailOpener } from "./HudRows";
 
 export interface TodoHudProps {
@@ -15,13 +16,14 @@ export interface TodoHudProps {
 /**
  * The TODO row of the bottom block. Collapsed it is one line (the current task and one counter);
  * expanded it is the TUI's compact list, bounded, with the rest in the TODO tab. Display hints
- * never write native todo status or reproduce interactive auto-clear. Expansion is owned by the
- * dock so both rows share one height cap.
+ * never write native todo status. The row leaves once the host's clock has cleared a fully closed
+ * list, as the TUI's widget does (`todoRowShown`); the TODO tab keeps the list. Expansion is owned by the dock so both rows share one height cap.
  */
 export function TodoHud({ model, expanded, onToggle, lines }: TodoHudProps): ReactNode {
 	const listId = useId();
 	const detail = useDetailOpener();
 	const phases = model.todo?.phases ?? [];
+	if (!todoRowShown(model.todo)) return null;
 	const summary = todoSummary(phases);
 	if (summary === null) return null;
 	const window = expanded ? todoWindowWithin(phases, runningAgentDescriptions(model.agents.values()), lines) : null;

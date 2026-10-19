@@ -22,7 +22,7 @@ The two pinned HUDs above the transcript (`TodoHud`, `RunningAgents`) are the lo
   - No write path from a detail tab (no prompt, abort, approval, todo edit or agent control).
   - Task/subagent tool rows inside the transcript keep their current renderer, including their lazily disclosed child transcript; they are transcript content, not the pinned rows.
   - Detail tabs are not restored across a window reload (see Lifecycle).
-  - The TUI's auto-clear/dismiss of a closed TODO and its click-to-focus of an agent are not reproduced.
+  - The TUI's click-to-focus of an agent is not reproduced. The TUI's auto-clear/dismiss of a closed TODO was not reproduced at first; since 2026-10-19 a fully closed list leaves the pinned row after `tasks.todoClearDelay` as in the TUI (host-side clock, no reveal control; [architecture](../architecture.md)).
 
 ## Current State
 

@@ -91,6 +91,8 @@ import { rendersTranscriptEntry } from "../../chat/transcript.ts";
 import { transcriptWindow } from "../../chat/transcript-window.ts";
 import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { BtwChannel, type BtwChannelDeps, type BtwOutput, type BtwReply } from "./btw.ts";
+import { TodoHudClock } from "./todo-hud.ts";
+import type { TodoHudHistory } from "../../chat/todo-hud.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
@@ -201,6 +203,11 @@ export interface RpcSessionOptions {
 	hostTools?: HostToolProvider;
 	/** Diagnostics sink for soft-limit and registration notes. */
 	log?: Logger;
+	/**
+	 * OMP's effective `tasks.todoClearDelay` in seconds for this session's profile and folder, read when a fully closed TODO list needs its
+	 * timer (`undefined`, or a rejection, when it cannot be read: OMP's default of 60 applies). Absent: the default applies.
+	 */
+	readTodoClearDelay?: () => Promise<unknown>;
 }
 
 export type RpcSessionOutput =
@@ -650,6 +657,10 @@ export class RpcSession {
 	readonly #queueRequests = new Map<string, Promise<RemoveQueuedOutcome>>();
 	readonly #abortRequests = new Map<string, Promise<AbortRestoreOutcome>>();
 	readonly #ledger: LedgerEntry[] = [];
+	/** Clears the TODO row of a fully closed list after OMP's delay (`src/host/rpc/todo-hud.ts`). */
+	readonly #todoHud: TodoHudClock;
+	/** What the session file last said about the latest durable todo list and its row. */
+	#todoHudHistory: TodoHudHistory | null = null;
 
 	#model: ChatModel;
 	#epochCounter = 0;
@@ -778,6 +789,13 @@ export class RpcSession {
 		this.#boundFile = options.sessionFile;
 		this.#fileMaterialized = options.sessionFile !== null;
 		this.#model = { ...createChatModel(), epoch: { nonce: options.hostNonce, counter: 0 } };
+		this.#todoHud = new TodoHudClock({
+			timers: this.#timers,
+			current: () => this.#model.todo,
+			history: () => this.#todoHudHistory,
+			readDelay: options.readTodoClearDelay,
+			hide: () => this.#applyLocal({ type: "todo_hud_hide" }),
+		});
 		this.#btw = new BtwChannel({
 			send: command => this.#sendBtw(command),
 			emit: output => { if (this.#live) this.#emit({ type: "btw", epoch: this.epoch, output }); },
@@ -937,6 +955,7 @@ export class RpcSession {
 		this.#clearStateReadbackTimer();
 		this.#disarmWatchdog();
 		this.#clearAutoRecovery();
+		this.#todoHud.dispose();
 		this.#endDeferredClear({ status: "refused", reason: "not-live" });
 		this.#failAllCommands("closed");
 		this.#maintenanceReport?.(null);
@@ -2005,12 +2024,14 @@ export class RpcSession {
 			this.#readerLegacyIds = history.legacyIds;
 			this.#boundId = this.#options.expectedProviderSessionId ?? history.header.id;
 			this.#cursor = history.legacyIds ? null : history.lastId;
+			this.#todoHudHistory = history.todoHud;
 			if (!this.#model.todoAuthoritative) this.#model = { ...this.#model, todoSeed: history.todoSeed };
 			this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
 			this.#model = {
 				...this.#model,
 				header: { ...history.header, ...(history.title === null ? {} : { title: history.title }) },
 			};
+			this.#todoHud.historyChanged();
 			this.#emitSnapshot();
 		} catch {
 			this.#reader = null;
@@ -2626,6 +2647,7 @@ export class RpcSession {
 		}
 		this.#syncStateReadback();
 		this.#syncHeld();
+		this.#todoHud.sync();
 		if (this.#live && this.#model.asyncPaused) {
 			let terminalChild = false;
 			if (frame.type === "subagent_lifecycle") {
@@ -2840,6 +2862,7 @@ export class RpcSession {
 			this.#emit({ type: "entries", payload: { epoch: this.epoch, entries: rows, leafId } });
 			this.#emitModel();
 		}
+		this.#todoHud.sync();
 	}
 
 	/**
@@ -2883,7 +2906,9 @@ export class RpcSession {
 					const agrees = live === undefined || (history.lastId === live.lastId && history.leafId === live.leafId);
 					if (agrees || history.legacyIds) {
 						this.#cursor = history.legacyIds ? null : history.lastId;
+						this.#todoHudHistory = history.todoHud;
 						this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
+						this.#todoHud.historyChanged();
 						if (this.#live) this.#publish();
 						if (history.legacyIds) break;
 						this.#authoritativeReads += 1;
@@ -3375,6 +3400,7 @@ export class RpcSession {
 
 	/** Publish an authoritative snapshot (epoch + 1): live transition, failure, stop, rewrite. */
 	#publish(baseline = false): void {
+		this.#todoHud.sync();
 		this.#epochCounter += 1;
 		this.#model = { ...this.#model, epoch: this.epoch };
 		this.#emitState();

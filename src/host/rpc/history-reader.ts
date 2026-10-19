@@ -16,6 +16,7 @@ import { open, stat, type FileHandle } from "node:fs/promises";
 import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
 import { computeBranchPoints, rewindTargets, type BranchInfo, type BranchPoint } from "../../chat/rewind.ts";
 import { todoPhasesFromEntry, type TodoPhase } from "../../chat/todos.ts";
+import { todoFingerprint, TODO_HUD_STATE_CUSTOM_TYPE, type TodoHudHistory, type TodoHudVisibility } from "../../chat/todo-hud.ts";
 import {
 	CHAT_ENTRY_TYPES,
 	type ChatCode,
@@ -62,6 +63,8 @@ interface IndexEntry {
 	/** Message role (`user`, `assistant`, …) for a `message` entry, else null; branch points count messages. */
 	role: string | null;
 	todoCandidate: boolean;
+	/** A `todo_hud_state` custom entry (OMP's record of a cleared or revealed TODO row). */
+	hudCandidate: boolean;
 }
 
 export interface HistorySnapshot {
@@ -86,6 +89,8 @@ export interface HistorySnapshot {
 	badLines: number;
 	/** Latest canonical todo evidence on this branch, independent of the rendered tail. */
 	todoSeed: readonly TodoPhase[] | null;
+	/** What the branch records about that list's TODO row: when it was written and whether OMP's terminal UI cleared or revealed it. */
+	todoHud: TodoHudHistory | null;
 }
 
 export interface HistoryOlder {
@@ -110,6 +115,7 @@ interface LineFacts {
 	customType: string | null;
 	display: boolean;
 	todoCandidate: boolean;
+	hudCandidate: boolean;
 }
 
 const HEAD_PATTERN = /^\{"type":"([^"\\]*)","id":"([^"\\]*)","parentId":(?:null|"([^"\\]*)")/;
@@ -147,10 +153,10 @@ function factsOf(line: Buffer): LineFacts | null {
 		if (type === "message") {
 			const role = ROLE_PATTERN.exec(head);
 			if (role !== null && role[1] !== "custom" && role[1] !== "hookMessage") {
-				return { type, id: match[2]!, parentId: match[3] ?? null, role: role[1]!, customType: null, display: false, todoCandidate: role[1] === "toolResult" };
+				return { type, id: match[2]!, parentId: match[3] ?? null, role: role[1]!, customType: null, display: false, todoCandidate: role[1] === "toolResult", hudCandidate: false };
 			}
 		} else if (type !== "custom_message" && type !== "custom") {
-			return { type, id: match[2]!, parentId: match[3] ?? null, role: null, customType: null, display: false, todoCandidate: false };
+			return { type, id: match[2]!, parentId: match[3] ?? null, role: null, customType: null, display: false, todoCandidate: false, hudCandidate: false };
 		}
 	}
 	let parsed: unknown;
@@ -169,6 +175,7 @@ function factsOf(line: Buffer): LineFacts | null {
 		customType: typeof parsed.customType === "string" ? parsed.customType : null,
 		display: parsed.display === true || (isObject(message) && message.display === true),
 		todoCandidate: (parsed.type === "custom" && parsed.customType === "user_todo_edit") || (isObject(message) && message.role === "toolResult"),
+		hudCandidate: parsed.type === "custom" && parsed.customType === TODO_HUD_STATE_CUSTOM_TYPE,
 	};
 }
 
@@ -244,9 +251,9 @@ export class HistoryReader {
 		const path = this.#pathTo(leaf);
 		// Legacy files have no parent links, hence no branches.
 		const points = legacy ? [] : computeBranchPoints(this.#entries, path.map(position => this.#entries[position]!.id));
-		const { entries, start, todoSeed, branches } = await this.#withFile(async handle => ({
+		const { entries, start, todo, branches } = await this.#withFile(async handle => ({
 			...await this.#readWindow(handle, path, path.length, rows),
-			todoSeed: await this.#readTodoSeed(handle, path),
+			todo: await this.#readTodo(handle, path),
 			branches: await this.#previewBranches(handle, points),
 		}));
 		return {
@@ -259,7 +266,8 @@ export class HistoryReader {
 			lastId: this.#entries.at(-1)?.id ?? null,
 			legacyIds: legacy,
 			badLines: this.#badLines,
-			todoSeed,
+			todoSeed: todo.seed,
+			todoHud: todo.hud,
 		};
 	}
 
@@ -378,7 +386,7 @@ export class HistoryReader {
 		const position = this.#entries.length;
 		const renders = rendersByFacts(facts);
 		// Legacy files (version < 3) may carry no parent links; the active path is then the file order.
-		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate });
+		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate, hudCandidate: facts.hudCandidate });
 		this.#byId.set(facts.id, position);
 		this.#pathCache = null;
 		this.#lastTag = { offset, length: line.length, text: line.toString("utf8", 0, Math.min(line.length, 128)) };
@@ -501,17 +509,32 @@ export class HistoryReader {
 		return count;
 	}
 
-	/** Read the latest canonical todo candidate, even when it precedes the transcript tail. */
-	async #readTodoSeed(handle: FileHandle, path: readonly number[]): Promise<readonly TodoPhase[] | null> {
+	/**
+	 * The latest canonical todo candidate, even when it precedes the transcript tail, and what the branch records about its TODO
+	 * row. OMP applies a `todo_hud_state` entry only to the list it was written for (`getTodoHudVisibility`): the entry names that
+	 * list's source entry and fingerprint, and the newest matching entry wins.
+	 */
+	async #readTodo(handle: FileHandle, path: readonly number[]): Promise<{ seed: readonly TodoPhase[] | null; hud: TodoHudHistory | null }> {
+		const choices: Record<string, unknown>[] = [];
 		for (let index = path.length - 1; index >= 0; index -= 1) {
 			const candidate = this.#entries[path[index]!]!;
-			if (candidate.type === "reset_boundary") return [];
-			if (!candidate.todoCandidate || candidate.length > MAX_ROW_BYTES) continue;
+			if (candidate.type === "reset_boundary") return { seed: [], hud: null };
+			if (candidate.length > MAX_ROW_BYTES) continue;
+			if (candidate.hudCandidate) {
+				const row = await this.#rowOf(candidate, await readRange(handle, candidate.offset, candidate.length), { bytes: 0 });
+				if (row.type === "custom" && isObject(row.data)) choices.push(row.data);
+				continue;
+			}
+			if (!candidate.todoCandidate) continue;
 			const row = await this.#rowOf(candidate, await readRange(handle, candidate.offset, candidate.length), { bytes: 0 });
 			const phases = todoPhasesFromEntry(row);
-			if (phases !== null) return phases;
+			if (phases === null) continue;
+			const fingerprint = todoFingerprint(phases);
+			const chosen = choices.find(data => data.sourceEntryId === row.id && data.fingerprint === fingerprint && (data.visibility === "dismissed" || data.visibility === "revealed"));
+			const written = Date.parse(row.timestamp);
+			return { seed: phases, hud: { fingerprint, changedAt: Number.isNaN(written) ? null : written, visibility: chosen === undefined ? null : chosen.visibility as TodoHudVisibility } };
 		}
-		return null;
+		return { seed: null, hud: null };
 	}
 
 	/** Read rows by byte range (coalescing near neighbours) and keep the chat entry types. */
@@ -618,6 +641,7 @@ export function chatSnapshotFromHistory(
 		uiRequests: [],
 		todoSeed: history.todoSeed,
 		todoAuthoritative: false,
+		todoHidden: history.todoHud?.visibility === "dismissed",
 		agents: [],
 		agentActivity: [],
 		agentAvailability: "unavailable",
