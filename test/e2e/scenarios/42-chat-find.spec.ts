@@ -22,6 +22,10 @@ test("Ctrl+F opens the Chat find bar from the composer, the transcript, an unfoc
 	const find = chat.locator(".omp-find");
 	const field = find.getByRole("textbox", { name: "Find in conversation" });
 	const hostRuns = (): number => deskLogLines(state.dataDir, HOST_RAN).length;
+	/** The host's command runs a moment after the page has handled the same press and posts the find action back, so a bar closed before that lands is opened again by it. */
+	const hostRanTimes = async (count: number, message: string): Promise<void> => {
+		await expect.poll(hostRuns, { message, timeout: 10_000 }).toBeGreaterThanOrEqual(count);
+	};
 
 	// From the composer. VS Code's keybinding table sees the same press and runs the contributed command.
 	const ranBefore = hostRuns();
@@ -29,7 +33,7 @@ test("Ctrl+F opens the Chat find bar from the composer, the transcript, an unfoc
 	await page.keyboard.press("Control+f");
 	await expect(find, "Ctrl+F in the composer opens the bar").toBeVisible({ timeout: 10_000 });
 	await expect(field, "the field has the focus").toBeFocused();
-	await expect.poll(hostRuns, { message: "the contributed keybinding ran ompDesk.findInChat", timeout: 10_000 }).toBeGreaterThan(ranBefore);
+	await hostRanTimes(ranBefore + 1, "the contributed keybinding ran ompDesk.findInChat");
 	await page.keyboard.type("quokka");
 	await expect(field, "the second arrival of the press (the host's action) did not reselect and swallow the typing").toHaveValue("quokka");
 	await expect(find.getByRole("status"), "the matches are counted").toHaveText(/\d+ of \d+/, { timeout: 10_000 });
@@ -46,6 +50,7 @@ test("Ctrl+F opens the Chat find bar from the composer, the transcript, an unfoc
 	await page.keyboard.type("Mock");
 	await expect(field, "typing replaced the selected query").toHaveValue("Mock");
 	await expect(find.getByRole("status")).toHaveText(/\d+ of \d+/, { timeout: 10_000 });
+	await hostRanTimes(ranBefore + 2, "the keybinding ran for the press in the transcript");
 	await page.keyboard.press("Escape");
 	await expect(find).toHaveCount(0);
 
@@ -53,6 +58,7 @@ test("Ctrl+F opens the Chat find bar from the composer, the transcript, an unfoc
 	await chat.locator("body").evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 	await page.keyboard.press("Control+f");
 	await expect(find, "Ctrl+F with nothing focused in the page opens the bar").toBeVisible({ timeout: 10_000 });
+	await hostRanTimes(ranBefore + 3, "the keybinding ran for the press with nothing focused");
 	await page.keyboard.press("Escape");
 	await expect(find).toHaveCount(0);
 
@@ -64,14 +70,21 @@ test("Ctrl+F opens the Chat find bar from the composer, the transcript, an unfoc
 	await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...chord });
 	await expect(find, "Ctrl+F on a Cyrillic layout opens the bar").toBeVisible({ timeout: 10_000 });
 	await expect(field).toBeFocused();
+	await hostRanTimes(ranBefore + 4, "the keybinding ran for the Cyrillic press");
 	await page.keyboard.press("Escape");
 	await expect(find).toHaveCount(0);
 
 	// The Command Palette entry opens the same bar.
 	const paletteBefore = hostRuns();
-	await page.keyboard.press("Control+Shift+p");
-	await page.keyboard.type("OMP Desk: Find in Chat");
-	await page.keyboard.press("Enter");
+	// F1 is swallowed while a webview holds the keyboard (and a palette opened from it can lose the focus back to the page): the title bar takes the focus first.
+	await page.locator("[id='workbench.parts.titlebar']").click({ position: { x: 5, y: 5 } });
+	await page.keyboard.press("F1");
+	const picker = page.locator(".quick-input-widget input.input");
+	await expect(picker, "F1 opens the Command Palette").toBeVisible({ timeout: 10_000 });
+	await picker.fill(">OMP Desk: Find in Chat");
+	const row = page.locator('.quick-input-widget .monaco-list-row[aria-label^="OMP Desk: Find in Chat, "], .quick-input-widget .monaco-list-row[aria-label="OMP Desk: Find in Chat"]');
+	await expect(row).toBeVisible({ timeout: 10_000 });
+	await row.click();
 	await expect(find, "the palette command opens the bar").toBeVisible({ timeout: 10_000 });
 	await expect.poll(hostRuns, { timeout: 10_000 }).toBeGreaterThan(paletteBefore);
 });
