@@ -82,6 +82,20 @@ describe("createGuestHtml", () => {
 		// No other loopback port is reachable.
 		assert.equal(csp.includes("127.0.0.1:51235"), false);
 	});
+
+	it("frames nothing and names no frame address without a page server", () => {
+		assert.equal(declaredCsp(html).includes("frame-src"), false);
+		assert.equal(html.includes("omp-html-page-frame"), false);
+	});
+
+	it("may frame the page server's one origin and nothing else, and tells the page where it is", () => {
+		const document = createGuestHtml(webview, extensionUri, TAB_ID, null, "chat", 51777);
+		const csp = declaredCsp(document);
+		assert.match(csp, /(?:^|; )frame-src http:\/\/127\.0\.0\.1:51777(?:;|$)/);
+		assert.equal(csp.split("frame-src").length, 2);
+		assert.match(csp, /(?:^|; )connect-src 'none'(?:;|$)/, "the frame's address is not a connection target of the page");
+		assert.match(document, /<meta name="omp-html-page-frame" content="http:\/\/127\.0\.0\.1:51777\/page" \/>/);
+	});
 });
 
 describe("createUnavailableGuestHtml", () => {

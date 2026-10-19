@@ -51,6 +51,7 @@ import {
 	shellIdentityFor,
 } from "../shared/panel-identity.ts";
 import type { PanelBridgeTicket } from "../shared/panel-identity.ts";
+import { isFromEmbeddedFrame } from "./lib/embedded-frame.ts";
 
 /**
  * The capabilities this panel uses from the injected VS Code API.
@@ -300,6 +301,8 @@ function handleRouteOffer(message: Extract<GuestHostMessage, { type: "omp:route-
 /** The window's own message channel: the panel route's inbound half. */
 if (typeof window !== "undefined") {
 	window.addEventListener("message", (event: MessageEvent) => {
+		// A reply's HTML page runs in a frame of this page and can post anything to it, a copy of a host message included; only the host (an ancestor) speaks on this channel.
+		if (isFromEmbeddedFrame(event.source, window)) return;
 		deliverRaw(event.data, "panel");
 	});
 }

@@ -13,6 +13,7 @@ import * as vscode from "vscode";
 import { MODULE_EVALUATION_STARTED_AT, MODULE_EVALUATION_STARTED_CPU_MS } from "./host/module-clock";
 import { ActivationTimer } from "./host/activation-timing";
 import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
+import { createHtmlPageServer, type HtmlPageServer } from "./host/html-page-server";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { installedNerdFonts } from "./host/terminal-fonts";
 import { terminalFontFamily } from "./shared/terminal-theme";
@@ -658,6 +659,8 @@ interface WindowState {
    * lifecycle harness never replaces it: its host generation is the one every endpoint of the window is fenced to.
    */
   readonly bridgeHost: BridgeHost<TabState>;
+  /** The loopback server of a reply's HTML page frame (ADR-0079): bound lazily, only while `ompDesk.chatHtmlPages` is on. */
+  readonly htmlPageServer: HtmlPageServer;
   /**
    * The window's session editors as VS Code panels: where one opens, how a panel becomes a chat surface, the document it
    * shows and the serializers that revive it. Mutable only because the lifecycle harness replaces it with a handle built
@@ -1234,6 +1237,7 @@ function editorPanelsDeps(): EditorPanelsDeps<TabState> {
     guest: () => windowState().guestDispatcher,
     routing: () => windowState().routing,
     bridge: () => windowState().bridgeHost,
+    htmlPageFramePort: () => (chatHtmlPagesEnabled() ? windowState().htmlPageServer.port : null),
     slotReasons: { passive: PASSIVE_REASON_DEFAULT, electing: ELECTING_REASON },
     bindSlotToConversation,
     trackElection,
@@ -1316,6 +1320,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     // Editor panels and bridge
     tabs: new Map<string, TabState>(),
     bridgeHost: registerBridgeHost(bridgeHostDeps()),
+    htmlPageServer: createHtmlPageServer(),
     editorPanels: registerEditorPanels(editorPanelsDeps()),
     bridgeEndpoints: new Map<string, BridgeEditorEndpoint>(),
     createBridgeEndpoint: options => new BridgeEditorEndpoint(options),
@@ -1518,6 +1523,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const activation = new ActivationTimer();
   window = createWindowState(context);
   const s = windowState();
+  // The frame server of a reply's HTML page (ADR-0079): bound from here, awaited before any panel is restored (the chat document's
+  // policy names its port); only while the setting is on, and closed with the window.
+  context.subscriptions.push({ dispose: () => void s.htmlPageServer.close() });
+  const htmlPageServerBound = chatHtmlPagesEnabled() ? s.htmlPageServer.ensure() : Promise.resolve(null);
   // The `omp-artifact:` and `omp-session-file:` schemes first, synchronously: an editor tab of either that Reload Window restores is served as soon as the window has the provider.
   s.artifactDocuments = registerArtifactDocuments(context.subscriptions);
   s.sessionFileDocuments = registerSessionFileDocuments(context.subscriptions);
@@ -1604,6 +1613,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     catalogReadMs = performance.now() - catalogReadStartedAt;
     return store;
   });
+  // Every command and serializer below can build a chat document, whose policy names the frame server's port.
+  await htmlPageServerBound;
   // ADR-0068: the old command ids are registered first, as hidden aliases that forward to the commands registered below, so a
   // keybinding of the previous release works as early as any command does. Then the values the `omp.` namespace held move to
   // `ompDesk.` before anything reads a setting; a window with nothing to move does no I/O. A name another extension
@@ -4187,6 +4198,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     brokerWatches: s.brokerWatches,
     linkReminder: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("linkReminder", false),
     toolIntent: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("toolIntentDescriptions", false),
+    htmlPages: chatHtmlPagesEnabled,
     forks: s.pendingForks,
     control: s.sessionRuntime.control,
     native: s.sessionRuntime.nativeWatch,
@@ -6797,6 +6809,11 @@ function rpcPhaseIsRunning(phase: ChatPhase): boolean {
 }
 
 
+/** `ompDesk.chatHtmlPages`: whether a closed `html` fence of a reply is shown as a sandboxed page, and whether the model is told it may write one. The default is this one fallback and the manifest's. */
+function chatHtmlPagesEnabled(): boolean {
+  return vscode.workspace.getConfiguration("ompDesk").get<boolean>("chatHtmlPages", true);
+}
+
 /** These are editor presentation preferences, never OMP commands. */
 function readChatDisplayPreferences(): ChatDisplayPreferences {
   const s = windowState();
@@ -6806,6 +6823,7 @@ function readChatDisplayPreferences(): ChatDisplayPreferences {
     thinkingExpanded: s.context?.globalState.get<unknown>(THINKING_EXPANDED_KEY) === true,
     toolsMode: toolsModeFromStored(s.context?.globalState.get<unknown>(TOOLS_EXPANDED_KEY)),
     toolIntent: vscode.workspace.getConfiguration("ompDesk").get<boolean>("toolIntentDescriptions", false),
+    htmlPages: chatHtmlPagesEnabled(),
   };
 }
 
@@ -6836,7 +6854,12 @@ async function toggleToolsMode(key: ToolsModeKey): Promise<void> {
 
 function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
   const s = windowState();
-  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("ompDesk.toolIntentDescriptions") || event.affectsConfiguration("editor.accessibilitySupport")) {
+  if (event.affectsConfiguration("ompDesk.chatHtmlPages")) {
+    // On binds the frame server (a document built earlier names no port, so its pages say so until the window is reloaded); off closes it.
+    if (chatHtmlPagesEnabled()) void s.htmlPageServer.ensure();
+    else void s.htmlPageServer.close();
+  }
+  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("ompDesk.toolIntentDescriptions") || event.affectsConfiguration("ompDesk.chatHtmlPages") || event.affectsConfiguration("editor.accessibilitySupport")) {
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
 }

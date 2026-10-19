@@ -111,6 +111,8 @@ export interface EditorWindowFacts<Tab extends EditorPanelsTab> {
 	routing(): Pick<WindowRouting, "openRestoredTabIfUncovered">;
 	/** The bridge host: what a document connects to, and the serializer registry of the dynamic view types. */
 	bridge(): Pick<BridgeHost<Tab>, "prepareDocument" | "adoptEditor" | "ticketFacts" | "registerSerializer" | "offerRoute" | "endpointOf">;
+	/** The port of this window's HTML page frame server (ADR-0079), or `null` while the setting is off or the listener is not bound: a document built then names no frame. */
+	htmlPageFramePort(): number | null;
 }
 
 /** The editor-slot elections, the session and the window facts a panel is bound to. */
@@ -536,7 +538,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		let html: string | null = null;
 		if (!awaitingBridge) {
 			try {
-				html = createGuestHtml(panel.webview, context.extensionUri, identityTabId, ticket, state.mode);
+				html = createGuestHtml(panel.webview, context.extensionUri, identityTabId, ticket, state.mode, state.mode === "chat" ? deps.htmlPageFramePort() : null);
 			} catch (error) {
 				// The document is built from this extension's own inputs, so a failure is a defect
 				// rather than an input: it is logged and the panel keeps an honest document instead

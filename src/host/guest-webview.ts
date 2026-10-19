@@ -27,6 +27,7 @@ import { PANEL_BRIDGE_META, PANEL_IDENTITY_META, isPanelTabId, panelBridgeMetaVa
 import { SHELL_SLOT_META, isShellSlotId } from "../shared/panel-identity.ts";
 import { MERMAID_SCOPE_META } from "../protocol/mermaid-preview.ts";
 import { DETAIL_META, detailMetaValue, type DetailTarget } from "../protocol/detail-target.ts";
+import { HTML_PAGE_FRAME_META, HTML_PAGE_FRAME_PATH } from "../shared/html-page-frame.ts";
 
 
 /**
@@ -84,9 +85,10 @@ export interface GuestBridgeTicket {
 /**
  * The document policy every guest document shares: nothing is allowed unless named, scripts and
  * stylesheets come only from the extension's own resource origin and this document's nonce, and
- * style attributes are allowed for xterm's ANSI colors and cell geometry.
+ * style attributes are allowed for xterm's ANSI colors and cell geometry. `frameSrc` is only the chat
+ * document's: the one loopback origin that serves a reply's HTML page frame, and no other frame.
  */
-function guestCsp(webview: vscode.Webview, nonce: string, connectSrc: string): string {
+function guestCsp(webview: vscode.Webview, nonce: string, connectSrc: string, frameSrc: string | null = null): string {
 	return [
 		"default-src 'none'",
 		"base-uri 'none'",
@@ -97,6 +99,7 @@ function guestCsp(webview: vscode.Webview, nonce: string, connectSrc: string): s
 		"style-src-attr 'unsafe-inline'",
 		`script-src 'nonce-${nonce}' ${webview.cspSource}`,
 		`connect-src ${connectSrc}`,
+		...(frameSrc === null ? [] : [`frame-src ${frameSrc}`]),
 	].join("; ");
 }
 
@@ -137,6 +140,8 @@ export function createMermaidPreviewHtml(webview: vscode.Webview, extensionUri: 
  *   can restore the editor.
  * @param bridge this document's listener, or `null` for a panel with no bridge —
  *   in which case the document may connect to nothing at all (`connect-src 'none'`).
+ * @param htmlPageFramePort the port of this window's HTML page frame server, or `null` when it has none: the document then
+ *   may frame nothing and carries no frame address, so a reply's `html` block stays code.
  */
 export function createGuestHtml(
 	webview: vscode.Webview,
@@ -144,6 +149,7 @@ export function createGuestHtml(
 	tabId: string,
 	bridge: GuestBridgeTicket | null,
 	mode: "chat" | "terminal" = "chat",
+	htmlPageFramePort: number | null = null,
 ): string {
 	const nonce = randomBytes(16).toString("base64url");
 	// Derive the asset URI from the passed Uri instance rather than the `vscode`
@@ -157,7 +163,9 @@ export function createGuestHtml(
 	// if its own code tried. A document without a bridge may connect to nothing.
 	const connectSrc =
 		bridge === null ? "'none'" : `http://127.0.0.1:${bridge.port} ws://127.0.0.1:${bridge.port}`;
-	const csp = guestCsp(webview, nonce, connectSrc);
+	const frameOrigin = htmlPageFramePort === null ? null : `http://127.0.0.1:${htmlPageFramePort}`;
+	const csp = guestCsp(webview, nonce, connectSrc, frameOrigin);
+	const frameMeta = frameOrigin === null ? "" : `\t\t<meta name="${HTML_PAGE_FRAME_META}" content="${frameOrigin}${HTML_PAGE_FRAME_PATH}" />\n`;
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -165,7 +173,7 @@ export function createGuestHtml(
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta http-equiv="Content-Security-Policy" content="${csp}" />
-${identityMeta(tabId)}${bridgeMeta(bridge)}\t\t<meta name="omp-session-mode" content="${mode}" />
+${identityMeta(tabId)}${bridgeMeta(bridge)}${frameMeta}\t\t<meta name="omp-session-mode" content="${mode}" />
 		<title>OMP Desk session</title>
 		<link rel="stylesheet" href="${iconsUri.toString()}" />
 	</head>

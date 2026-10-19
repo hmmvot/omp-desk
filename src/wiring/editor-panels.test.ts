@@ -205,6 +205,7 @@ function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 			offerRoute: tabId => { calls.push(`offer:${tabId}`); },
 			endpointOf: () => state.endpointFailure === undefined ? null : ({ failure: state.endpointFailure }) as never,
 		}),
+		htmlPageFramePort: () => 51999,
 		slotReasons: SLOT_REASONS,
 		bindSlotToConversation: (slot, conversation, role, reason) => {
 			calls.push(`bindSlot:${slot}:${role}:${reason}`);
@@ -343,6 +344,8 @@ describe("openPanel", () => {
 		await settle();
 		assert.deepEqual(w.calls.filter(call => call.startsWith("prepare:")), [`prepare:${editorId}`]);
 		assert.match(made!.panel.html, new RegExp(`connect-src http://127\\.0\\.0\\.1:4242 ws://127\\.0\\.0\\.1:4242`));
+		assert.match(made!.panel.html, /frame-src http:\/\/127\.0\.0\.1:51999(?:;|")/, "a chat document may frame the page server and nothing else");
+		assert.match(made!.panel.html, /<meta name="omp-html-page-frame" content="http:\/\/127\.0\.0\.1:51999\/page"/);
 		assert.equal(w.state.tabs.get(editorId)?.document?.kind, "guest");
 		assert.deepEqual(w.state.editors.winner(TAB)?.editorId, editorId);
 	});

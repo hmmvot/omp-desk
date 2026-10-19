@@ -94,6 +94,7 @@ export interface LocalLauncherDeps {
 	readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
 	readonly linkReminder: () => boolean;
 	readonly toolIntent: () => boolean;
+	readonly htmlPages: () => boolean;
 	/** Which drafts are forks: the first launch of a fileless draft passes `--fork <source>`; a launch of a materialized row, or a native one, drops the source. */
 	readonly forks: Pick<PendingForks, "peek" | "forget">;
 	readonly control: Pick<LocalHostControl, "connect" | "reconnect" | "fail" | "storeRecipient" | "directory" | "withhold">;
@@ -391,6 +392,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			control: control === null ? null : control.bootstrap,
 			linkReminder: this.#deps.linkReminder(),
 			toolIntent: this.#deps.toolIntent(),
+			htmlPages: this.#deps.htmlPages(),
 		};
 		const outcome = request.transport === "native"
 			? await this.#deps.hosts.launchNative(base, client)

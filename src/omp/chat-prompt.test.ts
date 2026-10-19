@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CHAT_PROMPT, CHAT_PROMPT_INJECTIONS, LINK_REMINDER, MAX_CHAT_PROMPT_CHARS, MAX_INJECTION_CHARS, MAX_LINK_REMINDER_CHARS, MAX_TOOL_INTENT_INJECTION_CHARS, TOOL_INTENT_INJECTION, chatPromptFor, registerChatPrompt, renderChatPrompt } from "./chat-prompt.ts";
-import { LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
+import { CHAT_PROMPT, CHAT_PROMPT_INJECTIONS, HTML_PAGE_INJECTION, LINK_REMINDER, MAX_CHAT_PROMPT_CHARS, MAX_HTML_PAGE_INJECTION_CHARS, MAX_INJECTION_CHARS, MAX_LINK_REMINDER_CHARS, MAX_TOOL_INTENT_INJECTION_CHARS, TOOL_INTENT_INJECTION, chatPromptFor, registerChatPrompt, renderChatPrompt } from "./chat-prompt.ts";
+import { HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
 import type { ChatPromptContext } from "./chat-prompt.ts";
 
 function bindEvent(name: string, env: Record<string, string | undefined> = {}): ((event: unknown, ctx: ChatPromptContext) => unknown) | undefined {
@@ -56,6 +56,25 @@ test("the tool-intent rule is in the Chat prompt only when ompDesk.toolIntentDes
 	}
 	assert.ok(TOOL_INTENT_INJECTION.text.length <= MAX_TOOL_INTENT_INJECTION_CHARS, `the rule is ${TOOL_INTENT_INJECTION.text.length} characters`);
 	assert.doesNotMatch(TOOL_INTENT_INJECTION.text, /\n/);
+});
+
+test("the HTML page rule is in the Chat prompt only when ompDesk.chatHtmlPages is on, before the tool-intent rule", () => {
+	const event = { type: "before_agent_start", prompt: "hi", systemPrompt: ["base"] };
+	const on = bindEvent("before_agent_start", { [HTML_PAGES_ENV]: "1" });
+	assert.ok(on);
+	const expected = renderChatPrompt([...CHAT_PROMPT_INJECTIONS, HTML_PAGE_INJECTION]);
+	assert.deepEqual(on(event, MAIN), { systemPrompt: ["base", expected] });
+	assert.equal(expected.split("\n").at(-1), `- ${HTML_PAGE_INJECTION.text}`);
+	assert.equal(on(event, { mode: "rpc", agent: { kind: "sub" } }), undefined, "a subagent is untouched");
+	assert.equal(on(event, { mode: "tui", agent: { kind: "main" } }), undefined, "a Terminal session is untouched");
+	assert.equal(chatPromptFor({ [HTML_PAGES_ENV]: "1", [TOOL_INTENT_ENV]: "1" }), renderChatPrompt([...CHAT_PROMPT_INJECTIONS, HTML_PAGE_INJECTION, TOOL_INTENT_INJECTION]));
+	for (const env of [{}, { [HTML_PAGES_ENV]: "0" }, { [HTML_PAGES_ENV]: "true" }]) {
+		assert.equal(chatPromptFor(env), CHAT_PROMPT);
+		assert.doesNotMatch(chatPromptFor(env), /```html/, "off says nothing about pages");
+	}
+	assert.ok(HTML_PAGE_INJECTION.text.length <= MAX_HTML_PAGE_INJECTION_CHARS, `the rule is ${HTML_PAGE_INJECTION.text.length} characters`);
+	assert.doesNotMatch(HTML_PAGE_INJECTION.text, /\n/);
+	for (const token of ["--bg", "--fg", "--accent", "--c1", "--font-mono", "480px", "100vh", "`data:`"]) assert.ok(HTML_PAGE_INJECTION.text.includes(token), token);
 });
 
 test("the Chat prompt stays within its size budget, one short rule per injection", () => {

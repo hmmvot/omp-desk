@@ -220,6 +220,8 @@ export interface ChatDisplayPreferences {
 	toolsMode?: ToolsMode;
 	/** The `ompDesk.toolIntentDescriptions` setting: a tool call's intent leads its collapsed head, before the target; absent = off. */
 	toolIntent?: boolean;
+	/** The `ompDesk.chatHtmlPages` setting: a closed `html` fence of a reply is shown as a sandboxed page; absent = on (a host that does not say has not been asked). */
+	htmlPages?: boolean;
 }
 export interface ChatDisplayPreferencesMessage extends ChatDisplayPreferences {
 	type: "omp:chat-display-preferences";
@@ -1176,11 +1178,12 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);
 			if (epoch === null || (value.toolCallDetail !== "overview" && value.toolCallDetail !== "detailed") || typeof value.accessibilitySupport !== "boolean") return null;
-			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolIntent !== undefined && typeof value.toolIntent !== "boolean") || (value.toolsMode !== undefined && !isToolsMode(value.toolsMode))) return null;
+			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolIntent !== undefined && typeof value.toolIntent !== "boolean") || (value.htmlPages !== undefined && typeof value.htmlPages !== "boolean") || (value.toolsMode !== undefined && !isToolsMode(value.toolsMode))) return null;
 			return {
 				type: value.type, epoch, toolCallDetail: value.toolCallDetail, accessibilitySupport: value.accessibilitySupport,
 				...(value.thinkingExpanded === undefined ? {} : { thinkingExpanded: value.thinkingExpanded }),
 				...(value.toolIntent === undefined ? {} : { toolIntent: value.toolIntent }),
+				...(value.htmlPages === undefined ? {} : { htmlPages: value.htmlPages }),
 				...(value.toolsMode === undefined ? {} : { toolsMode: value.toolsMode }),
 			};
 		}

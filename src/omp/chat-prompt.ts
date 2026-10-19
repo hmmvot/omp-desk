@@ -23,7 +23,7 @@
  * one request to the next and a cache breakpoint can still sit on the real prompt (OMP never anchors a breakpoint on
  * or before a message it finds rewritten for the request, which is why the reminder is its own message).
  */
-import { LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
+import { HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
 
 export interface ChatPromptInjection {
 	/** A short stable name for the feature the rule serves. */
@@ -70,9 +70,23 @@ export const TOOL_INTENT_INJECTION: ChatPromptInjection = {
 	text: "This replaces the built-in rule for `i` (2–6-word present-participle intent). For every tool whose schema has an `i` field, set `i` to what you are doing and why, in terms of the current task: the question the call answers or the change it makes, naming its subject (feature, bug, file, agent). At most 10 words. It is shown beside the tool name and its arguments, so do not repeat them, and do not use a bare verb such as check, read, search, run, fix or wait. Examples: not \"Find menu\" but \"Find where the tool card menu is drawn\"; not \"Tree state\" but \"Check that agents left no uncommitted changes\". Do not add `i` to tools whose schema lacks this field.",
 };
 
-/** The Chat prompt for a launch: the standing injections, plus the tool-intent rule when `env` sets {@link TOOL_INTENT_ENV} to `1`. */
+export const MAX_HTML_PAGE_INJECTION_CHARS = 700;
+/**
+ * Added only when `ompDesk.chatHtmlPages` is on: a closed top-level ```html fence of a reply is shown as a live page in a sandboxed frame
+ * (docs/designs/2026-10-19-chat-html-pages.md). The model has to know what that page can and cannot do, or it writes a page that
+ * fetches a CDN script or reads `100vh`, neither of which works there.
+ */
+export const HTML_PAGE_INJECTION: ChatPromptInjection = {
+	id: "html-page",
+	text: "A closed ```html fence in your reply is shown to the user as a live page. Use it only when a page shows what Markdown cannot (an interactive explainer, a chart, a mockup). It is one self-contained document in a sandboxed frame: inline classic `<script>`/`<style>` run, nothing loads from the network (no CDN, fonts, fetch, external scripts; `data:` images only), no forms, popups, links out or navigation. Colour it with the theme's variables, never your own palette: `var(--bg)`, `--fg`, `--muted`, `--border`, `--surface`, `--accent`, `--success`, `--warning`, `--error`, `--c1`…`--c6`, `--font`, `--font-mono`. Its height follows its content up to 480px, then scrolls, so no `100vh`.",
+};
+
+/** The Chat prompt for a launch: the standing injections, the HTML page rule when `env` sets {@link HTML_PAGES_ENV} to `1`, and the tool-intent rule when it sets {@link TOOL_INTENT_ENV} to `1`. */
 export function chatPromptFor(env: Readonly<Record<string, string | undefined>>): string {
-	return env[TOOL_INTENT_ENV] === "1" ? renderChatPrompt([...CHAT_PROMPT_INJECTIONS, TOOL_INTENT_INJECTION]) : CHAT_PROMPT;
+	const injections = [...CHAT_PROMPT_INJECTIONS];
+	if (env[HTML_PAGES_ENV] === "1") injections.push(HTML_PAGE_INJECTION);
+	if (env[TOOL_INTENT_ENV] === "1") injections.push(TOOL_INTENT_INJECTION);
+	return injections.length === CHAT_PROMPT_INJECTIONS.length ? CHAT_PROMPT : renderChatPrompt(injections);
 }
 
 export const MAX_LINK_REMINDER_CHARS = 350;

@@ -49,6 +49,7 @@ import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
 import { adoptTranscriptToggles } from "./lib/transcript-toggles";
 import { setScreenReaderMode } from "./lib/screen-reader";
 import { setToolIntentFirst } from "./lib/tool-intent-first";
+import { setHtmlPagesEnabled } from "./lib/html-pages-enabled";
 import { ArtifactEpochContext } from "./lib/artifact-opener";
 
 export function App({ client }: { client: ChatClient }): ReactNode {
@@ -165,6 +166,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	useEffect(() => setScreenReaderMode(preferences.accessibilitySupport), [preferences.accessibilitySupport]);
 	// `ompDesk.toolIntentDescriptions`: the intent leads a tool row's head.
 	useEffect(() => setToolIntentFirst(preferences.toolIntent === true), [preferences.toolIntent]);
+	// `ompDesk.chatHtmlPages`: a closed `html` fence of a reply is a sandboxed page, or stays code. Not yet said reads as on.
+	useEffect(() => setHtmlPagesEnabled(preferences.htmlPages !== false), [preferences.htmlPages]);
 	// The host's remembered thinking default and tool display mode (`ompDesk.toggleThinking`, `ompDesk.toggleToolOutput`, `ompDesk.toggleToolGroups`).
 	useEffect(() => adoptTranscriptToggles(preferences.thinkingExpanded === true, preferences.toolsMode ?? "collapsed"), [preferences.thinkingExpanded, preferences.toolsMode]);
 

@@ -1,0 +1,45 @@
+# ADR-0079: Serve reply HTML pages from a constant loopback frame document with its own policy
+
+- Status: accepted
+- Date: 2026-10-19
+
+## Context and Problem Statement
+
+A closed ```` ```html ```` fence of an assistant reply can be shown as a live page ([design](../designs/2026-10-19-chat-html-pages.md)). The page is model-written code, so it must run with no way to reach the network, the Chat page, VS Code's webview host or the workbench, and no way to take the user's files or secrets, none of which it is given. The Chat document's policy (`default-src 'none'`; scripts and styles by the document's nonce or VS Code's resource origin, `style-src-attr 'unsafe-inline'`, `connect-src` the bridge when there is one: `guestCsp` in `host/guest-webview.ts`, ADR-0028) cannot simply be relaxed, and the page needs script execution, inline styles and its own layout.
+
+The question is where the page's document comes from, because that decides which Content-Security-Policy it runs under.
+
+## Considered Options
+
+- **`<iframe sandbox="allow-scripts" srcdoc>` with the Chat's nonce (rejected).** A `srcdoc` document inherits the embedding document's policy, so its scripts only run with the Chat's nonce, and a frame cannot be given a policy that is looser than that. To make the model's scripts run, the frame has to carry the nonce, which means the model's own JavaScript can read it (`document.currentScript.nonce`, a `[nonce]` element, a cross-realm read) and then create a `<script nonce src="https://…">` or `<link rel=stylesheet nonce href>`. The inherited policy allows that request, because it is the Chat's own policy with the Chat's own nonce (and, with a bridge ticket, `connect-src` names a loopback listener as well). This was measured in headless Chromium: a canary script loaded from the fixture origin ran. Sink patching (`createElement`, `setAttribute`, `appendChild`, `innerHTML`, `import()` …) would be an unbounded list of places to defend. Rejected: it cannot guarantee that a page makes no request.
+- **`data:` or `blob:` frame (rejected).** Both inherit the creator's policy in Chromium; nothing was gained, and `frame-src data: blob:` would have loosened the Chat.
+- **An extension resource URL (`vscode-resource` / `asWebviewUri`) page (rejected).** Webview resources are served by VS Code's service worker for the webview's own fetches; a nested navigation of a child frame is not guaranteed to be served and carries no per-document header policy (a `<meta>` policy has the same inheritance problem for nonces and cannot add `sandbox`).
+- **A constant document served by a loopback listener, framed with `sandbox="allow-scripts"` (chosen).** The document is fetched over HTTP, so its policy is a response header and nothing is inherited. It holds no nonce and no model text; the page source is sent in by `postMessage` and rebuilt inside the frame (scripts by indirect `eval`, `on…=` handlers by `new Function`), which a policy of `script-src 'sha256-<bootstrap>' 'unsafe-eval'` allows without any source that a page could use to load code.
+- **Render the page in a separate VS Code editor webview (not chosen).** Would get a webview's own policy but moves the page out of the transcript and loses the Page/Source toggle in place; a larger change for no stronger isolation than a sandboxed opaque-origin frame.
+
+## Decision Outcome
+
+Chosen: a constant frame document served by a loopback HTTP listener.
+
+- **The listener** (`host/html-page-server.ts`): `127.0.0.1`, ephemeral port, `exclusive`; started only while `ompDesk.chatHtmlPages` is on (before any chat document is built) and closed with the window; serves the same bytes at exactly `GET /page` and `404` with no body for anything else (other path, query, method, or a `Host` that is not `127.0.0.1:<port>`); reads no request body, keeps no state, logs nothing, holds no secret and no model text. A page that navigates its frame to `/page?x` sends that string to a server that discards it.
+- **The document** (`shared/html-page-frame.ts`) and its **header policy**: `default-src 'none'; script-src 'sha256-<its one bootstrap>' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts`. No nonce exists in the frame to be read, so nothing a script can learn lets it add a script, a stylesheet or an image from anywhere; `unsafe-eval` only runs text the page already has, in a frame with an opaque origin. The frame's own policy has no navigation directive: a navigation of the frame to any URL other than the loopback listener is refused by the Chat document's one-origin `frame-src` (the Chat reports the violation), and a navigation to the listener itself (such as `/page?x`) is a request the listener answers `404` and discards.
+- **The embedding Chat document** gets `frame-src http://127.0.0.1:<port>` (and nothing else frame-related: `default-src 'none'` still forbids every other frame) and a `<meta name="omp-html-page-frame">` carrying `http://127.0.0.1:<port>/page`. A window with no server (bind failure, or a document built before the server was bound) has neither, and the block stays code with one muted line saying so; with the setting off the block is the unchanged code block.
+- **The channel.** The frame is `<iframe sandbox="allow-scripts" allow="" referrerpolicy="no-referrer" src>`: an opaque origin, no `allow-same-origin`, popups, forms, modals, downloads, top navigation or pointer lock. The Chat takes a size/ready report only when `event.source` is that block's own `contentWindow`; the Chat's own inbound host channel ignores any `message` whose source is a frame inside it (`isFromEmbeddedFrame`); the frame takes the page and theme only when `event.source === parent` and the message has the exact shape. A frame can still `postMessage` to `parent`, `parent.parent` (VS Code's webview host page) and `top` (the workbench): it can send anything there. Those messages are delivered (listeners in the Chat, the webview host page and the workbench received them) and had no effect: VS Code's webview host page relays only what arrives on its own channel from the content frame and acts on its own message shapes after its own checks, and nothing in this change guards that. It is an observed property of VS Code (1.142), not a guarantee of this extension; it was checked in a real window (the design's verification) and must be re-checked after each VS Code major version.
+- **Why the old nonce concern does not apply to what remains.** The frame has no nonce; the Chat's nonce is never sent to it, and the Chat's own policy applies to the Chat only. What the page can read is its own source, the theme variables and the size reports it sends itself.
+- **Residual risks accepted.** (1) WebRTC is not governed by CSP; the bootstrap removes the `RTCPeerConnection` family from the frame's window before the page runs, which is best effort, not a guarantee. The page holds nothing of the user's (no file, no cookie, no Chat content) that it could send. (2) A page can keep a CPU busy or allocate memory inside its own frame process; the frame has a 200,000-character cap and a height cap, nothing more. (3) The listener is a loopback port other local processes can fetch constant bytes from; it exposes nothing. (4) Chat documents built before the server was bound (the setting turned on in a running window) show code with a note until the window is reloaded.
+
+### Consequences
+
+- Positive: the page's policy is its own and enumerable from one string; no request can reach any origin but the frame's own loopback document; the Chat's policy gains only `frame-src` for one loopback origin; no nonce handling of model text.
+- Negative: a new loopback listener (constant, lazily bound, closed with the window); the frame is a network-loaded document, so a window whose frame never answers (blocked loopback) shows code after six seconds; `unsafe-eval` in the frame's policy; classic scripts only (`type=module` and `src=` scripts do not run).
+
+## Related Documents
+
+- [Design: Chat HTML pages](../designs/2026-10-19-chat-html-pages.md)
+- ADR-0028 (the guest document's nonce policy), ADR-0023 (the exact loopback bridge origin the Chat document's `connect-src` names), ADR-0069 (mermaid as a separate local script, the closest precedent for a reply renderer under the same policy), ADR-0078 (the other reply renderer that avoids executing reply content)
+
+## Architecture Review
+
+- Reviewer: a separate `reviewer` agent, one pass
+- Outcome: REVISE with no material finding; three findings (one should-fix, two nits) applied in the text, accepted
+- Notes: the reviewer was asked to check the rejected `srcdoc` + nonce reasoning, the one-route listener, that the frame's policy forbids frames, forms and every resource request, that the Chat's one-origin `frame-src` is what stops the frame navigating away, and that `frame-src` in the Chat is exactly one origin.

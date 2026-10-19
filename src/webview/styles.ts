@@ -20,6 +20,7 @@ import { BTW_STYLES } from "./btw-styles.ts";
 import { MERMAID_STYLES } from "./mermaid-styles.ts";
 import { FIND_STYLES } from "./find-styles.ts";
 import { FIGURE_STYLES } from "./figure-styles.ts";
+import { HTML_PAGE_STYLES } from "./html-page-styles.ts";
 import { CHART_STYLES } from "./chart-styles.ts";
 import { MATH_STYLES } from "./math-styles.ts";
 
@@ -935,6 +936,7 @@ ${QUEUE_STYLES}
 ${BTW_STYLES}
 ${MERMAID_STYLES}
 ${FIGURE_STYLES}
+${HTML_PAGE_STYLES}
 ${CHART_STYLES}
 ${MATH_STYLES}
 ${FIND_STYLES}

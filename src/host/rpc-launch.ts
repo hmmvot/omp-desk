@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "./control-protocol";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "./control-protocol";
 import { planControlLaunch } from "./launch-capability";
 import {
 	DEFAULT_OMP_PROFILE,
@@ -78,8 +78,10 @@ export function rpcOmpLaunchSpec(input: {
 	readonly linkReminder: boolean;
 	/** The `ompDesk.toolIntentDescriptions` setting; the Chat prompt module reads it from the environment. */
 	readonly toolIntent: boolean;
+	/** The `ompDesk.chatHtmlPages` setting; the Chat prompt module reads it from the environment. */
+	readonly htmlPages: boolean;
 }): RpcOmpLaunchSpec {
-	const env: Record<string, string | null> = { [LINK_REMINDER_ENV]: input.linkReminder ? "1" : "0", [TOOL_INTENT_ENV]: input.toolIntent ? "1" : "0" };
+	const env: Record<string, string | null> = { [LINK_REMINDER_ENV]: input.linkReminder ? "1" : "0", [TOOL_INTENT_ENV]: input.toolIntent ? "1" : "0", [HTML_PAGES_ENV]: input.htmlPages ? "1" : "0" };
 	if (input.control !== null) {
 		env[CONTROL_DIR_ENV] = input.control.directory;
 		env[CONTROL_SLOT_ENV] = input.control.slotId;
@@ -156,6 +158,8 @@ export interface RpcLaunchRequest {
 	readonly linkReminder: boolean;
 	/** The `ompDesk.toolIntentDescriptions` setting when this launch starts; applies to this process for its whole life. */
 	readonly toolIntent: boolean;
+	/** The `ompDesk.chatHtmlPages` setting when this launch starts; applies to this process for its whole life. */
+	readonly htmlPages: boolean;
 }
 
 export type RpcLaunchOutcome =
@@ -269,6 +273,7 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		profile: request.profile,
 		linkReminder: request.linkReminder,
 		toolIntent: request.toolIntent,
+		htmlPages: request.htmlPages,
 	});
 	const launched = await client.launchRpc({
 		slot: request.slot,

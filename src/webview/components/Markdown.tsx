@@ -39,6 +39,7 @@ import { WebLink } from "./WebLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
 import { MermaidBlock } from "./MermaidBlock.tsx";
 import { SvgFigureBlock } from "./SvgFigureBlock.tsx";
+import { HtmlPageBlock } from "./HtmlPageBlock.tsx";
 import { TableChart } from "./TableChart.tsx";
 import { MathBlock } from "./MathBlock.tsx";
 
@@ -531,6 +532,8 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 					<MermaidBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
 				) : language.toLowerCase() === "svg" && !context.quoted && !context.inList ? (
 					<SvgFigureBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
+				) : language.toLowerCase() === "html" && !context.quoted && !context.inList ? (
+					<HtmlPageBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
 				) : (
 					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} leaf={leaf} />
 				),

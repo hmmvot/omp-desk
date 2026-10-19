@@ -87,6 +87,8 @@ export const CONTROL_SLOT_ENV = "OMP_VSCODE_CONTROL_SLOT";
 export const LINK_REMINDER_ENV = "OMP_VSCODE_LINK_REMINDER";
 /** `1` when the `ompDesk.toolIntentDescriptions` setting is on for this launch; the Chat prompt module then adds the rule for the `i` field of tool calls. Anything else adds nothing. */
 export const TOOL_INTENT_ENV = "OMP_VSCODE_TOOL_INTENT";
+/** `1` when the `ompDesk.chatHtmlPages` setting is on for this launch; the Chat prompt module then tells the model it may answer with an ```html fence that Chat shows as a sandboxed page. Anything else adds nothing. */
+export const HTML_PAGES_ENV = "OMP_VSCODE_HTML_PAGES";
 /**
  * Carries the value `BUN_OPTIONS` had before a launch appended Desk's runtime flags to it (empty: it was
  * unset). Only a launcher that cannot take Bun's flags on its command line (a standalone compiled OMP) uses

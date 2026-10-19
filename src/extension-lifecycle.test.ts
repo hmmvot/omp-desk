@@ -3652,8 +3652,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const settingsWrites = harness.configurationWrites().length;
 		try {
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false },
-				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
 			]);
 			// A page's own stale route can never overwrite what the host says.
 			const before = clients[0]!.getDisplayPreferences();
@@ -3663,8 +3663,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.configuration({ "ompDesk.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "editor.accessibilitySupport" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false },
-				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
 			]);
 			assert.equal(channel.written.length, writes, "presentation updates never write OMP commands even when writer admission is fenced");
 			harness.configuration({ "ompDesk.toolIntentDescriptions": true });

@@ -131,6 +131,15 @@ A fenced `svg` block in a reply is drawn as an image once the block is complete,
 - The SVG is never run: scripts, links, animation, embedded HTML and anything that would load a file or a web address are removed (the figure says so), and the image is shown as a picture, which cannot do any of that itself. A figure needs a `viewBox` (or a width and height) to have a size.
 - Only the assistant's reply text draws figures, and only a fence on its own, not one inside a list item or a quote; the same block in your own message, in a tool's output or in thinking stays code.
 
+### HTML pages
+
+With [`ompDesk.chatHtmlPages`](settings.md) on (the default), a fenced `html` block in a reply is shown as a live page once the block is complete: an interactive explainer, a chart, a mockup. While the reply is still streaming, and when a page cannot be shown, you see the code, with a muted line saying why.
+
+- **Page | Source** switches the view and Copy copies the source. The page is as tall as its content up to about 480 px, then scrolls inside. It reads your theme as CSS variables (`var(--bg)`, `--fg`, `--muted`, `--border`, `--surface`, `--accent`, `--success`, `--warning`, `--error`, `--c1` … `--c6`, `--font`, `--font-mono`) and follows a theme change without reloading.
+- **A page reaches nothing.** It runs in a sandboxed frame served from a loopback address of this window, with no network (no fonts, CDN, `fetch` or images from the web; `data:` images only), no storage, no forms, popups, downloads or navigation, and no access to Chat, VS Code or your files. Its scripts are plain inline `<script>` and `on…` handlers; `src` and module scripts do not run. A page cannot take the keyboard from the composer by itself; click into it to type in it.
+- Only the assistant's reply text shows pages, and only a fence on its own, not one inside a list item or a quote; the same block in your own message, in a tool's output or in thinking stays code. With the setting off every `html` block stays code and the model is not told it may write one.
+- Turning the setting on in a window where it was off needs **Developer: Reload Window** for Chats that were already open (their `html` blocks say so).
+
 ### Charts under tables
 
 A table of numbers in a reply gets a chart under it (bars, grouped bars, or a line when the rows run in order, such as dates or `Run 1`, `Run 2`…), in your theme's colours, when OMP's terminal UI would draw one: at least four rows, values that are not all alike, and enough of them to be worth a picture. Tables of words, ids, dates and versions, tables of a few rows and tables inside a list or a quote get none. The table itself is unchanged and the chart is not part of what Find searches.
