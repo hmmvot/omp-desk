@@ -262,12 +262,17 @@ test("Task rows show the shared context, progress and coordination details, neve
 	assert.match(html, /ReaderOne/); assert.match(html, /scout/); assert.doesNotMatch(html, /Background task started|0ms/);
 	assert.ok(html.includes("Shared context details"));
 	assert.doesNotMatch(html, /INTERNAL_|jobId|privateField|totalDurationMs|5ms|<dl|<dt/);
-	const running = api.view(context("task", { args: {}, details: { results: [], progress: [{ id: "ReaderOne", agent: "scout", status: "running", description: "Inspect source", task: "A meaningful expanded assignment", currentTool: "read", lastIntent: "Inspecting source", durationMs: 12345, tokens: 4800, cost: 0.07, agentSource: "INTERNAL_SOURCE", index: 99, parentToolCallId: "INTERNAL_PARENT", outputPath: "INTERNAL_OUTPUT", currentToolArgs: "INTERNAL_TOOL_ARGS", extractedToolData: { privateTool: [{ privateField: "INTERNAL_NESTED" }] } }] } }));
-	assert.match(running, /ReaderOne/); assert.match(running, /scout.*running/);
-	for (const content of ["Inspecting source", "12s", "4.8k tokens", "A meaningful expanded assignment"]) assert.ok(running.includes(content), content);
+	const runningDetails = { results: [], progress: [{ id: "ReaderOne", agent: "scout", status: "running", description: "Inspect source", task: "A meaningful expanded assignment", currentTool: "read", lastIntent: "Inspecting source", durationMs: 12345, tokens: 4800, cost: 0.07, agentSource: "INTERNAL_SOURCE", index: 99, parentToolCallId: "INTERNAL_PARENT", outputPath: "INTERNAL_OUTPUT", currentToolArgs: "INTERNAL_TOOL_ARGS", extractedToolData: { privateTool: [{ privateField: "INTERNAL_NESTED" }] } }] };
+	// An agent's block is closed by default: its head and progress show, its assignment and result wait for a click
+	// (the page test of task disclosures opens it).
+	const running = api.view(context("task", { args: {}, details: runningDetails }));
+	assert.match(running, /ReaderOne/); assert.match(running, /scout.*running/); assert.match(running, /aria-expanded="false"/);
+	for (const content of ["Inspecting source", "12s", "4.8k tokens"]) assert.ok(running.includes(content), content);
+	assert.ok(!running.includes("A meaningful expanded assignment"), "the closed block hides the assignment");
 	assert.doesNotMatch(running, /INTERNAL_|agentSource|parentToolCallId|outputPath|<dl|<dt/);
 	const settled = api.view(context("task", { details: { results: [{ id: "ReaderOne", agent: "scout", exitCode: 0, assignment: "Meaningful assignment", structuredOutput: { status: "success", data: { summary: "Visible structured result" }, privateField: "INTERNAL_WRAPPER" }, usage: { cost: { total: 0.07 } }, outputPath: "INTERNAL_OUTPUT", parentToolCallId: "INTERNAL_PARENT" }] } }));
-	assert.match(settled, /Meaningful assignment/); assert.match(settled, /Visible structured result/); assert.match(settled, /\$0\.07/);
+	assert.match(settled, /ReaderOne/); assert.match(settled, /completed/); assert.match(settled, /\$0\.07/);
+	assert.doesNotMatch(settled, /Visible structured result/, "the closed block hides the result");
 	assert.doesNotMatch(settled, /INTERNAL_|outputPath|parentToolCallId|<dl|<dt/);
 });
 

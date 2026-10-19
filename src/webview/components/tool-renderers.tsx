@@ -452,7 +452,9 @@ function TaskReview({ row }: { row: Record<string, unknown> }): ReactNode {
 	</Section>;
 }
 function TaskAgent({ row, context: c, depth = 0, ancestors = [] }: { row: Record<string, unknown>; context: ToolRenderContext; depth?: number; ancestors?: readonly object[] }): ReactNode {
-	const [collapsed, setCollapsed] = useState(false);
+	// Closed by default: the head, live progress, errors and a review verdict stay visible; the assignment, result, nested
+	// agents and child transcript open on a click.
+	const [collapsed, setCollapsed] = useState(true);
 	const open = !collapsed;
 	const id = string(row.id);
 	const live = id ? c.agents?.get(id) : undefined;
@@ -466,11 +468,11 @@ function TaskAgent({ row, context: c, depth = 0, ancestors = [] }: { row: Record
 	const structured = record(p.structuredOutput).data;
 	return <div className={`omp-native-agent omp-native-agent--${status.replace(/ /g, "-")}`}>
 		<button type="button" className="omp-native-agent-head" aria-expanded={open} onClick={() => setCollapsed(value => !value)}><span className={`codicon codicon-${open ? "chevron-down" : "chevron-right"}`} aria-hidden="true" /><strong>{id || scalar(p.name) || scalar(p.agent) || "Agent"}</strong> <span>{scalar(p.agent)} · {status}</span> <span className="omp-native-agent-description">{string(p.description || p.assignment || p.task).trim().split(/\r?\n/, 1)[0]?.slice(0, 120)}</span>{Boolean(p.resolvedModelIdentity || p.resolvedModel) && <span className="omp-chip">{scalar(p.resolvedModelIdentity || p.resolvedModel)}{p.resolvedThinkingLevel ? ` · ${scalar(p.resolvedThinkingLevel)}` : ""}</span>}{p.isolated === true && <span className="omp-chip">isolated</span>}{p.advisor === true && <span className="omp-chip">advisor</span>}{p.resolvedModelIsFallback === true && <span className="omp-chip">fallback</span>}</button>
-		{open && <><AgentProgressView progress={p} activity={activity} live={ownedLive !== undefined && status === "running"} />
+		<AgentProgressView progress={p} activity={activity} live={ownedLive !== undefined && status === "running"} />
 			{Object.keys(retry).length > 0 && <div className="omp-native-warning">Retry {scalar(retry.attempt)}/{scalar(retry.maxAttempts)} · {scalar(retry.errorMessage)}</div>}
 			{Object.keys(retryFailure).length > 0 && <div className="omp-native-error">Auto-retry gave up after {scalar(retryFailure.attempt)} attempts: {scalar(retryFailure.errorMessage)}</div>}
 			{p.error !== undefined && <div className="omp-native-error">{scalar(p.error)}</div>}{p.abortReason !== undefined && <div className="omp-native-warning">{scalar(p.abortReason)}</div>}{p.truncated === true && <div className="omp-native-warning">Output truncated</div>}
-			<TaskReview row={p} /></>}
+		<TaskReview row={p} />
 		{open && <div className="omp-native-agent-body"><Section title="Assignment"><Markdown text={string(p.assignment || p.task)} /></Section>{typeof p.resolvedModelRoute === "string" && <p className="omp-empty-note">{p.resolvedModelRoute}</p>}{structured !== undefined ? <Section title="Result"><JsonOutput value={structured} expanded={open} id={`result.${id}`} /></Section> : p.output !== undefined && <Section title="Result"><Markdown text={string(p.output)} /></Section>}{status !== "completed" && typeof p.stderr === "string" && p.stderr.trim() && <Section title="Standard error"><TextPreview text={p.stderr} expanded /></Section>}{status === "completed" && p.hasRootChanges !== false && typeof p.patchPath === "string" && <p className="omp-empty-note">Patch: {p.patchPath}</p>}{status === "completed" && typeof p.branchName === "string" && <p className="omp-empty-note">Branch: {p.branchName}</p>}<OutputMetadata details={record(p.outputMeta)} />
 			{nested.map((details, index) => <Section key={index} title="Nested agents">{depth >= 8 ? <div className="omp-empty-note">Native nested progress limit reached.</div> : ancestors.includes(details) ? <div className="omp-empty-note">Nested progress already shown</div> : <TaskRows details={details} context={c} depth={depth + 1} ancestors={[...ancestors, details]} />}</Section>)}
 			{id && c.renderChild && <Section title="Read-only child transcript">{c.renderChild(id)}</Section>}

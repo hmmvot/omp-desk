@@ -2096,6 +2096,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"goal-disclosure\"] .omp-tool-body')"), null);
 			await ui.evaluate("document.querySelectorAll('.omp-native-tool > .omp-tool-head').forEach(button=>button.click())");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-tool-head').getAttribute('aria-expanded')==='true'");
+			// An agent's own block opens closed: its activity shows, its assignment waits for a click on its head.
+			await ui.wait("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-native-agent-head')");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-native-agent-head').getAttribute('aria-expanded')"), "false");
+			const closedAgent = await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"task-disclosure\"]').textContent");
+			assert.ok(closedAgent.includes("Expanded agent activity"), "the closed agent block keeps its activity");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-native-agent-body')"), null, "the closed agent block hides its assignment section");
+			await ui.evaluate("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-native-agent-head').click()");
+			await ui.wait("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-native-agent-head').getAttribute('aria-expanded')==='true'");
 			const expanded = await ui.evaluate<string>("document.querySelector('.omp-transcript').textContent");
 			for (const detail of ["Goal", "Shared context detail", "Assigned detail", "Expanded agent activity", "Expanded wait detail", "assignment_identifier", "tail-row-39", "Long objective detail 79"]) assert.ok(expanded.includes(detail), detail);
 			assert.doesNotMatch(expanded, /Background task started|0ms|INTERNAL_/);
