@@ -7,7 +7,7 @@
  * control, the native watch's early check and the exit operations are the runtime's own). The
  * order of one launch is part of the contract and is the order the window always had:
  *
- *   precheck → stage entries → prepare host control → open diagnostics → broker client →
+ *   refusal (installed package changed) → precheck → stage entries → prepare host control → open diagnostics → broker client →
  *   `retireDocument` → reserve the broker slot → launch → `adopt` → watch the broker →
  *   `prepareView` → `startLive` / native `attach()` → `attached` → control connection →
  *   run-intent write
@@ -77,6 +77,13 @@ export interface LocalLauncherDeps {
 	readonly chat: Pick<ChatRuntime, "startLive">;
 	readonly diagnostics: DiagnosticsRecorder;
 	readonly entries: () => Promise<StagedRuntimeEntries>;
+	/**
+	 * Why no host may be started now, or `null`: the installed package no longer holds the bytes this window loaded, so a broker
+	 * or child started from it would not speak this window's protocol and its editor shows no Chat. Asked on every launch, not
+	 * only when the runtime entries are staged (the staged copies are cached for the window's life, so that check alone never
+	 * fires in a window that staged them before the reinstall). An attach starts nothing and is never refused by it.
+	 */
+	readonly launchRefusal: () => string | null;
 	/** The processes themselves: spawn through the broker, or re-prove and re-adopt one that is already running. */
 	readonly hosts: {
 		readonly launchRpc: typeof launchRpcHost;
@@ -298,11 +305,20 @@ export class LocalLauncher implements OmpHostLauncher {
 		// The run intent is not recorded here: the index records it with the host it adopts, in the one write that follows this return.
 		log.info(`tab ${request.tabId}: attached — ${outcome.reason}`);
 		void this.#deps.control.reconnect(request.tabId, request.ownerGeneration, runtime);
-		return { state: "attached", host: hostHandle(runtime, request.sessionId), timings };
+		// The host that is attached is a process that already runs under the provider id this index recorded for it, which is not
+		// the row's file id once a Chat clear rotated it (ADR-0059). Handing the row's id back would overwrite the recorded one, and
+		// the next reload would expect an id the process no longer reports.
+		return { state: "attached", host: hostHandle(runtime, request.recordedHost.sessionId ?? request.sessionId), timings };
 	}
 
 	async launch(request: OmpHostLaunchRequest): Promise<OmpHostLaunchResult> {
 		const { diagnostics, window, index, log, timeline } = this.#deps;
+		// Before anything else, and before the run is measured: a window whose installed package changed under it starts nothing.
+		const refusal = this.#deps.launchRefusal();
+		if (refusal !== null) {
+			timeline?.discard(request.tabId);
+			return { state: "not-started", reason: refusal };
+		}
 		const launchKind = timeline?.reached(request.tabId) ?? null;
 		if (launchKind !== null && timeline !== undefined) {
 			timeline.lap(request.tabId, "admission");

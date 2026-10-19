@@ -251,4 +251,40 @@ describe("availability policy", () => {
 			assert.doesNotMatch(switched.detail, /Resume to reconnect/, "no advice that cannot work");
 		});
 	});
+
+	describe("a launch attempt whose outcome was never read (its window ended mid-launch)", () => {
+		const attempt = (entry: SessionIndexEntry, transport: "rpc" | "native" = "rpc"): SessionIndexEntry => ({
+			...entry,
+			host: { pid: null, instanceId: null, generation: null, sessionId: entry.sessionId, startedAt: "2026-09-24T10:01:00.000Z", transport, rpc: null },
+		});
+		const attachable = (entry: SessionIndexEntry, host: OmpHostHandle) => classifySessionAvailability({
+			entry, fileExists: entry.sessionFile !== null, claim: null, localLive: false,
+			verdict: { kind: "attachable", host, pin: provenPin(host), detail: "This session is running. Resume to reconnect to it." },
+		});
+
+		it("is attachable to the broker child the reconciler proved, though the row recorded no process or broker identity", () => {
+			const handle = { ...runningHandle(), transport: "rpc" as const };
+			const entry = attempt(recordedEntry(handle));
+			const classified = attachable(entry, handle);
+			assert.equal(classified.availability, "live");
+			assert.deepEqual(classified.attachableHost, handle);
+			assert.deepEqual(classified.attachPin, provenPin(handle));
+		});
+
+		it("still refuses a host of another transport, and a session id that differs from the one recorded", () => {
+			const handle = runningHandle("S-ATTACH");
+			const entry = attempt(recordedEntry(handle));
+			assert.equal(attachable(entry, { ...handle, transport: "native" }).attachableHost, null);
+			assert.equal(attachable(attempt(recordedEntry(handle), "native"), { ...handle, transport: "rpc" }).attachableHost, null);
+			const switched = attachable(entry, { ...runningHandle("S-OTHER"), transport: "rpc" });
+			assert.equal(switched.attachableHost, null);
+			assert.match(switched.detail, /does not match the recorded one/);
+		});
+
+		it("does not relax the comparison for a row that recorded a process: that pid must still be the host's", () => {
+			const handle = { ...runningHandle(), transport: "rpc" as const };
+			const entry = recordedEntry(handle);
+			assert.equal(attachable(entry, { ...handle, pid: 999 }).attachableHost, null);
+		});
+	});
 });

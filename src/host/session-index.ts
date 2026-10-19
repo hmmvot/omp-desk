@@ -1889,6 +1889,7 @@ export class SessionIndex {
 			/** The record the row carried before this attempt; restored when nothing started. */
 			let previousHost: RecordedHost | null = null;
 			let previousSessionId: string | null = null;
+			let previousIntent: RunIntent = entry.runIntent;
 			try {
 				// Reconcile external ownership while the claim is held: only `free`
 				// may start a process, only `attachable` may reconnect to the host
@@ -1968,13 +1969,20 @@ export class SessionIndex {
 				}
 				// Persist the attempt before launch so reload and automatic recovery
 				// retain its provenance. An unresolved outcome is not ownership and
-				// never vetoes the user's next explicit action.
+				// never vetoes the user's next explicit action. The attempt carries the
+				// intent to run too (this pass only gets here for a row that may run, or
+				// that the user explicitly opened): a window that ends between starting
+				// the broker and reading its outcome leaves a row the next window's
+				// restore re-adopts through the slot the launch reserved, instead of one
+				// that reads as a deliberate stop beside a running writer.
 				previousHost = entry.host;
 				previousSessionId = entry.sessionId;
+				previousIntent = entry.runIntent;
 				// Without a file this is a genuinely new conversation, not a resume
 				// of the old draft host's identity. Keep existing-file IDs pinned.
 				if (entry.sessionFile === null) entry.sessionId = null;
 				this.#launching.add(tabId);
+				entry.runIntent = "running";
 				entry.host = {
 					pid: null,
 					instanceId: null,
@@ -1994,6 +2002,7 @@ export class SessionIndex {
 					// unrecorded attempt is indistinguishable from one that started.
 					entry.host = previousHost;
 					entry.sessionId = previousSessionId;
+					entry.runIntent = previousIntent;
 					const release = heldBefore ? null : await this.#releaseQuietly(claim);
 					const detail = withReleaseNotice(
 						`The launch attempt could not be recorded (${recordFailure}), so no native host was started.`,
@@ -2018,6 +2027,7 @@ export class SessionIndex {
 				// record it carried before the attempt.
 				entry.host = previousHost;
 				entry.sessionId = previousSessionId;
+				entry.runIntent = previousIntent;
 				const detail = withReleaseNotice(step.detail, release);
 				await this.#touch(entry, "failed", detail);
 				await this.#persist(trace);

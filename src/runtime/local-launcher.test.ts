@@ -14,7 +14,7 @@ import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
-import type { OmpHostLaunchRequest, SessionIndex } from "../host/session-index.ts";
+import type { OmpHostAttachRequest, OmpHostLaunchRequest, SessionIndex } from "../host/session-index.ts";
 import type { LocalLauncher as LocalLauncherType, LocalLauncherDeps, LauncherWindow } from "./local-launcher.ts";
 
 // The host modules resolve extensionless relative imports the way esbuild does, so the launcher is
@@ -35,7 +35,18 @@ const request: OmpHostLaunchRequest = {
 	transport: "rpc", ownerGeneration: "gen-1", claimPath: "",
 };
 
-function fixture(options: { precheck?: boolean; launch?: "running" | "not-started" | "unconfirmed"; stagingFails?: boolean; undelivered?: boolean } = {}) {
+/** An attach request for a row whose file id is `file-session-id` and whose recorded host reported `recordedId`. */
+function attachRequest(recordedId: string | null): OmpHostAttachRequest {
+	return {
+		...request,
+		sessionId: "file-session-id",
+		transport: "rpc",
+		recordedHost: { pid: 4242, instanceId: null, generation: null, sessionId: recordedId, startedAt: "2026-10-19T00:00:00.000Z", transport: "rpc", rpc: null },
+		pin: {} as never,
+	};
+};
+
+function fixture(options: { precheck?: boolean; launch?: "running" | "not-started" | "unconfirmed"; stagingFails?: boolean; undelivered?: boolean; refusal?: string; attachable?: boolean } = {}) {
 	const events: string[] = [];
 	const withheld: string[] = [];
 	const runtime = {
@@ -68,6 +79,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		window,
 		chat: { startLive: () => { events.push("startLive"); return undefined as never; } },
 		diagnostics,
+		launchRefusal: () => options.refusal ?? null,
 		entries: async () => {
 			if (options.stagingFails === true) throw new Error("staging failed");
 			return { hostControl: { path: "control.mjs" }, runtimeProbe: { path: "runtime-probe.mjs" } } as never;
@@ -75,12 +87,12 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		hosts: {
 			launchRpc: async (launchRequest: { forkFrom?: string | null }) => { launches.push(launchRequest); events.push("launch"); return state === "running" ? { state, reason: "ok", runtime } : { state, reason: "no", runtime: null }; },
 			launchNative: async () => { throw new Error("not used"); },
-			attachRpc: async () => ({ state: "unavailable", reason: "x", runtime: null }),
+			attachRpc: async () => options.attachable === true ? { state: "attached", reason: "ok", runtime } : { state: "unavailable", reason: "x", runtime: null },
 			attachNative: async () => ({ state: "unavailable", reason: "x", runtime: null }),
 		} as never,
 		brokerSlots,
 		brokerClient: async () => ({}) as never,
-		attachBrokerClient: async () => null,
+		attachBrokerClient: async () => options.attachable === true ? ({} as never) : null,
 		brokerUnavailableReason: () => null,
 		brokerWatches: new WeakMap(),
 		linkReminder: () => false,
@@ -183,6 +195,38 @@ describe("launch", () => {
 		f.sources.set(TAB, "C:/proj/original.jsonl");
 		await assert.rejects(f.launcher.launch({ ...request, transport: "native" }), /not used/);
 		assert.deepEqual(f.dropped, [TAB]);
+	});
+
+	it("starts nothing in a window whose installed package changed on disk, before any hook runs", async () => {
+		const f = fixture({ refusal: "the installed extension changed on disk" });
+		const result = await f.launcher.launch(request);
+		assert.deepEqual(result, { state: "not-started", reason: "the installed extension changed on disk" });
+		assert.deepEqual(f.events, [], "no precheck, staging, reservation or launch");
+		assert.equal(f.launches.length, 0);
+	});
+
+	it("does not refuse an attach of a host that already runs when the installed package changed", async () => {
+		const f = fixture({ refusal: "the installed extension changed on disk", attachable: true });
+		const result = await f.launcher.attach(attachRequest(null));
+		f.deps.brokerWatches.get(f.runtime)?.();
+		assert.equal(result.state, "attached");
+	});
+});
+
+describe("attach", () => {
+	it("hands back the provider id the index recorded for the host, not the row's file id (a Chat clear rotated it)", async () => {
+		const f = fixture({ attachable: true });
+		const result = await f.launcher.attach(attachRequest("provider-after-clear"));
+		f.deps.brokerWatches.get(f.runtime)?.();
+		assert.equal(result.state, "attached");
+		assert.equal(result.state === "attached" ? result.host.sessionId : null, "provider-after-clear");
+	});
+
+	it("falls back to the row's id for a host whose provider id was never recorded", async () => {
+		const f = fixture({ attachable: true });
+		const result = await f.launcher.attach(attachRequest(null));
+		f.deps.brokerWatches.get(f.runtime)?.();
+		assert.equal(result.state === "attached" ? result.host.sessionId : "unavailable", "file-session-id");
 	});
 });
 

@@ -22,7 +22,7 @@ import type { PtyIdentityReading } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import { attestationOf } from "./pty-protocol";
 import type { PtyBrokerRecord, PtyKind, PtyStatusPayload, PtyStopResult } from "./pty-protocol";
-import { isManagedHost } from "./session-model";
+import { isManagedHost, isUnreadLaunchAttempt } from "./session-model";
 import type { RecordedRpcIdentity } from "./session-model";
 import { timedStep } from "./session-restore-trace";
 import type { StepSink } from "./session-restore-trace";
@@ -76,10 +76,14 @@ export interface ProbeHandle extends AttachedBrokerHandle {
 /**
  * Current positive child ownership. `missing` and `failed` mean "not owned", not evidence of
  * absence; only `idle` can support automatic relaunch evidence.
+ *
+ * `live` carries what its proof established about the running child — the pin the broker's own
+ * record and the child's creation time prove, and which kind of host the slot holds — so a caller
+ * that may adopt it needs no second probe.
  */
 export type BrokerSlotProbeResult =
 	| { readonly kind: "idle" }
-	| { readonly kind: "live"; readonly pid: number }
+	| { readonly kind: "live"; readonly pid: number; readonly pin: BrokerPin; readonly hostKind: "managed-rpc" | "managed-omp" }
 	| { readonly kind: "missing" }
 	| { readonly kind: "failed"; readonly reason: string };
 
@@ -536,7 +540,9 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
  * process id to compare: the slot itself is the launch's own identity — the extension
  * mints one per launch and records it before the launcher runs — so a running
  * `managed-rpc` (or legacy `managed-omp`) child under it is positive evidence of a writer.
- * Any other record kind is reported as a failure, not as missing metadata.
+ * The running child's pin is returned with the answer: a row of this build that was left
+ * mid-launch is adopted through it ({@link reconcileOwner}). Any other record kind is
+ * reported as a failure, not as missing metadata.
  */
 export async function probeBrokerSlotForRunningChild(input: {
 	readonly client: PtyBrokerClient;
@@ -573,7 +579,7 @@ export async function probeBrokerSlotForRunningChild(input: {
 		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
 		const proved = await provedBrokerPin(handle, reader, handle.kind);
 		if (!proved.ok) return { kind: "failed", reason: proved.reason };
-		return { kind: "live", pid };
+		return { kind: "live", pid, pin: proved.pin, hostKind: handle.kind };
 	} finally {
 		handle.disconnect();
 	}
@@ -796,6 +802,34 @@ async function reconcileOwner(request: OwnerReconcileRequest, ports: OwnerReconc
 	if (slot !== null) {
 		const probe = await ports.probeBrokerSlot(slot, recorded.pid);
 		if (probe.kind === "live") {
+			// A launch of this build whose window ended before it read the outcome: the broker it started under the slot it
+			// reserved still runs the child, and nothing was recorded that could name it. The broker's own proof (its record,
+			// generation and the child's creation time, re-proved at the attach) is the identity, so the row adopts that child
+			// instead of refusing its own survivor. A pid-recorded or legacy row, or a slot holding another kind of host, is
+			// still only reported as running.
+			const hostKind = recorded.transport === "native" ? "managed-omp" : "managed-rpc";
+			if (isUnreadLaunchAttempt(recorded) && probe.hostKind === hostKind) {
+				const pin = probe.pin;
+				return {
+					kind: "attachable",
+					host: {
+						pid: pin.nativePid,
+						sessionId: recorded.sessionId,
+						rpc: {
+							slot: pin.slot,
+							brokerId: pin.brokerId,
+							brokerGeneration: pin.brokerGeneration,
+							brokerPid: pin.brokerPid,
+							brokerCreationTime: pin.brokerCreationTime,
+							childPid: pin.nativePid,
+							childCreationTime: pin.nativeCreationTime,
+						},
+						transport: recorded.transport,
+					},
+					pin,
+					detail: "This session is running. Resume to reconnect to it.",
+				};
+			}
 			return {
 				kind: "live",
 				pid: probe.pid,

@@ -9,7 +9,7 @@
  */
 
 import type { ObservedClaim } from "./session-claim.ts";
-import { isManagedHost } from "./session-model.ts";
+import { isManagedHost, isUnreadLaunchAttempt } from "./session-model.ts";
 import type { StepSink } from "./session-restore-trace.ts";
 import type {
 	OmpHostHandle,
@@ -251,7 +251,11 @@ export interface SessionClassification {
  * the host this index recorded.
  *
  * Every clause is a fact the index owns: a recorded launch, the exact process id,
- * the broker and child identity, and the OMP session id that were recorded.
+ * the broker and child identity, and the OMP session id that were recorded. A launch
+ * its window left mid-way (an unread attempt) recorded no process and no identity, so
+ * there is nothing to compare: the slot the launch reserved and the broker's own pin
+ * proof, which the attach re-proves, are its identity, and only the transport and a
+ * session id that was recorded are checked here.
  */
 function describeAttachMismatch(
 	entry: SessionIndexEntry,
@@ -260,24 +264,30 @@ function describeAttachMismatch(
 ): string | null {
 	const recorded = entry.host;
 	if (recorded === null) return "this tab never recorded a launched host";
-	if (host.pid === null || recorded.pid === null || host.pid !== recorded.pid) {
-		return "the reported process id does not match the recorded one";
-	}
-	if (!isManagedHost(recorded) || recorded.rpc == null || host.rpc === null || (host.transport ?? "rpc") !== recorded.transport) {
-		return "the recorded managed transport does not match the attached host";
-	}
-	const identity = recorded.rpc;
-	const reported = host.rpc;
-	if (
-		identity.slot !== reported.slot ||
-		identity.brokerId !== reported.brokerId ||
-		identity.brokerGeneration !== reported.brokerGeneration ||
-		identity.childPid === null ||
-		identity.childPid !== reported.childPid ||
-		identity.childCreationTime === null ||
-		identity.childCreationTime !== reported.childCreationTime
-	) {
-		return "the reported broker and child identity do not match the recorded one";
+	if (isUnreadLaunchAttempt(recorded)) {
+		if (host.pid === null || host.rpc === null || (host.transport ?? "rpc") !== recorded.transport) {
+			return "the recorded managed transport does not match the attached host";
+		}
+	} else {
+		if (host.pid === null || recorded.pid === null || host.pid !== recorded.pid) {
+			return "the reported process id does not match the recorded one";
+		}
+		if (!isManagedHost(recorded) || recorded.rpc == null || host.rpc === null || (host.transport ?? "rpc") !== recorded.transport) {
+			return "the recorded managed transport does not match the attached host";
+		}
+		const identity = recorded.rpc;
+		const reported = host.rpc;
+		if (
+			identity.slot !== reported.slot ||
+			identity.brokerId !== reported.brokerId ||
+			identity.brokerGeneration !== reported.brokerGeneration ||
+			identity.childPid === null ||
+			identity.childPid !== reported.childPid ||
+			identity.childCreationTime === null ||
+			identity.childCreationTime !== reported.childCreationTime
+		) {
+			return "the reported broker and child identity do not match the recorded one";
+		}
 	}
 	// Native identity is best-effort readback, not attachment authority.
 	if (recorded.transport === "native") return null;

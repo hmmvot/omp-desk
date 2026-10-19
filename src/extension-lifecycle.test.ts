@@ -2030,6 +2030,25 @@ describe("native replacement lifecycle", () => {
     assert.equal(admitted, 1, "the successor native binding dispatches exactly once after restart");
   });
 
+  it("a window whose installed package changed on disk starts no host from its launcher, so a reload cannot land mid-launch", async () => {
+    const saved = storage(); const resumed = runtime(707); const index = indexFixture(resumed);
+    harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
+    let launches = 0;
+    const globals = globalThis as typeof globalThis & { __nativeLaunch?: unknown };
+    Object.defineProperty(globals, "__nativeLaunch", { configurable: true, get: () => { launches += 1; return { state: "running", runtime: resumed, reason: "fixture launched" }; } });
+    harness.window().packageDrift = { check: () => ({ kind: "changed", files: ["out/extension.js"] }) };
+    try {
+      const launched = await harness.localLauncher(saved.context, index).launch({ tabId: TAB, sessionFile: resumed.sessionFile, sessionId: "session-1", cwd: root, scope: index.row.scope, ownerGeneration: OWNER, claimPath: "" });
+      assert.equal(launched.state, "not-started", JSON.stringify(launched));
+      const reason = "reason" in launched && typeof launched.reason === "string" ? launched.reason : "";
+      assert.match(reason, /Reload the window to finish updating/);
+      assert.equal(launches, 0, "no broker or child was asked for: the drifted bundle would start a host this window cannot serve");
+    } finally {
+      harness.window().packageDrift = null;
+      Reflect.deleteProperty(globals, "__nativeLaunch");
+    }
+  });
+
   for (const acknowledgement of ["before", "after", "replacement"] as const) {
     it(`Close → view-only → page Resume → first host restart delivers GAMMA with ${acknowledgement} bridge acknowledgement`, async () => {
       const saved = storage(); const native = runtime(707); const baseIndex = indexFixture(native);

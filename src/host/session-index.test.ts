@@ -1984,6 +1984,79 @@ describe("a launch attempt whose outcome was never recorded", () => {
 		assert.equal(await readClaim(claimDir, file), null, "the claim this pass took guarded nothing and goes back");
 	});
 
+	it("records the intent to run with the attempt, and puts the previous intent back when nothing started", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const index = indexFor(store, claimDir);
+		const draft = await index.createDraft({ cwd });
+		assert.equal(draft.runIntent, "stopped", "a new draft has not been asked to run yet");
+
+		const seenAtLaunch: string[] = [];
+		const launcher: OmpHostLauncher = {
+			async launch() {
+				const snapshot = store.value as { entries: { runIntent: string }[] };
+				seenAtLaunch.push(snapshot.entries[0]?.runIntent ?? "missing");
+				return { state: "not-started", reason: "the launcher refused" };
+			},
+			async attach() {
+				return { state: "unavailable", reason: "attach is not scripted for this test" };
+			},
+		};
+		const outcome = await index.restore(draft.tabId, { reconciler: noRecordedHost, launcher });
+
+		assert.ok(outcome.status === "failed");
+		assert.deepEqual(seenAtLaunch, ["running"], "the attempt is durable with the intent to run, so a window that ends inside the launch leaves a row restore re-adopts");
+		assert.equal(index.get(draft.tabId)?.runIntent, "stopped", "nothing started, so the row is not left asking to run");
+		assert.equal(index.get(draft.tabId)?.host, null);
+	});
+});
+
+/**
+ * A window that ends between starting the broker and reading the launch outcome leaves the attempt and the intent to run
+ * and nothing else. The broker it started under the reserved slot still runs the child, and the next window must adopt it,
+ * not report the row as one the user stopped beside a running writer.
+ */
+describe("a launch whose window ended before its outcome was read", () => {
+	async function diedInsideLaunch() {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const launching = indexFor(store, claimDir, DEAD_WINDOW);
+		const draft = await launching.createDraft({ cwd });
+		const handle = runningHandle("S-ATTEMPT");
+		// What the memento holds when the launcher is asked to start: the state a window that dies inside the launch leaves behind.
+		const left = new TestStore();
+		const launcher: OmpHostLauncher = {
+			async launch() {
+				for (const [key, value] of store.values) left.values.set(key, structuredClone(value));
+				return { state: "running", host: handle };
+			},
+			async attach() {
+				return { state: "unavailable", reason: "attach is not scripted for this test" };
+			},
+		};
+		assert.equal((await launching.restore(draft.tabId, { reconciler: noRecordedHost, launcher })).status, "restored");
+		return { claimDir, store: left, tabId: draft.tabId, handle };
+	}
+
+	it("is adopted by the next window's restore through the process the reconciler proved for its slot", async () => {
+		const { claimDir, store, tabId, handle } = await diedInsideLaunch();
+		const restarted = indexFor(store, claimDir);
+		assert.equal(restarted.get(tabId)?.host?.pid, null, "the dead window recorded no process");
+		assert.equal(restarted.get(tabId)?.runIntent, "running");
+		const { launcher, requests, attachRequests } = attachingLauncher({ state: "attached", host: handle });
+
+		const report = await restarted.restoreAll({ reconciler: attachableHost(handle), launcher });
+
+		assert.equal(report.attached.length, 1, JSON.stringify(report));
+		assert.equal(report.stopped.length, 0, "a row that was asked to run is not reported as a deliberate stop");
+		assert.equal(report.conflicts.length, 0);
+		assert.equal(requests.length, 0, "the survivor is adopted, never replaced by a second writer");
+		assert.equal(attachRequests.length, 1);
+		assert.equal(attachRequests[0]?.recordedHost.pid, null);
+		assert.equal(restarted.get(tabId)?.host?.pid, handle.pid, "the adopted process is now the recorded one");
+		assert.deepEqual(restarted.get(tabId)?.host?.rpc, handle.rpc);
+		assert.equal(restarted.get(tabId)?.runIntent, "running");
+	});
 });
 
 // ── Upgrade migration ───────────────────────────────────────────────────────

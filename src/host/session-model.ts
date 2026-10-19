@@ -47,11 +47,14 @@ export interface OmpLaunchScope {
  *
  * Usually the host that was launched: its broker slot and child process, plus the
  * session id it reported. It is also written *before* a launch is attempted, with
- * every identity field `null` — a window that dies between starting a native
- * process and reading its outcome leaves exactly that behind, and it is the state
- * nothing can prove absent. A completed pass overwrites it with the real identity,
- * restores the record the row carried when the launcher reported that nothing
- * started, or (an unconfirmed outcome) leaves the identity-less record standing.
+ * every identity field `null` (see {@link isUnreadLaunchAttempt}): a window that dies
+ * between starting a broker and reading its outcome leaves exactly that behind. The
+ * broker it started keeps running, so the next window adopts the child under the slot
+ * the launch reserved when the broker proves it is still running (`rpc-reconcile.ts`);
+ * only a record whose slot holds nothing can never be proved absent. A completed pass
+ * overwrites it with the real identity, restores the record the row carried when the
+ * launcher reported that nothing started, or (an unconfirmed outcome) leaves the
+ * identity-less record standing.
  */
 export interface RecordedRpcIdentity {
 	/** Durable broker slot the conversation's `managed-rpc` child runs under. */
@@ -93,6 +96,16 @@ export type NativeHostTransferOutcome =
 
 export function isManagedHost(host: RecordedHost | null): host is RecordedHost & { readonly transport: "rpc" | "native" } {
 	return host !== null && (host.transport === "rpc" || host.transport === "native");
+}
+
+/**
+ * Whether a recorded host is the attempt written before a launch of this build, whose outcome was
+ * never read: a managed transport with no process and no broker identity. A row left in this state
+ * by a window that ended mid-launch may still have a broker running under the slot the launch
+ * reserved; nothing recorded names that process, so the slot is the only identity there is.
+ */
+export function isUnreadLaunchAttempt(host: RecordedHost | null): host is RecordedHost & { readonly transport: "rpc" | "native"; readonly pid: null } {
+	return isManagedHost(host) && host.pid === null && (host.rpc ?? null) === null;
 }
 
 /** Structural check for a persisted {@link RecordedRpcIdentity}. */

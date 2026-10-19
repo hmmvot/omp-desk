@@ -4210,6 +4210,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     chat,
     diagnostics: s.diagnostics,
     entries: () => windowState().staging.entries(),
+    launchRefusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),
     hosts: { launchRpc: launchRpcHost, launchNative: launchNativeHost, attachRpc: attachRpcHost, attachNative: attachNativeHost },
     brokerSlots: s.brokerSlots,
     brokerClient,

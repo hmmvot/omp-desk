@@ -29,6 +29,7 @@ import { SessionIndex } from "./session-index.ts";
 import type {
 	AttachedBrokerHandle,
 	BrokerPin,
+	BrokerSlotProbeResult,
 	createOwnerReconciler as createOwnerReconcilerType,
 	decideStop as decideStopType,
 	NativeGenerationReader,
@@ -666,7 +667,7 @@ describe("broker slot probe", () => {
 	it("reports a running child, and disconnects before it answers", async () => {
 		let disconnected = 0;
 		const live = await slotProbe(brokerClient({ onDisconnect: () => (disconnected += 1) }));
-		assert.deepEqual(live, { kind: "live", pid: CHILD_PID });
+		assert.deepEqual(live, { kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" });
 		assert.equal(disconnected, 1, "a probe is an observation and closes what it opened");
 	});
 
@@ -680,7 +681,7 @@ describe("broker slot probe", () => {
 			),
 			mismatch,
 		);
-		assert.deepEqual(await slotProbe(brokerClient(), CHILD_PID), { kind: "live", pid: CHILD_PID });
+		assert.deepEqual(await slotProbe(brokerClient(), CHILD_PID), { kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" });
 	});
 
 	it("reports an exited child as idle, and treats a folder shell or an absent record as uncertainty", async () => {
@@ -706,7 +707,7 @@ describe("broker slot probe", () => {
 				disconnect: () => undefined,
 			},
 		});
-		assert.deepEqual(await slotProbe(legacy), { kind: "live", pid: CHILD_PID });
+		assert.deepEqual(await slotProbe(legacy), { kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-omp" });
 	});
 
 	it("refuses a record or attachment that names another slot, and closes the attachment", async () => {
@@ -898,6 +899,50 @@ describe("reconciliation of a recorded rpc row", () => {
 });
 
 /**
+ * A launch of this build whose window ended before it read the outcome recorded no process and no broker identity.
+ * The broker it started under the slot it reserved is its only identity, so the row adopts that child (re-proved at
+ * the attach) instead of refusing it as a rival writer.
+ */
+describe("reconciliation of an unread launch attempt", () => {
+	function ports(probe: BrokerSlotProbeResult, probed: Array<{ readonly slot: string; readonly pid: number | null }> = []) {
+		return reconcilePorts({
+			brokerSlot: () => SLOT,
+			probeBrokerSlot: async (slot, pid) => {
+				probed.push({ slot, pid });
+				return probe;
+			},
+		});
+	}
+
+	it("adopts the slot's running child of the same transport, naming it by the broker's own proof", async () => {
+		const probed: Array<{ readonly slot: string; readonly pid: number | null }> = [];
+		const verdict = await verdictOf(ports({ kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" }, probed), reconcileRequest(UNIDENTIFIED));
+		assert.equal(verdict.kind, "attachable");
+		assert.deepEqual(probed, [{ slot: SLOT, pid: null }], "no process was recorded, so none is asserted");
+		if (verdict.kind !== "attachable") return;
+		assert.deepEqual(verdict.pin, brokerPin());
+		assert.deepEqual(verdict.host, { pid: CHILD_PID, sessionId: "S-ONE", rpc: RPC_IDENTITY, transport: "rpc" });
+	});
+
+	it("only reports a child of another kind, or a row that recorded a process, as running", async () => {
+		const foreign = await verdictOf(ports({ kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-omp" }), reconcileRequest(UNIDENTIFIED));
+		assert.equal(foreign.kind, "live", "a native child is not an rpc launch's survivor");
+		const native = await verdictOf(ports({ kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" }), reconcileRequest({ ...UNIDENTIFIED, transport: "native" }));
+		assert.equal(native.kind, "live", "an rpc child is not a native launch's survivor");
+		const pidRecorded = await verdictOf(ports({ kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" }), reconcileRequest({ ...UNIDENTIFIED, pid: CHILD_PID }));
+		assert.equal(pidRecorded.kind, "live");
+	});
+
+	it("does not adopt a slot that is idle, absent or unreadable", async () => {
+		for (const probe of [{ kind: "idle" }, { kind: "missing" }, { kind: "failed", reason: "the broker record for that slot could not be read" }] as const) {
+			const verdict = await verdictOf(ports(probe), reconcileRequest(UNIDENTIFIED));
+			assert.equal(verdict.kind, "free", probe.kind);
+			assert.deepEqual(verdict.kind === "free" ? verdict.evidence : ["unexpected"], [], "an attempt never has evidence of absence");
+		}
+	});
+});
+
+/**
  * What the reconciler answers for a launch attempt that recorded no child identity,
  * and what an explicit release may use that answer for.
  *
@@ -919,7 +964,7 @@ describe("reconciliation of a legacy row", () => {
 				brokerSlot: () => SLOT,
 				probeBrokerSlot: async (slot, pid) => {
 					probed.push({ slot, pid });
-					return { kind: "live", pid: CHILD_PID };
+					return { kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-omp" };
 				},
 			}),
 			reconcileRequest(LEGACY_HOST),
@@ -959,7 +1004,16 @@ describe("reconciliation of a legacy row", () => {
 		assert.deepEqual(pidless.kind === "free" ? pidless.evidence : ["unexpected"], []);
 	});
 
-
+	it("keeps reporting a pid-recorded legacy row as live even when the slot's child could be adopted", async () => {
+		const verdict = await verdictOf(
+			reconcilePorts({
+				brokerSlot: () => SLOT,
+				probeBrokerSlot: async () => ({ kind: "live", pid: CHILD_PID, pin: brokerPin(), hostKind: "managed-rpc" }),
+			}),
+			reconcileRequest(LEGACY_HOST),
+		);
+		assert.equal(verdict.kind, "live");
+	});
 });
 
 /**
