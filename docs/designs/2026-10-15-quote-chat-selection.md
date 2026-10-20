@@ -47,6 +47,8 @@ Answers to the seven open questions of the first draft, and the choice made afte
 
 11. **With nothing selected, the quote key in a diff editor quotes the whole hunk under the caret (maintainer, 2026-10-19).** In an inline diff, and on either side of a side-by-side diff, with the caret on a changed line `Alt+Q` (and the editor menu entry) quotes the hunk: a `diff` block with its unchanged context, under a location that names both sides. With no change under the caret the caret-line reference stays; a selection quotes the selection. The *Amendment (2026-10-19)* gives the format, the diff and what differs from VS Code's own hunks.
 
+12. **The quote key works in VS Code's Markdown preview, with the document's name (maintainer, 2026-10-20).** `Alt+Q` (and **Quote Selection to Session**) in the built-in Markdown preview quotes the selected *rendered* text, not the source, under the document's path (no line numbers). The *Amendment (2026-10-20)* gives how the selection is read and the document identified.
+
 ## Current State
 
 All references are to this repository at the time of writing; claims not read in code are marked `[INFERENCE]`.
@@ -507,6 +509,34 @@ The blocks are the minimal line edit script of the two texts. VS Code's diff edi
 ### Tests
 
 `line-diff.test.ts` (the blocks of 3 000 random small pairs against the longest common subsequence: valid and minimal; the bounds; the hunk text and its context at the ends and between blocks; the hunk under a line from either side; line ends), `quote-location.test.ts` (the hunk grammar), `editor-context.test.ts` (`composeHunkQuote`: both sides, a renamed file, a staged side, a side left out, the refusals and the bound), `markdown.test.ts` (a hunk location is plain code; failing without the rule) and, in a hidden window, `43-diff-quote-selection.spec.ts`: with nothing selected, `Alt+Q` on both sides of a Source Control diff of a changed file and of a staged file, of a commit's changes in the multi-file diff editor and of two plain files; the editor menu on both sides of the changed file's diff and on the modified side in the inline view; in the inline view the caret on the added line of a change that replaced one line by three gives the whole hunk, removed line included; and the caret-line reference when the caret is on an unchanged line, in both views. Not driven: a renamed file (only `composeHunkQuote` covers it), a side of a block that only removes lines, a pair beyond the bounds of the diff, and the menu in the staged, commit and plain-file diffs.
+
+## Amendment (2026-10-20): the Markdown preview (decision 12)
+
+All of this was measured on VS Code 1.142.0 in a hidden test window (`scripts/test-vscode.ps1`, driven over CDP).
+
+### Getting the selection out of the preview
+
+- The preview is the Markdown extension's webview. Its CSP is `connect-src ${cspSource}` only, so a `markdown.previewScripts` script cannot reach Desk's loopback servers, and the extension reads the preview's messages itself (`didClick`, `revealLine`, `openLink`, ...); hooking either would depend on that extension's internals, so neither is used.
+- What is supported is what a user does: **Copy**. `vscode.commands.executeCommand("editor.action.clipboardCopyAction")` while the preview has the focus copies the webview's selection (the workbench copies from the focused webview). The host reads `vscode.env.clipboard`, then puts the previous **text** back (`src/wiring/preview-selection.ts`).
+- A marker string is written to the clipboard before the copy: a clipboard that still holds the marker after 600 ms means the preview selected nothing (an empty selection), so an empty selection is told apart from a copy that left the old text.
+- **Limit, documented rather than hidden:** only text is saved and restored. A clipboard that held an image or files (no text) is replaced by an empty string, and rich formats of a text copy (HTML, RTF) are lost. `vscode.env.clipboard` offers no more than text. The clipboard is touched only by the key press, for about the time a copy takes, and only for a preview.
+- Measured: with `USER-CLIP-TEXT` on the clipboard, a selection in the preview quoted `quote. Second paragraph here.` and the clipboard still read `USER-CLIP-TEXT` afterwards; the same for an empty selection.
+
+### Identifying the document
+
+- The active tab of the active group is a `TabInputWebview` whose `viewType` is `mainThreadWebview-markdown.preview`; the context key `activeWebviewPanelId` is `markdown.preview` while it is focused. Both measured. A preview to the side and a locked preview are the same view type.
+- The tab label is `[Preview] chat.md` (a locked preview: `Preview chat.md`; the words are localised), so only its ending, a space and the file's name, is relied on.
+- The file is the one **open** Markdown document whose name ends the label; failing that, the one Markdown file of the **workspace** with that name (a locked preview of a closed document, measured with `README.md`). Two different files with that name (two `chat.md` open, or in the workspace) cannot be told apart, because the preview names no source path: the quote is then headed by the **name alone** (`chat.md`), never a guess. Measured with `docs/guide/chat.md` and `notes/chat.md` both open.
+
+### Format and target
+
+- The quote is the rendered text as quote lines, under the path as inline code, written by the quote's own path rule (relative to the target session's folder when inside it, else absolute): `> \`docs/guide/chat.md\``, `>`, `> quote. Second paragraph here.` Measured in the draft of a Chat.
+- The target rule is the quote's (the visible Chat, else the picker, **New session** starts a Chat; no Chat and no folder: the existing warning).
+- Nothing selected: the notice "Select some text in the preview first." and no picker, no quote (measured).
+
+### Key
+
+`Alt+Q` runs `ompDesk.quoteEditorSelection` under `activeWebviewPanelId == 'markdown.preview'`; no other `when` of the key widened. The command is always in the Command Palette and checks the active tab itself, so it also works from the palette while the preview is active. Tests: `src/wiring/preview-quote.test.ts` (label matching, location, refusals), the lifecycle harness (`extension-lifecycle.test.ts`: the copy command, the clipboard restored, the empty notice, no session, a foreign webview), `contributions.test.ts` (the binding).
 
 ## Related Decisions
 

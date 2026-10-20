@@ -472,6 +472,7 @@ describe("commands", () => {
 		assert.deepEqual(bound.map(binding => [binding.command, binding.when]), [
 			["ompDesk.quoteChatSelection", chatOnly],
 			["ompDesk.quoteEditorSelection", "editorTextFocus"],
+			["ompDesk.quoteEditorSelection", "activeWebviewPanelId == 'markdown.preview'"],
 		]);
 		assert.equal(declared.get("ompDesk.quoteEditorSelection")?.title, "Quote Selection to Session");
 		assert.equal((declared.get("ompDesk.quoteEditorSelection") as { enablement?: string } | undefined)?.enablement, undefined, "the command also works with nothing selected");

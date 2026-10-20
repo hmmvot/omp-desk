@@ -83,6 +83,9 @@ export class Range {
 export const ConfigurationTarget = { Global: 1 };
 export const workspace = {
   configurationValues: {},
+  textDocuments: [],
+  foundFiles: [],
+  findFiles: async () => workspace.foundFiles,
   configurationWrites: [],
   getConfiguration(section) { return {
     get(key, fallback) { return workspace.configurationValues[section + '.' + key] ?? fallback; },
@@ -92,7 +95,7 @@ export const workspace = {
     }
   }; },
 };
-export const env = { opened: [], openExternal: async uri => { env.opened.push(String(uri)); return true; }, clipboard: { writes: [], writeText: async text => { env.clipboard.writes.push(text); } } };
+export const env = { opened: [], openExternal: async uri => { env.opened.push(String(uri)); return true; }, clipboard: { text: '', writes: [], readText: async () => env.clipboard.text, writeText: async text => { env.clipboard.text = text; env.clipboard.writes.push(text); } } };
 export const version = 'test';
 export const StatusBarAlignment = { Left: 1, Right: 2 };
 export const FileType = { Directory: 2 };
@@ -236,6 +239,11 @@ export const harness = {
   },
   hostGeneration: () => fixtureWindow().bridgeHost.hostGeneration,
   clipboardWrites: () => fixtureVscode.env.clipboard.writes,
+  quotePreviewSelection: index => quoteEditorSelectionToSession(fixtureContext, index),
+  setActiveTab: tab => { fixtureVscode.window.tabGroups.activeTabGroup.activeTab = tab; },
+  webviewTabInput: viewType => { const input = new fixtureVscode.TabInputWebview(); input.viewType = viewType; return input; },
+  clipboardText: value => { if (value !== undefined) fixtureVscode.env.clipboard.text = value; return fixtureVscode.env.clipboard.text; },
+  quickPickCount: () => fixtureVscode.window.quickPicks.length,
   infos: () => fixtureVscode.window.infos,
   desktopPayload: capturedDesktopXml,
   desktopPayloads: capturedDesktopXmls,
@@ -487,6 +495,11 @@ interface Harness {
   hostGeneration(): Uint8Array;
   postPanelAction(action: "send-prompt" | "stop-turn" | "focus-composer"): void;
   clipboardWrites(): readonly string[];
+  quotePreviewSelection(index: SessionIndex): Promise<void>;
+  setActiveTab(tab: unknown): void;
+  webviewTabInput(viewType: string): unknown;
+  clipboardText(value?: string): string;
+  quickPickCount(): number;
   revealDesktopNotification(...args: unknown[]): Promise<void>;
   revealActiveSession(index: SessionIndex): Promise<void>;
   releaseSelectionFromOtherWindow(index: SessionIndex): void;
@@ -6047,5 +6060,51 @@ describe("Resume from a stopped Chat", () => {
       assert.equal(shown.readOnlyReason, reason, "the page names why Resume did not start the session");
       assert.equal(f.rendered.writable, false);
     } finally { f.host.dispose(); harness.forgetTurnActivity(f.index, TAB); }
+  });
+});
+
+describe("Quote Selection to Session in the Markdown preview", () => {
+  const PREVIEW = "mainThreadWebview-markdown.preview";
+  const showPreview = (label: string, viewType = PREVIEW) => harness.setActiveTab({ label, input: harness.webviewTabInput(viewType) });
+  const copyingCommand = (selected: string) => harness.commandHandler(async (...args: unknown[]) => {
+    if (args[0] === "editor.action.clipboardCopyAction" && selected !== "") harness.clipboardText(selected);
+    return undefined;
+  });
+
+  it("copies the rendered selection through VS Code's Copy command, puts the user's clipboard text back, and with no session says so and quotes nothing", async () => {
+    const index = { ...indexFixture(runtime(893)), list: () => [] } as unknown as SessionIndex;
+    harness.reset(index, null);
+    harness.clipboardText("the user's own text");
+    const warnings: string[] = [];
+    harness.warning(async message => { warnings.push(String(message)); return undefined; });
+    showPreview("Preview chat.md");
+    const calls = copyingCommand("Press Alt+Q.");
+    await harness.quotePreviewSelection(index);
+    assert.deepEqual(calls.map(call => call[0]), ["editor.action.clipboardCopyAction"]);
+    assert.equal(harness.clipboardWrites().length, 2, "a marker goes in, the user's text comes back");
+    assert.equal(harness.clipboardText(), "the user's own text");
+    assert.match(warnings.join("\n"), /No Chat session is open in this window/);
+  });
+
+  it("an empty selection is a short notice, restores the clipboard and reaches no session picker", async () => {
+    const index = indexFixture(runtime(894)) as unknown as SessionIndex;
+    harness.reset(index, null);
+    harness.clipboardText("kept");
+    const infos = harness.infos().length;
+    showPreview("Preview chat.md");
+    copyingCommand("");
+    await harness.quotePreviewSelection(index);
+    assert.equal(harness.clipboardText(), "kept");
+    assert.deepEqual(harness.infos().slice(infos), ["OMP Desk: Select some text in the preview first."]);
+    assert.equal(harness.quickPickCount(), 0);
+  });
+
+  it("a tab that is not the Markdown preview is not treated as one", async () => {
+    const index = indexFixture(runtime(895)) as unknown as SessionIndex;
+    harness.reset(index, null);
+    showPreview("Preview chat.md", "mainThreadWebview-someone.else");
+    const calls = copyingCommand("text");
+    await harness.quotePreviewSelection(index);
+    assert.deepEqual(calls.map(call => call[0]), [], "the editor path runs: no editor, no copy");
   });
 });

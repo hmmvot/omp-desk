@@ -1672,6 +1672,11 @@
         "when": "editorTextFocus"
       },
       {
+        "command": "ompDesk.quoteEditorSelection",
+        "key": "alt+q",
+        "when": "activeWebviewPanelId == 'markdown.preview'"
+      },
+      {
         "command": "ompDesk.searchPromptHistory",
         "key": "ctrl+alt+y",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"

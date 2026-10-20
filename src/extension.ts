@@ -148,6 +148,9 @@ import {
 import type { EditorQuoteSource, HunkQuoteSource, LineReferenceSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
 import { quoteHunkOf } from "./wiring/quote-hunk";
 import { quoteSourceOf } from "./wiring/quote-source";
+import { composePreviewQuote } from "./wiring/preview-quote";
+import type { PreviewDocument } from "./wiring/preview-quote";
+import { activePreviewLabel, copyPreviewSelection, previewDocumentOf } from "./wiring/preview-selection";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
@@ -6462,13 +6465,15 @@ type InsertionRequest =
   | { readonly kind: "references"; readonly sources: readonly ReferenceSource[] }
   | { readonly kind: "quote"; readonly source: EditorQuoteSource }
   | { readonly kind: "hunk"; readonly source: HunkQuoteSource }
-  | { readonly kind: "line"; readonly source: LineReferenceSource };
+  | { readonly kind: "line"; readonly source: LineReferenceSource }
+  | { readonly kind: "preview"; readonly document: PreviewDocument; readonly text: string };
 
 /** How the status bar and the warnings word what went where. */
 const SEND_WORDS = {
   references: { past: "added", Past: "Added", to: "to" },
   quote: { past: "quoted", Past: "Quoted", to: "into" },
   hunk: { past: "quoted", Past: "Quoted", to: "into" },
+  preview: { past: "quoted", Past: "Quoted", to: "into" },
   line: { past: "referenced", Past: "Referenced", to: "in" },
 } as const;
 
@@ -6486,6 +6491,10 @@ function composeRequest(request: InsertionRequest, cwd: string):
   }
   if (request.kind === "hunk") {
     const composed = composeHunkQuote(request.source, cwd);
+    return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
+  }
+  if (request.kind === "preview") {
+    const composed = composePreviewQuote(request.document, request.text, cwd);
     return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
   }
   const composed = composeEditorQuotes(request.source, cwd);
@@ -6508,6 +6517,11 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
  * In a diff editor, with nothing selected and the caret on a changed line, the whole hunk is quoted instead (decision 11, `wiring/quote-hunk.ts`).
  */
 async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
+  const previewLabel = activePreviewLabel();
+  if (previewLabel !== null) {
+    await quotePreviewSelectionToSession(context, index, previewLabel);
+    return;
+  }
   const editor = vscode.window.activeTextEditor;
   if (editor === undefined) {
     showWarning("Open a text editor to quote from or to point at a line.");
@@ -6549,6 +6563,27 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
     return;
   }
   await sendToSession(context, index, { kind: "quote", source }, source.fsPath, document.isDirty);
+}
+
+/**
+ * `Alt+Q` while VS Code's Markdown preview has the focus: the selected rendered text goes into the Chat draft under the path of the
+ * document the preview shows (docs/designs/2026-10-15-quote-chat-selection.md, decision 12). Nothing selected is a notice and
+ * nothing is quoted; the session is chosen as for any quote.
+ */
+async function quotePreviewSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex, label: string): Promise<void> {
+  const text = await copyPreviewSelection();
+  if (text.trim().length === 0) {
+    showInfo("Select some text in the preview first.");
+    return;
+  }
+  const document = await previewDocumentOf(label);
+  log.debug(`preview quote: ${document.fsPath === null ? "document not identified" : "document identified"}`);
+  const early = composePreviewQuote(document, text, "");
+  if (!early.ok) {
+    showWarning(`${early.reason} Nothing was quoted.`);
+    return;
+  }
+  await sendToSession(context, index, { kind: "preview", document, text }, document.fsPath, false);
 }
 
 async function sendToSession(context: vscode.ExtensionContext, index: SessionIndex, request: InsertionRequest, firstFsPath: string | null, unsaved: boolean): Promise<void> {
@@ -6612,7 +6647,7 @@ async function sendToSession(context: vscode.ExtensionContext, index: SessionInd
     });
     return;
   }
-  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : request.kind === "quote" ? `${request.source.selections.length} editor quote(s)` : request.kind === "hunk" ? "a diff hunk" : "a line reference"}`);
+  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : request.kind === "quote" ? `${request.source.selections.length} editor quote(s)` : request.kind === "hunk" ? "a diff hunk" : request.kind === "preview" ? "a preview quote" : "a line reference"}`);
   const notes: string[] = [];
   if (unsaved) notes.push(chatOnly ? "the file has unsaved changes: the location is the saved file's" : "unsaved changes are not included");
   if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);
