@@ -55,11 +55,17 @@ export class TranscriptScrollController {
 			const written = this.#written !== null && Math.abs(root.scrollTop - this.#written) < 1;
 			this.#written = null;
 			const intent = this.#intent;
-			if (!written && intent && (intent.dragging || performance.now() <= intent.until) && Math.abs(root.scrollTop - intent.top) > 0.5) {
+			const moved = Math.abs(root.scrollTop - (intent ? intent.top : this.#observedTop)) > 0.5;
+			if (!written && intent && (intent.dragging || performance.now() <= intent.until) && moved) {
 				this.#setMode(!intent.upward && root.scrollHeight - root.clientHeight - root.scrollTop <= BOTTOM_PROXIMITY ? "following" : "detached");
 				this.#explicitFollowing = this.mode === "following";
 				intent.top = root.scrollTop;
 				if (this.mode === "detached") this.#capture(); else this.#anchor = null;
+			} else if (!written && moved && this.mode === "detached" && !this.#pageStart) {
+				// Native movement the intent window no longer covers (a compositor scroll delivered after a stalled main thread, a long
+				// animation, a browser scroll-into-view): a detached reader is where it left them, so the next layout restores this position,
+				// never the one captured before it. Our own writes are skipped above, and a scroll alone still never detaches a following reader.
+				this.#capture();
 			}
 			this.#observedTop = root.scrollTop;
 			this.bindings.viewport();
