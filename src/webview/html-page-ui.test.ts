@@ -446,6 +446,24 @@ setTimeout(()=>{report('done','1');try{location.href='${origin}/canary/navigate'
 			await ui.until("document.querySelector('iframe.omp-htmlpage-frame')");
 		});
 
+		await t.test("a streaming fence of hundreds of lines is capped to the tail, expands to the full source, and becomes a page on close", async () => {
+			await open("streaming-cap");
+			const lines = Array.from({ length: 300 }, (_, index) => `<p>line ${index}</p>`).join("\n");
+			await ui.evaluate(show([assistant(fence(lines, false))]));
+			await ui.until("document.querySelector('.omp-htmlpage-streaming') && document.querySelector('.omp-htmlpage-more')");
+			const box = (): Promise<{ height: number; atBottom: boolean; full: number }> => ui.evaluate("(()=>{const b=document.querySelector('.omp-htmlpage-streaming');return{height:b.getBoundingClientRect().height,atBottom:b.scrollTop+b.clientHeight>=b.scrollHeight-4,full:b.scrollHeight}})()");
+			const capped = await box();
+			assert.ok(capped.height <= 800 && capped.full > 800, `capped at 800 (${capped.height}, content ${capped.full})`);
+			assert.equal(capped.atBottom, true, "a streaming block follows its tail");
+			assert.equal(await frames(), 0);
+			await ui.evaluate("document.querySelector('.omp-htmlpage-more').click()");
+			await ui.until("document.querySelector('.omp-htmlpage-streaming').getBoundingClientRect().height>800");
+			assert.equal((await ui.evaluate<string>("document.querySelector('.omp-htmlpage-more').textContent")), "Show less");
+			await ui.evaluate(reply(lines));
+			await ui.until("document.querySelector('iframe.omp-htmlpage-frame')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-streaming')"), null, "a closed page replaces the capped source");
+		});
+
 		await t.test("a page cannot take the keyboard from the composer by itself, but the user can click into it", async () => {
 			await open("focus");
 			await ui.evaluate(reply(`<input id="i" autofocus><script>setTimeout(()=>{const i=document.createElement('input');document.body.append(i);i.focus();window.focus()},300);setInterval(()=>document.getElementById('i').focus(),400)</script>`), false);

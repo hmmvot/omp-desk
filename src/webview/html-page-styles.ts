@@ -9,6 +9,7 @@ export const HTML_PAGE_STYLES = `
 .omp-htmlpage-copy { margin-left: auto; }
 .omp-htmlpage-frame { display: block; width: 100%; border: 0; }
 .omp-htmlpage-source .omp-code-block pre { margin: 0; border: 0; border-radius: 0; }
+.omp-htmlpage-streaming { overflow-y: auto; }
 .omp-htmlpage-more { display: block; width: 100%; padding: 4px 8px; border: 0; border-top: 1px solid var(--omp-border); background: var(--vscode-textCodeBlock-background); color: var(--omp-muted); font: inherit; font-size: 11px; cursor: pointer; }
 .omp-htmlpage-more:hover { color: var(--vscode-foreground); }
 .omp-htmlpage-more:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }

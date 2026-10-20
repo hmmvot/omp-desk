@@ -13,7 +13,7 @@
  * height up to the cap and the page scrolls inside it; expanded it is the whole content height, with no inner scroll, and follows the content.
  * The block's size change reaches the transcript through its rows' `ResizeObserver`, like any other row that grows.
  */
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HTML_PAGE_INITIAL_HEIGHT, HTML_PAGE_MAX_HEIGHT, htmlPageMessage, htmlPageThemeMessage, isHtmlPageReady, parseHtmlPageSize, prepareHtmlPage } from "../lib/html-page.ts";
 import { HTML_PAGE_FRAME_CLASS, holdHtmlPageFocusGuard } from "../lib/html-page-focus.ts";
 import { htmlPageFrameUrl, useHtmlPageTheme } from "../lib/html-page-theme.ts";
@@ -59,11 +59,39 @@ function PageBlock({ source, closed, leaf }: { source: string; closed: boolean; 
 	return <CodeWithNote source={source} closed={closed} reason={reason} leaf={leaf} />;
 }
 
-/** The code block, and one muted line saying why it is not a page, when there is a reason. */
+/**
+ * The code block, and one muted line saying why it is not a page, when there is a reason. The source is capped at the page's collapsed height:
+ * a streaming fence (or a closed one that did not become a page) of hundreds of lines would otherwise push the transcript down. While it streams the
+ * capped block follows its tail unless the reader scrolled up inside it; Show full source lifts the cap.
+ */
 function CodeWithNote({ source, closed, reason, leaf }: { source: string; closed: boolean; reason: string | null; leaf?: number }) {
+	const box = useRef<HTMLDivElement>(null);
+	const stick = useRef(true);
+	const [long, setLong] = useState(false);
+	const [full, setFull] = useState(false);
+	useLayoutEffect(() => {
+		const element = box.current;
+		if (element === null) return;
+		if (element.scrollHeight > HTML_PAGE_MAX_HEIGHT + 1) setLong(true);
+		if (!full && stick.current) element.scrollTop = element.scrollHeight;
+	}, [source, full]);
+	const capped = long && !full;
 	return (
 		<div className="omp-mermaid">
-			<CodeBlock language="html" source={source} closed={closed} leaf={leaf} />
+			<div
+				ref={box}
+				className="omp-htmlpage-streaming"
+				data-capped={capped ? "" : undefined}
+				style={full ? undefined : { maxHeight: HTML_PAGE_MAX_HEIGHT }}
+				onScroll={event => { const el = event.currentTarget; stick.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 4; }}
+			>
+				<CodeBlock language="html" source={source} closed={closed} leaf={leaf} />
+			</div>
+			{long && (
+				<button type="button" className="omp-htmlpage-more" aria-expanded={full} onClick={() => setFull(value => !value)}>
+					{full ? "Show less" : "Show full source"}
+				</button>
+			)}
 			{reason !== null && (
 				<div className="omp-mermaid-note">
 					<span>Page not shown: {reason.length > NOTE_CHARS ? `${reason.slice(0, NOTE_CHARS - 1)}…` : reason}</span>
