@@ -1,4 +1,4 @@
-import { embeddedSkillInvokedAt, SKILL_PREFIX } from "../../chat/prompt-routing.ts";
+import { embeddedSkillInvokedAt } from "../../chat/prompt-routing.ts";
 import type { ChatSlashCommand } from "../../chat/model.ts";
 import { classifySlashInput } from "../../protocol/rpc.ts";
 
@@ -23,9 +23,6 @@ const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "btw", source: "OMP Desk", description: "Ask a side question that stays out of the conversation, or browse earlier ones", inputHint: "[question]" },
 ];
 
-/** `skill:`, the start of every skill's catalogue name. */
-const SKILL_NAME_PREFIX = SKILL_PREFIX.slice(1);
-
 /** What `slashQueryAt` found: the token `[start, end)` under the caret, the text typed in it up to the caret (lower case, without the `/`), and whether only skills are offered (a token in the middle of the text). */
 export interface SlashQuery {
 	readonly query: string;
@@ -34,14 +31,18 @@ export interface SlashQuery {
 	readonly skillsOnly: boolean;
 }
 
+/** The name part of a mid-text token (after its `/`): an optional `skill:`, then a name of `[\w-]` with at most one `/` (a skill namespace, `agents/jira-cli`). A `.`, a `:` elsewhere, `//` or a second `/` is a path or a URL. */
+const EMBEDDED_TOKEN_BODY = /^(?:skill:)?(?:[\w-]+(?:\/[\w-]*)?)?$/i;
+
 /**
  * The `/` token the caret is in, if completion owns it. The leading command token lists every command and skill. A token in the middle of
  * the draft lists skills only, because OMP invokes nothing else there (docs/designs/2026-10-18-composer-command-skill-chips.md,
- * amendment 2026-10-20): it must start right after whitespace or a line break, consist of `[\w:-]` only (a path, a URL or `a/b` is not one),
- * have at least a `/s` typed that is a prefix of `/skill:` or continues it (a lone `/` is prose), and be where OMP would invoke it
- * (`embeddedSkillInvokedAt`, the gate of the chip scan: not after a leading command or a local-execution sigil, not after an earlier skill token).
+ * amendment 2026-10-20): it must start right after whitespace or a line break, have the shape of a skill name (`EMBEDDED_TOKEN_BODY`: no path,
+ * no URL), have something typed after the `/`, match at least one skill of `commands` as the leading list matches (name or alias contains the
+ * query, so `/ask-` finds `skill:ask-matt`), and be where OMP would invoke it (`embeddedSkillInvokedAt`, the gate of the chip scan: not after
+ * a leading command or a local-execution sigil, not after an earlier skill token). When no skill matches, nothing opens.
  */
-export function slashQueryAt(text: string, caret: number): SlashQuery | null {
+export function slashQueryAt(text: string, caret: number, commands: readonly ChatSlashCommand[]): SlashQuery | null {
  if (!Number.isSafeInteger(caret) || caret < 1 || caret > text.length) return null;
  const leading = /^\/([\w:-]*)(?=\s|$)/.exec(text);
  if (leading) {
@@ -53,10 +54,10 @@ export function slashQueryAt(text: string, caret: number): SlashQuery | null {
  if (start === caret || text[start] !== "/") return null;
  let end = caret;
  while (end < text.length && !/\s/.test(text[end]!)) end++;
- if (end - start > 257 || !/^\/[\w:-]*$/.test(text.slice(start, end))) return null;
+ if (end - start > 257 || !EMBEDDED_TOKEN_BODY.test(text.slice(start + 1, end))) return null;
  const query = text.slice(start + 1, caret).toLowerCase();
- if (query.length === 0 || !(SKILL_NAME_PREFIX.startsWith(query) || query.startsWith(SKILL_NAME_PREFIX))) return null;
- return embeddedSkillInvokedAt(text, start) ? { query, start, end, skillsOnly: true } : null;
+ if (query.length === 0 || !embeddedSkillInvokedAt(text, start) || slashSuggestions(commands, query, true).length === 0) return null;
+ return { query, start, end, skillsOnly: true };
 }
 
 /** Every command Chat can act on, before any query: Desk's own commands, then what the session advertises (denied owners and their aliases never appear). */

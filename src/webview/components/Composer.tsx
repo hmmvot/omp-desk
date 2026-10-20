@@ -523,7 +523,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 */
 	const completionsEnabled = canPrompt && !captureLocked && request === null && caretBlock === null && !caretInQuote;
 	const completionKey = `${text}\0${caret}`;
-	const slash = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashQueryAt(text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, text, caret]);
+	const slash = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashQueryAt(text, caret, snapshot.commands) : null, [completionsEnabled, dismissedCompletion, completionKey, snapshot.commands, text, caret]);
 	const argument = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashArgumentAt(snapshot.commands, text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, snapshot.commands, text, caret]);
 	const mention = useMemo(
 		() => completionsEnabled && slash === null && argument === null && dismissedCompletion !== completionKey ? mentionQueryAt(text, caret) : null,
@@ -646,7 +646,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const acceptSuggestion = useCallback(
 		(selected: { kind: "file" | "slash" | "argument"; name: string }): void => {
 			if (captureRef.current !== null || !completionsEnabled || composingRef.current || selected.name.length === 0) return;
-			const slashToken = selected.kind === "slash" ? slashQueryAt(textRef.current, caretRef.current) : null;
+			const slashToken = selected.kind === "slash" ? slashQueryAt(textRef.current, caretRef.current, snapshot.commands) : null;
 			const argumentToken = selected.kind === "argument" ? slashArgumentAt(snapshot.commands, textRef.current, caretRef.current) : null;
 			const token = selected.kind === "file" ? mentionQueryAt(textRef.current, caretRef.current) : null;
 			if (slashToken === null && argumentToken === null && token === null) return;

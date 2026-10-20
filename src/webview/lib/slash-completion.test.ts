@@ -3,36 +3,44 @@ import { test } from "node:test";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, parseArgumentHint, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "./slash-completion.ts";
 
  test("a leading command token lists every command and skill; paths, prose and arguments are not completion-owned", () => {
- assert.deepEqual(slashQueryAt("/skill:inspect args", 7), { query: "skill:", start: 0, end: 14, skillsOnly: false });
- assert.deepEqual(slashQueryAt("/re", 3), { query: "re", start: 0, end: 3, skillsOnly: false });
- for (const [text, caret] of [["/read args", 10], ["/usr/bin/tool", 5], ["@src/file.ts", 5], [" /read", 6], ["/", 0]] as const) assert.equal(slashQueryAt(text, caret), null, JSON.stringify([text, caret]));
+ assert.deepEqual(slashQueryAt("/skill:inspect args", 7, []), { query: "skill:", start: 0, end: 14, skillsOnly: false });
+ assert.deepEqual(slashQueryAt("/re", 3, []), { query: "re", start: 0, end: 3, skillsOnly: false });
+ for (const [text, caret] of [["/read args", 10], ["/usr/bin/tool", 5], ["@src/file.ts", 5], [" /read", 6], ["/", 0]] as const) assert.equal(slashQueryAt(text, caret, []), null, JSON.stringify([text, caret]));
  });
 
- test("a `/` token in the middle of the draft lists skills only, once `/s` of `/skill:` is typed after whitespace or a line start", () => {
- const at = (text: string, caret = text.length) => slashQueryAt(text, caret);
- assert.deepEqual(at("fix this /s"), { query: "s", start: 9, end: 11, skillsOnly: true });
- assert.deepEqual(at("fix this /sk"), { query: "sk", start: 9, end: 12, skillsOnly: true });
- assert.deepEqual(at("fix this /skill:"), { query: "skill:", start: 9, end: 16, skillsOnly: true });
- assert.deepEqual(at("fix this /Skill:Rev"), { query: "skill:rev", start: 9, end: 19, skillsOnly: true }, "the query is lower case, as the leading one");
- assert.deepEqual(at("fix this /skill:review"), { query: "skill:review", start: 9, end: 22, skillsOnly: true }, "an exact name keeps the list open");
- assert.deepEqual(at("one\n/sk later", 7), { query: "sk", start: 4, end: 7, skillsOnly: true }, "a line start counts, and the token ends at the whitespace after it");
- assert.deepEqual(at("a\t/sk"), { query: "sk", start: 2, end: 5, skillsOnly: true }, "a tab counts");
- assert.deepEqual(at("fix /skx later", 7), { query: "sk", start: 4, end: 8, skillsOnly: true }, "the caret in the middle of the token: the query stops at the caret, the splice takes the rest");
- assert.deepEqual(at("a /sk b /skill:other", 5), { query: "sk", start: 2, end: 5, skillsOnly: true }, "a later token does not hide this one");
- for (const text of ["fix this /", "fix this /r", "fix this /rev", "fix this /skillx", "fix this /sk:", "src/app.ts", "fix src/sk", "a/sk", "see http://x/sk", "see https://example.com/skill:x", "fix /usr/sk", "fix /s/k", "fix /sk.ts", "fix /sk/x", "fix @/sk", "fix ./sk", "a //sk"]) {
+ const SKILLS = [{ name: "skill:ask-matt", source: "skill" }, { name: "skill:agents/jira-cli", aliases: ["jira"], source: "skill" }, { name: "skill:review", source: "skill" }, { name: "compact", source: "builtin" }];
+
+ test("a `/` token in the middle of the draft lists the skills that match it, as the leading list does: bare name, `skill:` prefix, namespace, alias", () => {
+ const at = (text: string, caret = text.length) => slashQueryAt(text, caret, SKILLS);
+ const found = (text: string, caret?: number) => { const token = at(text, caret); return token === null ? null : [token.query, token.start, token.end, token.skillsOnly]; };
+ assert.deepEqual(found("text /ask-"), ["ask-", 5, 10, true], "a bare name finds `skill:ask-matt`");
+ assert.deepEqual(found("fix this /s"), ["s", 9, 11, true]);
+ assert.deepEqual(found("fix this /skill:"), ["skill:", 9, 16, true]);
+ assert.deepEqual(found("fix this /Skill:Rev"), ["skill:rev", 9, 19, true], "the query is lower case, as the leading one");
+ assert.deepEqual(found("fix this /skill:review"), ["skill:review", 9, 22, true], "an exact name keeps the list open");
+ assert.deepEqual(found("see /agents/jira"), ["agents/jira", 4, 16, true], "a namespaced bare name");
+ assert.deepEqual(found("see /skill:agents/jira-cli"), ["skill:agents/jira-cli", 4, 26, true], "a namespaced skill name");
+ assert.deepEqual(found("see /jira"), ["jira", 4, 9, true], "an alias");
+ assert.deepEqual(found("one\n/rev later", 8), ["rev", 4, 8, true], "a line start counts, and the token ends at the whitespace after it");
+ assert.deepEqual(found("a\t/ask"), ["ask", 2, 6, true], "a tab counts");
+ assert.deepEqual(found("fix /skx later", 7), ["sk", 4, 8, true], "the caret in the middle of the token: the query stops at the caret, the splice takes the rest");
+ assert.deepEqual(found("a /sk b /skill:other", 5), ["sk", 2, 5, true], "a later token does not hide this one");
+ for (const text of ["fix this /", "fix this /zzz", "fix this /src", "fix /usr", "fix this /skillx", "fix this /sk:", "src/app.ts", "fix src/sk", "a/ask", "see http://x/ask", "see https://example.com/skill:x", "fix /usr/ask", "fix /s/k", "fix /src/app.ts", "fix /ask.ts", "fix /ask/x/y", "fix /ask:x", "fix @/ask", "fix ./ask", "a //ask", "a /a:b"]) {
   assert.equal(at(text), null, JSON.stringify(text));
  }
- assert.equal(at("fix this /sk", 9), null, "a caret before the slash is outside the token");
- assert.equal(at("fix this /sk", 10), null, "a caret right after the slash has nothing typed yet");
+ assert.equal(at("fix this /ask", 9), null, "a caret before the slash is outside the token");
+ assert.equal(at("fix this /ask", 10), null, "a caret right after the slash has nothing typed yet");
+ assert.equal(slashQueryAt("fix this /ask", 13, []), null, "with no skill listed nothing matches, so nothing opens");
+ assert.equal(slashQueryAt("fix this /compact", 17, SKILLS), null, "a command is never offered mid-text, so a name that only a command has opens nothing");
  });
 
  test("a mid-text token opens the list only where OMP would invoke it, by the chip scan's gates", () => {
- for (const text of ["/compact do /sk", "/foo /sk", "/skill:review do /sk", " /compact /sk", "!ls /sk", "$ echo /sk", "$$ echo /sk", "$\n/sk", "a /skill:review /sk", "a /skill:nope /sk", "a /skill:ns/deep b /sk"]) {
-  assert.equal(slashQueryAt(text, text.length), null, JSON.stringify(text));
+ for (const text of ["/compact do /ask", "/foo /ask", "/skill:review do /ask", " /compact /ask", "!ls /ask", "$ echo /ask", "$$ echo /ask", "$\n/ask", "a /skill:review /ask", "a /skill:nope /ask", "a /skill:ns/deep b /ask"]) {
+  assert.equal(slashQueryAt(text, text.length, SKILLS), null, JSON.stringify(text));
  }
- assert.equal(slashQueryAt("${HOME} /sk", 11)?.skillsOnly, true, "`${` is not a sigil");
- assert.equal(slashQueryAt("$HOME /sk", 9)?.skillsOnly, true, "a `$` that is not followed by a blank is not a sigil");
- assert.equal(slashQueryAt("a /skill:ns/deep/x /sk", 22)?.skillsOnly, true, "a token OMP does not read as a skill (two slashes) is no earlier token");
+ assert.equal(slashQueryAt("${HOME} /ask", 12, SKILLS)?.skillsOnly, true, "`${` is not a sigil");
+ assert.equal(slashQueryAt("$HOME /ask", 10, SKILLS)?.skillsOnly, true, "a `$` that is not followed by a blank is not a sigil");
+ assert.equal(slashQueryAt("a /skill:ns/deep/x /ask", 23, SKILLS)?.skillsOnly, true, "a token OMP does not read as a skill (two slashes) is no earlier token");
  });
 
  test("a mid-text list holds skills only, ranked by the same rules: an exact name or alias first, then catalogue order", () => {

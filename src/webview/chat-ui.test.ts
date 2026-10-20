@@ -5741,23 +5741,61 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("typed key by key mid-text, `/s` after whitespace lists the skills only, an exact name is a chip at once, and accepting writes the skill with its space as one chip", async () => {
+		const MID_COMMANDS = "[{name:'compact',source:'builtin'},{name:'skill:ask-matt',source:'skill',description:'Ask Matt'},{name:'skill:agents/jira-cli',source:'skill',aliases:['jira']},{name:'skill:review',source:'skill'},{name:'skill:other',source:'skill'}]";
+		const typeSteps = async (text: string): Promise<{ typed: string; labels: string[]; selected: string[]; chips: string[] }[]> => {
+			const seen = [];
+			for (const char of text) {
+				await ui.call("Input.insertText", { text: char });
+				await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
+				await settleFrames();
+				seen.push({ typed: await draftValue(), ...(await slashRows()), chips: (await commandChips()).map(chip => chip.text) });
+			}
+			return seen;
+		};
+		await t.test("typed key by key mid-text, `/<text>` lists the skills that match it as the leading list does (bare name, namespace, alias), commands never, and accepting writes `/skill:name ` as one chip", async () => {
 			await chipSetup("chips-mid-complete");
-			const seen = await typeNames("fix this /sk");
-			assert.deepEqual(seen.slice(0, 10).map(step => step.labels), Array.from({ length: 10 }, () => []), "no list until `/s` is typed: not at a word, not at the lone `/`");
-			for (const step of seen.slice(10)) assert.deepEqual([step.labels, step.selected, step.chips], [["/skill:review", "/skill:other"], ["/skill:review"], []], `skills only after ${JSON.stringify(step.typed)}: no command is offered mid-text`);
+			await ui.evaluate(`window.ui.push({commands:${MID_COMMANDS}})`);
+			const seen = await typeSteps("text /ask-");
+			assert.deepEqual(seen.slice(0, 6).map(step => step.labels), Array.from({ length: 6 }, () => []), "no list at a word, a space or the lone `/`");
+			assert.deepEqual(seen.slice(6).map(step => [step.labels, step.selected, step.chips]), [
+				[["/skill:ask-matt", "/skill:agents/jira-cli"], ["/skill:ask-matt"], []],
+				[["/skill:ask-matt"], ["/skill:ask-matt"], []],
+				[["/skill:ask-matt"], ["/skill:ask-matt"], []],
+				[["/skill:ask-matt"], ["/skill:ask-matt"], []],
+			], "the bare name `ask-` finds `skill:ask-matt`; no command is offered mid-text");
 			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"]')!==null"), true, "the list is labelled as a list of skills");
 			await press("Tab", "Tab", 9);
-			await waitDraft("window.composer.value()==='fix this /skill:review '");
+			await waitDraft("window.composer.value()==='text /skill:ask-matt '");
 			await waitChips(1);
-			assert.deepEqual([(await commandChips())[0]!.label, (await commandChips())[0]!.spaced, await selection()], ["Skill review", "true", { start: 23, end: 23 }]);
+			assert.deepEqual([(await commandChips())[0]!.label, (await commandChips())[0]!.spaced, await selection()], ["Skill ask-matt", "true", { start: 21, end: 21 }]);
 			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, "no list opens on a chip");
 			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
 			await ctrlZ();
-			await waitDraft("window.composer.value()==='fix this /sk'");
+			await waitDraft("window.composer.value()==='text /ask-'");
 			await waitChips(0);
 			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
-			// Typing the full name makes the bare chip, with the exact row first and selected and the longer names below it.
+			// A namespaced skill by its alias.
+			await setDraft("see /jira");
+			await waitDraft("window.composer.value()==='see /jira'");
+			await setSelection(9, 9);
+			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
+			assert.deepEqual(await slashRows(), { labels: ["/skill:agents/jira-cli"], selected: ["/skill:agents/jira-cli"] });
+			await press("Enter", "Enter", 13);
+			await waitDraft("window.composer.value()==='see /skill:agents/jira-cli '");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Skill agents/jira-cli");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			await setDraft("");
+			await waitChips(0);
+			// A command's name opens nothing mid-text.
+			await setDraft("do /compac");
+			await waitDraft("window.composer.value()==='do /compac'");
+			await setSelection(10, 10);
+			await typeKey("t");
+			await waitDraft("window.composer.value()==='do /compact'");
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, "OMP would not run `/compact` there, so it is not offered");
+			// Typing the full name makes the bare chip, with the exact row first and selected.
 			await setDraft("see /skill:othe");
 			await waitDraft("window.composer.value()==='see /skill:othe'");
 			await setSelection(15, 15);
@@ -5776,25 +5814,23 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("typed mid-text, a path, a URL, a word and a lone slash never open the list, and `/s` closes again at the next character that is not the start of `/skill:`", async () => {
+		await t.test("typed mid-text, a path, a URL and a lone slash never open the list; a token opens it only while a skill matches, and it closes at the character after which none does", async () => {
 			await chipSetup("chips-mid-paths");
-			for (const text of ["see src/app.ts", "a/b and c/skill:x", "http://x.dev/skill:rev", "open /usr/local/bin", "fix this / and that", "mail x.dev/sk"]) {
+			await ui.evaluate(`window.ui.push({commands:${MID_COMMANDS}})`);
+			for (const text of ["see src/app.ts", "a/b and c/skill:x", "http://x.dev/skill:rev", "open /usr/local/bin", "fix this / and that", "mail x.dev/ask", "ping //ask-", "see /src/app.ts", "see /ask/x/y.ts", "see /ask:x"]) {
 				await setDraft("");
 				await waitDraft("window.composer.value()===''");
 				for (const char of text) {
 					await ui.call("Input.insertText", { text: char });
 					await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
 					await settleFrames();
-					assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no list after ${JSON.stringify(await draftValue())}`);
+					const value = await draftValue();
+					// `/s`, `/a`, `/as` and `/ask` match the skills (`skill:…`, `ask-matt`, `agents/…`), so they list them; the next character of a path closes the list.
+					if (!/\s\/(?:s|a|as|ask)$/.test(value)) assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no list after ${JSON.stringify(value)}`);
 				}
 				assert.equal(await draftValue(), text);
+				assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no list at the end`);
 			}
-			await setDraft("open /s");
-			await waitDraft("window.composer.value()==='open /s'");
-			await typeKey("r");
-			await waitDraft("window.composer.value()==='open /sr'");
-			await settleFrames();
-			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"]')"), null, "`/sr` is a path, not a skill");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
