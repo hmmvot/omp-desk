@@ -5257,6 +5257,23 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y follow the physical key on a Russian layout, where the keys type я, я and н", async () => {
+			await reset("surface-undo-ru");
+			await ui.evaluate("window.composer.focus()");
+			for (const character of "abc") await typeKey(character);
+			await ui.call("Input.insertText", { text: "\n" });
+			await ui.wait("window.composer.value()==='abc\\n'");
+			await ctrlKey("я", "KeyZ", 90);
+			await ui.wait("window.composer.value()==='abc'");
+			await ctrlKey("н", "KeyY", 89);
+			await ui.wait("window.composer.value()==='abc\\n'");
+			await ctrlKey("я", "KeyZ", 90);
+			await ui.wait("window.composer.value()==='abc'");
+			await ctrlKey("Я", "KeyZ", 90, 10);
+			await ui.wait("window.composer.value()==='abc\\n'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a send starts a fresh undo stack, while history recall and an accepted completion are one undoable step", async () => {
 			await reset("surface-writes");
 			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});

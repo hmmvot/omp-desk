@@ -31,6 +31,7 @@ import { deletionTarget, type DeleteKind } from "./draft-text.ts";
 import { normalizeLineEndings } from "../../shared/text-file.ts";
 import { deletionRange, repairDamagedReferences, snapSelection, type IsKnownReference } from "./image-references.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
+import { isLetterKey } from "./transcript-find.ts";
 import { quotePasteEdit } from "./quote-edits.ts";
 
 /** How a write from outside the surface treats the undo stack: one more step, or a fresh start. */
@@ -551,13 +552,13 @@ export class DraftSurface {
 		if (event.isComposing || this.#window.open || event.keyCode === 229) return;
 		const modifier = event.ctrlKey || event.metaKey;
 		if (modifier && !event.altKey) {
-			const key = event.key.toLowerCase();
-			if (key === "z" && !event.shiftKey) {
+			const z = isLetterKey(event, "z");
+			if (z && !event.shiftKey) {
 				event.preventDefault();
 				this.undo();
 				return;
 			}
-			if (key === "y" || (key === "z" && event.shiftKey)) {
+			if (isLetterKey(event, "y") || (z && event.shiftKey)) {
 				event.preventDefault();
 				this.redo();
 				return;
