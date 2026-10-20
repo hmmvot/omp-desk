@@ -30,6 +30,19 @@ export function startsWithLocalExecution(trimmed: string): boolean {
 	return Number.isNaN(next) || next === 32 || next === 9 || next === 10 || next === 13;
 }
 
+/** Whether a `/skill:<name>` token in the middle of `trimmed` (the left-trimmed text) can be a skill invocation: the text starts with neither another slash command nor a local-execution sigil. */
+export function embeddedSkillAllowed(trimmed: string): boolean {
+	return !trimmed.startsWith("/") && !startsWithLocalExecution(trimmed);
+}
+
+/**
+ * Whether a skill token that begins at `start` in `text` would be the one OMP invokes: the gate above holds and no earlier token of the
+ * text has the `/skill:<name>` shape (the first such token counts, whether or not the session lists its skill, as `findCommandChips` reads it).
+ */
+export function embeddedSkillInvokedAt(text: string, start: number): boolean {
+	return embeddedSkillAllowed(text.trimStart()) && !SKILL_TOKEN.test(text.slice(0, start));
+}
+
 /** The bare name (without `skill:`) of the skill `text` invokes, or `null` when it carries no skill token. */
 export function invokedSkillName(text: string): string | null {
 	const trimmed = text.trimStart();
@@ -38,7 +51,7 @@ export function invokedSkillName(text: string): string | null {
 		const name = space === -1 ? trimmed.slice(SKILL_PREFIX.length) : trimmed.slice(SKILL_PREFIX.length, space);
 		return name === "" ? null : name;
 	}
-	if (trimmed.startsWith("/") || startsWithLocalExecution(trimmed) || !text.includes(SKILL_PREFIX)) return null;
+	if (!embeddedSkillAllowed(trimmed) || !text.includes(SKILL_PREFIX)) return null;
 	return SKILL_TOKEN.exec(text)?.[2] ?? null;
 }
 

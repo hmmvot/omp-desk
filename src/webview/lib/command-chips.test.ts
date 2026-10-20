@@ -68,9 +68,16 @@ test("a skill is a chip mid-text exactly where OMP would invoke it: the first to
 	assert.deepEqual(spans("a /skill:ns/deep b"), [[2, 17, "skill"]], "a namespaced name has exactly one slash");
 	assert.deepEqual(spans("  /skill:review x"), [[2, 16, "skill"]], "OMP trims the left edge of a leading skill");
 	assert.deepEqual(spans("a /skill:review /skill:other b"), [[2, 16, "skill"]], "only the first token is invoked");
-	for (const text of ["a /skill:nope /skill:review b", "a/skill:review b", "a /skill:review", "a /skill:ns/deep/x b", "a /skill:ns/ b", "see /usr/skill:review b"]) {
-		assert.deepEqual(spans(text), [], `${JSON.stringify(text)}: an unknown first token or no delimiter means no invocation`);
+	for (const text of ["a /skill:nope /skill:review b", "a/skill:review b", "a /skill:ns/deep/x b", "a /skill:ns/ b", "see /usr/skill:review b", "a /skill:revie", "a /skill:review-code"]) {
+		assert.deepEqual(spans(text), [], `${JSON.stringify(text)}: an unknown first token, a prefix of a name or no delimiter means no invocation`);
 	}
+});
+
+test("a skill token that ends the draft is a bare chip at once, like the leading one, so the completion list and the chip agree on an exact name", () => {
+	assert.deepEqual(findCommandChips("a /skill:review", resolve).map(chip => [chip.start, chip.end, chip.kind, chip.bare]), [[2, 15, "skill", true]]);
+	assert.deepEqual(findCommandChips("a\n/skill:review", resolve).map(chip => [chip.start, chip.end, chip.bare]), [[2, 15, true]]);
+	assert.deepEqual(findCommandChips("a /skill:review b", resolve).map(chip => [chip.end, chip.bare]), [[16, false]], "whitespace after it makes it the ordinary chip that takes its space");
+	for (const text of ["/compact a /skill:review", "!ls /skill:review", "a /skill:ns/deep/x", "a /compact"]) assert.deepEqual(spans(text).filter(([, , kind]) => kind === "skill"), [], JSON.stringify(text));
 });
 
 test("a skill token is plain text inside another command, a shell sigil or a local execution", () => {

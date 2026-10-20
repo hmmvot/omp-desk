@@ -2,9 +2,46 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, parseArgumentHint, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "./slash-completion.ts";
 
- test("slash completion owns only a leading command token, not paths, prose, args or embedded skills", () => {
- assert.deepEqual(slashQueryAt("/skill:inspect args", 7), { query: "skill:", end: 14 });
- for (const [text, caret] of [["invoke /skill:inspect", 21], ["/read args", 10], ["/usr/bin/tool", 5], ["@src/file.ts", 5], [" /read", 6]] as const) assert.equal(slashQueryAt(text, caret), null);
+ test("a leading command token lists every command and skill; paths, prose and arguments are not completion-owned", () => {
+ assert.deepEqual(slashQueryAt("/skill:inspect args", 7), { query: "skill:", start: 0, end: 14, skillsOnly: false });
+ assert.deepEqual(slashQueryAt("/re", 3), { query: "re", start: 0, end: 3, skillsOnly: false });
+ for (const [text, caret] of [["/read args", 10], ["/usr/bin/tool", 5], ["@src/file.ts", 5], [" /read", 6], ["/", 0]] as const) assert.equal(slashQueryAt(text, caret), null, JSON.stringify([text, caret]));
+ });
+
+ test("a `/` token in the middle of the draft lists skills only, once `/s` of `/skill:` is typed after whitespace or a line start", () => {
+ const at = (text: string, caret = text.length) => slashQueryAt(text, caret);
+ assert.deepEqual(at("fix this /s"), { query: "s", start: 9, end: 11, skillsOnly: true });
+ assert.deepEqual(at("fix this /sk"), { query: "sk", start: 9, end: 12, skillsOnly: true });
+ assert.deepEqual(at("fix this /skill:"), { query: "skill:", start: 9, end: 16, skillsOnly: true });
+ assert.deepEqual(at("fix this /Skill:Rev"), { query: "skill:rev", start: 9, end: 19, skillsOnly: true }, "the query is lower case, as the leading one");
+ assert.deepEqual(at("fix this /skill:review"), { query: "skill:review", start: 9, end: 22, skillsOnly: true }, "an exact name keeps the list open");
+ assert.deepEqual(at("one\n/sk later", 7), { query: "sk", start: 4, end: 7, skillsOnly: true }, "a line start counts, and the token ends at the whitespace after it");
+ assert.deepEqual(at("a\t/sk"), { query: "sk", start: 2, end: 5, skillsOnly: true }, "a tab counts");
+ assert.deepEqual(at("fix /skx later", 7), { query: "sk", start: 4, end: 8, skillsOnly: true }, "the caret in the middle of the token: the query stops at the caret, the splice takes the rest");
+ assert.deepEqual(at("a /sk b /skill:other", 5), { query: "sk", start: 2, end: 5, skillsOnly: true }, "a later token does not hide this one");
+ for (const text of ["fix this /", "fix this /r", "fix this /rev", "fix this /skillx", "fix this /sk:", "src/app.ts", "fix src/sk", "a/sk", "see http://x/sk", "see https://example.com/skill:x", "fix /usr/sk", "fix /s/k", "fix /sk.ts", "fix /sk/x", "fix @/sk", "fix ./sk", "a //sk"]) {
+  assert.equal(at(text), null, JSON.stringify(text));
+ }
+ assert.equal(at("fix this /sk", 9), null, "a caret before the slash is outside the token");
+ assert.equal(at("fix this /sk", 10), null, "a caret right after the slash has nothing typed yet");
+ });
+
+ test("a mid-text token opens the list only where OMP would invoke it, by the chip scan's gates", () => {
+ for (const text of ["/compact do /sk", "/foo /sk", "/skill:review do /sk", " /compact /sk", "!ls /sk", "$ echo /sk", "$$ echo /sk", "$\n/sk", "a /skill:review /sk", "a /skill:nope /sk", "a /skill:ns/deep b /sk"]) {
+  assert.equal(slashQueryAt(text, text.length), null, JSON.stringify(text));
+ }
+ assert.equal(slashQueryAt("${HOME} /sk", 11)?.skillsOnly, true, "`${` is not a sigil");
+ assert.equal(slashQueryAt("$HOME /sk", 9)?.skillsOnly, true, "a `$` that is not followed by a blank is not a sigil");
+ assert.equal(slashQueryAt("a /skill:ns/deep/x /sk", 22)?.skillsOnly, true, "a token OMP does not read as a skill (two slashes) is no earlier token");
+ });
+
+ test("a mid-text list holds skills only, ranked by the same rules: an exact name or alias first, then catalogue order", () => {
+ const commands = [{ name: "skill:report-card", source: "skill" }, { name: "report", source: "builtin" }, { name: "skill:report", aliases: ["rp"], source: "skill" }, { name: "skill:omp-desk-bug-report", source: "skill" }, { name: "skill:rp-extra", source: "skill" }];
+ assert.deepEqual(slashSuggestions(commands, "skill:report", true).map(command => command.name), ["skill:report", "skill:report-card"]);
+ assert.deepEqual(slashSuggestions(commands, "skill:", true).map(command => command.name), ["skill:report-card", "skill:report", "skill:omp-desk-bug-report", "skill:rp-extra"], "no command, Desk's own included, and the catalogue order");
+ assert.deepEqual(slashSuggestions(commands, "s", true).every(command => command.source === "skill"), true);
+ assert.equal(slashSuggestions(commands, "rp", true)[0]?.name, "skill:report", "an exact alias leads");
+ assert.deepEqual(slashSuggestions(commands, "report", false)[0]?.name, "report", "the leading list still puts commands first");
  });
 
  test("denied catalogue owners hide their aliases while an allowed alias inserts its canonical command without sending", () => {
@@ -12,7 +49,8 @@ import { argumentSuggestions, isRewindCommand, missingRequiredArgument, parseArg
  assert.deepEqual(slashSuggestions(commands, "sandbox"), []);
  assert.deepEqual(slashSuggestions(commands, "relocate"), []);
  const found = slashSuggestions(commands, "rev"); assert.equal(found[0]?.name, "skill:inspect");
- assert.deepEqual(spliceSlash("/rev existing args", 4, found[0]!.name), { text: "/skill:inspect existing args", caret: 15 });
+ assert.deepEqual(spliceSlash("/rev existing args", { start: 0, end: 4 }, found[0]!.name), { text: "/skill:inspect existing args", caret: 15 });
+ assert.deepEqual(spliceSlash("fix /sk later", { start: 4, end: 7 }, found[0]!.name), { text: "fix /skill:inspect later", caret: 19 }, "a mid-text splice takes the token and the one space after it, and writes its own");
  });
 
 test("suggestions rank an exact name first, then every command before any skill, each in catalogue order", () => {
@@ -35,7 +73,7 @@ test("native settings commands remain discoverable when OMP omits its TUI-only h
  assert.equal(slashSuggestions([], "agents")[0]?.name, "agents");
  assert.equal(slashSuggestions([], "model")[0]?.name, "models");
  assert.equal(slashSuggestions([{ name: "model", aliases: ["models"], source: "builtin" }], "model").length, 1);
- assert.deepEqual(spliceSlash("/model p/m", 6, "models"), { text: "/models p/m", caret: 8 });
+ assert.deepEqual(spliceSlash("/model p/m", { start: 0, end: 6 }, "models"), { text: "/models p/m", caret: 8 });
 });
 
 test("argument hints distinguish conventional optional and required inputs without guessing unknown formats", () => {

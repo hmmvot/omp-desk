@@ -17,11 +17,11 @@
  * - the rule is shared with the host (`chat/prompt-routing.ts`), which sends a message that starts with a listed command or invokes a
  *   listed skill as a `prompt` with `streamingBehavior` while a turn runs, as OMP's terminal UI does (a `steer` would queue it as
  *   text), so a chip is drawn the same whether or not a turn is running.
- * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it, except for the
- * leading token, which is a (bare) chip the moment it ends the draft with a name that is exactly a command or a skill.
+ * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it, except for a token
+ * that ends the draft (leading or mid-text), which is a (bare) chip the moment its name is exactly a command or a skill.
  */
 import type { ChatSlashCommand } from "../../chat/model.ts";
-import { SKILL_PREFIX, SKILL_TOKEN, startsWithLocalExecution } from "../../chat/prompt-routing.ts";
+import { embeddedSkillAllowed, SKILL_PREFIX, SKILL_TOKEN } from "../../chat/prompt-routing.ts";
 import { findReferences, type IsKnownReference, type ReferenceSpan } from "./image-references.ts";
 import { slashCatalogue } from "./slash-completion.ts";
 
@@ -83,10 +83,10 @@ export function isBareChip(span: ChipSpan): boolean {
 }
 
 /**
- * The command chip of `text`: at most one, the token OMP acts on. A leading token is a chip as soon as its name is complete: when
+ * The command chip of `text`: at most one, the token OMP acts on. A token is a chip as soon as its name is complete: when
  * whitespace follows it, or when it ends the draft (a `bare` chip, so `/report` is a block the moment it is exactly a command's
- * name and text again once a character is added or removed). A skill in the middle of the text has no completion list, so it still
- * waits for whitespace after it.
+ * name and text again once a character is added or removed). The same holds for a skill in the middle of the text, whose completion
+ * list (`slashQueryAt`, skills only) opens under the same gates (`embeddedSkillInvokedAt`), so the list and the chip agree.
  */
 export function findCommandChips(text: string, resolve: ResolveCommand): CommandSpan[] {
 	const trimmed = text.trimStart();
@@ -98,7 +98,7 @@ export function findCommandChips(text: string, resolve: ResolveCommand): Command
 		// A leading `/skill:<name>` and a leading command are one case: the first token, whatever follows being arguments.
 		start = lead;
 		end = tokenEnd(text, lead);
-	} else if (!startsWithLocalExecution(trimmed) && text.includes(SKILL_PREFIX)) {
+	} else if (embeddedSkillAllowed(trimmed) && text.includes(SKILL_PREFIX)) {
 		const match = SKILL_TOKEN.exec(text);
 		if (match === null) return [];
 		start = match.index + match[1]!.length;
@@ -106,7 +106,7 @@ export function findCommandChips(text: string, resolve: ResolveCommand): Command
 		skillOnly = true;
 	}
 	const bare = end >= text.length;
-	if (start < 0 || (bare && skillOnly) || (!bare && !WHITESPACE.test(text[end]!))) return [];
+	if (start < 0 || (!bare && !WHITESPACE.test(text[end]!))) return [];
 	const kind = resolve(text.slice(start + 1, end));
 	if (kind === null || (skillOnly && kind !== "skill")) return [];
 	return [{ start, end: !bare && text[end] === " " ? end + 1 : end, kind, number: 0, bare }];

@@ -5604,7 +5604,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		// A leading name that is exactly a command or a skill is a block at once; the suggestion list stays open with that entry first and selected.
 		const REPORT_COMMANDS = "[{name:'skill:bug-report',source:'skill',description:'Write a bug report'},{name:'skill:report',source:'skill',description:'Report skill'},{name:'reports',source:'extension',description:'Several reports'},{name:'report',source:'custom',description:'File a report'}]";
-		const slashRows = (): Promise<{ labels: string[]; selected: string[] }> => ui.evaluate(`(()=>{const list=document.querySelector('[aria-label="Slash commands"]');if(!list)return{labels:[],selected:[]};return{labels:[...list.querySelectorAll('[role="option"] strong')].map(n=>n.textContent),selected:[...list.querySelectorAll('[role="option"][aria-selected="true"] strong')].map(n=>n.textContent)}})()`);
+		const slashRows = (): Promise<{ labels: string[]; selected: string[] }> => ui.evaluate(`(()=>{const list=document.querySelector('[aria-label="Slash commands"],[aria-label="Skills"]');if(!list)return{labels:[],selected:[]};return{labels:[...list.querySelectorAll('[role="option"] strong')].map(n=>n.textContent),selected:[...list.querySelectorAll('[role="option"][aria-selected="true"] strong')].map(n=>n.textContent)}})()`);
 		await t.test("an exact name keeps the list open with that command first and selected and is a chip without Space; one more character or one deleted character turns it back into text and completion goes on", async () => {
 			await reset("chips-exact");
 			await ui.evaluate(`window.ui.push({commands:${REPORT_COMMANDS}});window.composer.focus()`);
@@ -5700,7 +5700,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(full.selected, ["/report"]);
 			assert.deepEqual(full.chips, ["/report"]);
 			assert.deepEqual(seen.slice(0, -1).map(step => step.chips), [[], [], [], [], [], []], "no prefix is a chip");
-			assert.deepEqual(seen[2]!.labels, ["/rewind", "/fresh", "/reload-plugins", "/report", "/skill:omp-desk-bug-triage", "/skill:omp-desk-release", "/skill:report-writer"], "at /re every command is listed above every skill");
+			assert.deepEqual(seen[2]!.labels, ["/rewind", "/fresh", "/reload-plugins", "/report", "/skill:omp-desk-release", "/skill:report-writer"], "at /re every command is listed above every skill (a name without `re`, such as the bug-triage skill, is not listed)");
 			await typeKey("s");
 			await waitDraft("window.composer.value()==='/reports'");
 			await settleFrames();
@@ -5732,12 +5732,119 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await waitDraft("window.composer.value()==='a /skill:other b /skill:review c'");
 			await waitChips(1);
 			assert.equal((await commandChips())[0]!.label, "Skill other", "only the first token is invoked");
-			for (const text of ["a /skill:nope b /skill:review c", "/compact do /skill:review x", "!ls /skill:review x", "a /skill:review", "a/skill:review b"]) {
+			for (const text of ["a /skill:nope b /skill:review c", "/compact do /skill:review x", "!ls /skill:review x", "a/skill:review b"]) {
 				await setDraft(text);
 				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
 				await settleFrames();
 				assert.deepEqual((await commandChips()).filter(chip => chip.kind === "skill"), [], `${JSON.stringify(text)}: OMP does not invoke a skill here`);
 			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("typed key by key mid-text, `/s` after whitespace lists the skills only, an exact name is a chip at once, and accepting writes the skill with its space as one chip", async () => {
+			await chipSetup("chips-mid-complete");
+			const seen = await typeNames("fix this /sk");
+			assert.deepEqual(seen.slice(0, 10).map(step => step.labels), Array.from({ length: 10 }, () => []), "no list until `/s` is typed: not at a word, not at the lone `/`");
+			for (const step of seen.slice(10)) assert.deepEqual([step.labels, step.selected, step.chips], [["/skill:review", "/skill:other"], ["/skill:review"], []], `skills only after ${JSON.stringify(step.typed)}: no command is offered mid-text`);
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"]')!==null"), true, "the list is labelled as a list of skills");
+			await press("Tab", "Tab", 9);
+			await waitDraft("window.composer.value()==='fix this /skill:review '");
+			await waitChips(1);
+			assert.deepEqual([(await commandChips())[0]!.label, (await commandChips())[0]!.spaced, await selection()], ["Skill review", "true", { start: 23, end: 23 }]);
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, "no list opens on a chip");
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='fix this /sk'");
+			await waitChips(0);
+			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
+			// Typing the full name makes the bare chip, with the exact row first and selected and the longer names below it.
+			await setDraft("see /skill:othe");
+			await waitDraft("window.composer.value()==='see /skill:othe'");
+			await setSelection(15, 15);
+			await typeKey("r");
+			await waitDraft("window.composer.value()==='see /skill:other'");
+			await waitChips(1);
+			assert.deepEqual([(await commandChips())[0]!.label, (await commandChips())[0]!.spaced], ["Skill other", undefined], "an exact skill name that ends the draft is a chip with nothing after it");
+			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
+			assert.deepEqual((await slashRows()).selected, ["/skill:other"]);
+			await press("Enter", "Enter", 13);
+			await waitDraft("window.composer.value()==='see /skill:other '");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "Enter with the list open accepts and does not send");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "see /skill:other", "the text sent is the draft");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("typed mid-text, a path, a URL, a word and a lone slash never open the list, and `/s` closes again at the next character that is not the start of `/skill:`", async () => {
+			await chipSetup("chips-mid-paths");
+			for (const text of ["see src/app.ts", "a/b and c/skill:x", "http://x.dev/skill:rev", "open /usr/local/bin", "fix this / and that", "mail x.dev/sk"]) {
+				await setDraft("");
+				await waitDraft("window.composer.value()===''");
+				for (const char of text) {
+					await ui.call("Input.insertText", { text: char });
+					await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
+					await settleFrames();
+					assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no list after ${JSON.stringify(await draftValue())}`);
+				}
+				assert.equal(await draftValue(), text);
+			}
+			await setDraft("open /s");
+			await waitDraft("window.composer.value()==='open /s'");
+			await typeKey("r");
+			await waitDraft("window.composer.value()==='open /sr'");
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"]')"), null, "`/sr` is a path, not a skill");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("mid-text, no list opens where OMP would not invoke a skill: after a leading command, a shell sigil or an earlier skill token", async () => {
+			await chipSetup("chips-mid-gates");
+			for (const [text, listed] of [["/compact do /sk", false], ["!ls /sk", false], ["$ echo /sk", false], ["a /skill:other b /sk", false], ["a /skill:nope b /sk", false], ["${HOME} /sk", true]] as const) {
+				await setDraft("");
+				await waitDraft("window.composer.value()===''");
+				for (const char of text) {
+					await ui.call("Input.insertText", { text: char });
+					await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
+				}
+				await settleFrames();
+				assert.equal(await draftValue(), text);
+				assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"]')!==null"), listed, `${JSON.stringify(text)}: the list agrees with the chip rule`);
+				assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no command is listed mid-text`);
+			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("mid-text completion in the middle of a draft replaces the token and the space after it, Escape closes the list without editing, and an IME composition cannot accept it", async () => {
+			await chipSetup("chips-mid-edit");
+			await setDraft("fix  later");
+			await waitDraft("window.composer.value()==='fix  later'");
+			await setSelection(4, 4);
+			await waitDraft("window.composer.selection().start===4");
+			await ui.call("Input.insertText", { text: "/sk" });
+			await waitDraft("window.composer.value()==='fix /sk later'");
+			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('[aria-label=\"Skills\"]')");
+			assert.equal(await draftValue(), "fix /sk later", "Escape closes and edits nothing");
+			await typeKey("i");
+			await waitDraft("window.composer.value()==='fix /ski later'");
+			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
+			await press("Tab", "Tab", 9);
+			await waitDraft("window.composer.value()==='fix /skill:review later'");
+			await waitChips(1);
+			assert.deepEqual(await selection(), { start: 18, end: 18 }, "the caret rests after the written space, before the rest of the text");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			// An IME composition cannot accept the list.
+			await setDraft("fix /ski later");
+			await waitDraft("window.composer.value()==='fix /ski later'");
+			await setSelection(8, 8);
+			await ui.wait("document.querySelector('[aria-label=\"Skills\"]')");
+			await ui.evaluate(`const input=window.composer.el();input.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+			 input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',isComposing:true,bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',code:'Tab',isComposing:true,bubbles:true}));`);
+			assert.equal(await draftValue(), "fix /ski later");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

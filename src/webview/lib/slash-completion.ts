@@ -1,3 +1,4 @@
+import { embeddedSkillInvokedAt, SKILL_PREFIX } from "../../chat/prompt-routing.ts";
 import type { ChatSlashCommand } from "../../chat/model.ts";
 import { classifySlashInput } from "../../protocol/rpc.ts";
 
@@ -22,12 +23,40 @@ const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "btw", source: "OMP Desk", description: "Ask a side question that stays out of the conversation, or browse earlier ones", inputHint: "[question]" },
 ];
 
-/** Only the leading command token is completion-owned; embedded skill tokens are prose. */
-export function slashQueryAt(text: string, caret: number): { query: string; end: number } | null {
+/** `skill:`, the start of every skill's catalogue name. */
+const SKILL_NAME_PREFIX = SKILL_PREFIX.slice(1);
+
+/** What `slashQueryAt` found: the token `[start, end)` under the caret, the text typed in it up to the caret (lower case, without the `/`), and whether only skills are offered (a token in the middle of the text). */
+export interface SlashQuery {
+	readonly query: string;
+	readonly start: number;
+	readonly end: number;
+	readonly skillsOnly: boolean;
+}
+
+/**
+ * The `/` token the caret is in, if completion owns it. The leading command token lists every command and skill. A token in the middle of
+ * the draft lists skills only, because OMP invokes nothing else there (docs/designs/2026-10-18-composer-command-skill-chips.md,
+ * amendment 2026-10-20): it must start right after whitespace or a line break, consist of `[\w:-]` only (a path, a URL or `a/b` is not one),
+ * have at least a `/s` typed that is a prefix of `/skill:` or continues it (a lone `/` is prose), and be where OMP would invoke it
+ * (`embeddedSkillInvokedAt`, the gate of the chip scan: not after a leading command or a local-execution sigil, not after an earlier skill token).
+ */
+export function slashQueryAt(text: string, caret: number): SlashQuery | null {
  if (!Number.isSafeInteger(caret) || caret < 1 || caret > text.length) return null;
- const match = /^\/([\w:-]*)(?=\s|$)/.exec(text);
- if (!match || caret > match[0].length || match[0].length > 257) return null;
- return { query: text.slice(1, caret).toLowerCase(), end: match[0].length };
+ const leading = /^\/([\w:-]*)(?=\s|$)/.exec(text);
+ if (leading) {
+  if (caret > leading[0].length || leading[0].length > 257) return null;
+  return { query: text.slice(1, caret).toLowerCase(), start: 0, end: leading[0].length, skillsOnly: false };
+ }
+ let start = caret;
+ while (start > 0 && !/\s/.test(text[start - 1]!)) start--;
+ if (start === caret || text[start] !== "/") return null;
+ let end = caret;
+ while (end < text.length && !/\s/.test(text[end]!)) end++;
+ if (end - start > 257 || !/^\/[\w:-]*$/.test(text.slice(start, end))) return null;
+ const query = text.slice(start + 1, caret).toLowerCase();
+ if (query.length === 0 || !(SKILL_NAME_PREFIX.startsWith(query) || query.startsWith(SKILL_NAME_PREFIX))) return null;
+ return embeddedSkillInvokedAt(text, start) ? { query, start, end, skillsOnly: true } : null;
 }
 
 /** Every command Chat can act on, before any query: Desk's own commands, then what the session advertises (denied owners and their aliases never appear). */
@@ -41,10 +70,10 @@ export function slashCatalogue(commands: readonly ChatSlashCommand[]): readonly 
  * name or alias is exactly the query comes first (so a typed full name is the selected row), then every command (OMP's builtins, file,
  * extension and custom commands, Desk's own) before any skill (`source: "skill"`), each group in catalogue order.
  */
-export function slashSuggestions(commands: readonly ChatSlashCommand[], query: string): readonly ChatSlashCommand[] {
+export function slashSuggestions(commands: readonly ChatSlashCommand[], query: string, skillsOnly = false): readonly ChatSlashCommand[] {
  const rank = (command: ChatSlashCommand): number => (query.length > 0 && (command.name.toLowerCase() === query || command.aliases?.some(alias => alias.toLowerCase() === query)) ? 0 : command.source === "skill" ? 2 : 1);
  return slashCatalogue(commands)
-  .filter(command => command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query)))
+  .filter(command => (!skillsOnly || command.source === "skill") && (command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query))))
   .map((command, index) => ({ command, index, rank: rank(command) }))
   .sort((a, b) => a.rank - b.rank || a.index - b.index)
   .slice(0, 50)
@@ -56,9 +85,9 @@ export function isRewindCommand(text: string): boolean {
  return /^\/(?:rewind|branch)\s*$/i.test(text.trim());
 }
 
-export function spliceSlash(text: string, end: number, name: string): { text: string; caret: number } {
+export function spliceSlash(text: string, token: { start: number; end: number }, name: string): { text: string; caret: number } {
  const prefix = `/${name} `;
- return { text: prefix + text.slice(end).replace(/^ /, ""), caret: prefix.length };
+ return { text: text.slice(0, token.start) + prefix + text.slice(token.end).replace(/^ /, ""), caret: token.start + prefix.length };
 }
 
 export function parseArgumentHint(hint?: string): { text: string; requirement: "optional" | "required" | "unknown" } {

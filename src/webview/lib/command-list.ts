@@ -218,7 +218,7 @@ export function pickPlan(row: CommandRow): PickPlan {
  */
 export function insertCommandIntoDraft(text: string, name: string): { text: string; caret: number } {
 	const token = /^\/[\w:-]*(?=\s|$)/.exec(text);
-	if (token !== null) return spliceSlash(text, token[0].length, name);
+	if (token !== null) return spliceSlash(text, { start: 0, end: token[0].length }, name);
 	const prefix = `/${name} `;
 	return { text: prefix + text.trimStart(), caret: prefix.length };
 }

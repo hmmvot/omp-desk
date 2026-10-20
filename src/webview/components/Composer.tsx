@@ -533,7 +533,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// the popup stays useful between keystrokes instead of blanking until the next
 	// debounce, and a stale answer can never offer an irrelevant path.
 	const visible = useMemo(() => {
-		if (slash !== null) return slashSuggestions(snapshot.commands, slash.query).map(command => ({ kind: "slash" as const, name: command.name, label: `/${command.name}`, description: command.description, source: command.source === "skill" ? "Skill" : command.source, inputHint: command.inputHint, usage: undefined, isDefault: false }));
+		if (slash !== null) return slashSuggestions(snapshot.commands, slash.query, slash.skillsOnly).map(command => ({ kind: "slash" as const, name: command.name, label: `/${command.name}`, description: command.description, source: command.source === "skill" ? "Skill" : command.source, inputHint: command.inputHint, usage: undefined, isDefault: false }));
 		if (argument !== null) return argumentSuggestions(argument.command, argument.query).map(row => ({ kind: "argument" as const, name: row.name, label: row.name, description: row.description, source: undefined, inputHint: undefined, usage: row.usage, isDefault: row.isDefault }));
 		if (mention === null) return [];
 		const needle = mention.query.toLowerCase().replaceAll("\\", "/");
@@ -650,7 +650,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const argumentToken = selected.kind === "argument" ? slashArgumentAt(snapshot.commands, textRef.current, caretRef.current) : null;
 			const token = selected.kind === "file" ? mentionQueryAt(textRef.current, caretRef.current) : null;
 			if (slashToken === null && argumentToken === null && token === null) return;
-			const spliced = slashToken ? spliceSlash(textRef.current, slashToken.end, selected.name) : argumentToken ? spliceArgument(textRef.current, argumentToken.start, argumentToken.end, selected.name) : spliceMention(textRef.current, caretRef.current, token!.start, selected.name);
+			const spliced = slashToken ? spliceSlash(textRef.current, slashToken, selected.name) : argumentToken ? spliceArgument(textRef.current, argumentToken.start, argumentToken.end, selected.name) : spliceMention(textRef.current, caretRef.current, token!.start, selected.name);
 			// The answer has been consumed; anything still in flight is stale.
 			pendingQueryRef.current = null;
 			requestSeqRef.current++;
@@ -1887,7 +1887,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					/>
 					{quoteLayout.runs.length > 0 && <QuoteRemoveButtons surfaceRef={surfaceRef} text={text} runs={quoteLayout.runs} disabled={captureLocked} onRemove={removeQuote} />}
 					{suggestionsOpen && (
-						<ul id={suggestionListId} role="listbox" aria-label={argument !== null ? "Command arguments" : slash !== null ? "Slash commands" : "Workspace files"} className="omp-suggest-list">
+						<ul id={suggestionListId} role="listbox" aria-label={argument !== null ? "Command arguments" : slash !== null ? (slash.skillsOnly ? "Skills" : "Slash commands") : "Workspace files"} className="omp-suggest-list">
 							{argumentHint && <li role="presentation" className="omp-suggest-option omp-native-muted omp-slash-hint">{argumentHint}{argument?.hint.requirement === "optional" ? " · optional" : argument?.hint.requirement === "required" ? " · required" : ""}</li>}
 							{visible.map((option, index) => (
 								<li
