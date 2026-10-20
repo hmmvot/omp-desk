@@ -1677,6 +1677,11 @@
         "when": "activeWebviewPanelId == 'markdown.preview'"
       },
       {
+        "command": "ompDesk.quoteEditorSelection",
+        "key": "alt+q",
+        "when": "activeCustomEditorId == 'vscode.markdown.preview.editor'"
+      },
+      {
         "command": "ompDesk.searchPromptHistory",
         "key": "ctrl+alt+y",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"

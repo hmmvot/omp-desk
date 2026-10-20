@@ -150,7 +150,8 @@ import { quoteHunkOf } from "./wiring/quote-hunk";
 import { quoteSourceOf } from "./wiring/quote-source";
 import { composePreviewQuote } from "./wiring/preview-quote";
 import type { PreviewDocument } from "./wiring/preview-quote";
-import { activePreviewLabel, copyPreviewSelection, previewDocumentOf } from "./wiring/preview-selection";
+import type { ActivePreview } from "./wiring/preview-selection";
+import { activePreview, copyPreviewSelection, previewDocumentOf } from "./wiring/preview-selection";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
@@ -6517,9 +6518,9 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
  * In a diff editor, with nothing selected and the caret on a changed line, the whole hunk is quoted instead (decision 11, `wiring/quote-hunk.ts`).
  */
 async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-  const previewLabel = activePreviewLabel();
-  if (previewLabel !== null) {
-    await quotePreviewSelectionToSession(context, index, previewLabel);
+  const preview = activePreview();
+  if (preview !== null) {
+    await quotePreviewSelectionToSession(context, index, preview);
     return;
   }
   const editor = vscode.window.activeTextEditor;
@@ -6570,13 +6571,14 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
  * document the preview shows (docs/designs/2026-10-15-quote-chat-selection.md, decision 12). Nothing selected is a notice and
  * nothing is quoted; the session is chosen as for any quote.
  */
-async function quotePreviewSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex, label: string): Promise<void> {
+async function quotePreviewSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex, preview: ActivePreview): Promise<void> {
+  log.debug(`preview quote: ${preview.fsPath === null ? "preview panel" : "preview editor"}`);
   const text = await copyPreviewSelection();
   if (text.trim().length === 0) {
     showInfo("Select some text in the preview first.");
     return;
   }
-  const document = await previewDocumentOf(label);
+  const document = await previewDocumentOf(preview);
   log.debug(`preview quote: ${document.fsPath === null ? "document not identified" : "document identified"}`);
   const early = composePreviewQuote(document, text, "");
   if (!early.ok) {

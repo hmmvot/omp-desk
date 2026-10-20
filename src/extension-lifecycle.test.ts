@@ -73,6 +73,7 @@ export class EventEmitter {
 export class MarkdownString { constructor(value = '') { this.value = value; } appendMarkdown(value) { this.value += value; return this; } }
 export class TabInputWebview {}
 export class TabInputText {}
+export class TabInputCustom {}
 export class TabInputTextDiff {}
 export class Range {
   constructor(startLine, startCharacter, endLine, endCharacter) {
@@ -86,6 +87,7 @@ export const workspace = {
   textDocuments: [],
   foundFiles: [],
   findFiles: async () => workspace.foundFiles,
+  getWorkspaceFolder: () => undefined,
   configurationWrites: [],
   getConfiguration(section) { return {
     get(key, fallback) { return workspace.configurationValues[section + '.' + key] ?? fallback; },
@@ -241,8 +243,10 @@ export const harness = {
   clipboardWrites: () => fixtureVscode.env.clipboard.writes,
   quotePreviewSelection: index => quoteEditorSelectionToSession(fixtureContext, index),
   setActiveTab: tab => { fixtureVscode.window.tabGroups.activeTabGroup.activeTab = tab; },
+  customTabInput: (viewType, fsPath) => { const input = new fixtureVscode.TabInputCustom(); input.viewType = viewType; input.uri = { scheme: 'file', fsPath }; return input; },
   webviewTabInput: viewType => { const input = new fixtureVscode.TabInputWebview(); input.viewType = viewType; return input; },
   clipboardText: value => { if (value !== undefined) fixtureVscode.env.clipboard.text = value; return fixtureVscode.env.clipboard.text; },
+  lastQuickPick: () => fixtureVscode.window.quickPicks.at(-1),
   quickPickCount: () => fixtureVscode.window.quickPicks.length,
   infos: () => fixtureVscode.window.infos,
   desktopPayload: capturedDesktopXml,
@@ -498,8 +502,10 @@ interface Harness {
   quotePreviewSelection(index: SessionIndex): Promise<void>;
   setActiveTab(tab: unknown): void;
   webviewTabInput(viewType: string): unknown;
+  customTabInput(viewType: string, fsPath: string): unknown;
   clipboardText(value?: string): string;
   quickPickCount(): number;
+  lastQuickPick(): { items: { label: string }[]; dismiss(): void } | undefined;
   revealDesktopNotification(...args: unknown[]): Promise<void>;
   revealActiveSession(index: SessionIndex): Promise<void>;
   releaseSelectionFromOtherWindow(index: SessionIndex): void;
@@ -6097,6 +6103,29 @@ describe("Quote Selection to Session in the Markdown preview", () => {
     assert.equal(harness.clipboardText(), "kept");
     assert.deepEqual(harness.infos().slice(infos), ["OMP Desk: Select some text in the preview first."]);
     assert.equal(harness.quickPickCount(), 0);
+  });
+
+  it("the preview opened as an editor (a custom editor tab with the plain file name as its label) is copied from and names its file exactly", async () => {
+    const index = { ...indexFixture(runtime(896)), list: () => [] } as unknown as SessionIndex;
+    harness.reset(index, null);
+    harness.setActiveTab({ label: "world.md", input: harness.customTabInput("vscode.markdown.preview.editor", "D:\\Work\\Repo\\docs\\world.md") });
+    const calls = copyingCommand("Rendered words.");
+    const quoting = harness.quotePreviewSelection(index);
+    for (let waited = 0; harness.lastQuickPick() === undefined && waited < 100; waited++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(calls.map(call => call[0]), ["editor.action.clipboardCopyAction"]);
+    const picker = harness.lastQuickPick();
+    assert.ok(picker !== undefined, "the quote went on to choose a session");
+    picker.dismiss();
+    await quoting;
+  });
+
+  it("a custom editor of another view type is not a preview", async () => {
+    const index = indexFixture(runtime(897)) as unknown as SessionIndex;
+    harness.reset(index, null);
+    harness.setActiveTab({ label: "x.md", input: harness.customTabInput("someone.else", "D:\\x.md") });
+    const calls = copyingCommand("text");
+    await harness.quotePreviewSelection(index);
+    assert.deepEqual(calls.map(call => call[0]), []);
   });
 
   it("a tab that is not the Markdown preview is not treated as one", async () => {

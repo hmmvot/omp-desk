@@ -17,6 +17,9 @@ import type { EditorQuotes, Refusal } from "./editor-context.ts";
 /** The `viewType` of the Markdown preview's webview tab as the tab API reports it (`TabInputWebview.viewType`), measured on VS Code 1.142.0. */
 export const MARKDOWN_PREVIEW_TAB_VIEW_TYPE = "mainThreadWebview-markdown.preview";
 
+/** The `viewType` of the Markdown preview opened as an editor (Open With… Markdown Preview, or an `editorAssociations` entry): a custom editor tab, which names its file. */
+export const MARKDOWN_PREVIEW_CUSTOM_VIEW_TYPE = "vscode.markdown.preview.editor";
+
 /** The document a preview shows: its file, or `null` when it could not be told apart (then only its name is known). */
 export interface PreviewDocument {
 	readonly fsPath: string | null;

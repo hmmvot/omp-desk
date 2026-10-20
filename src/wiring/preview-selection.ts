@@ -6,17 +6,27 @@
  * 1.142.0). The clipboard is a shared resource, so its text is put back.
  */
 import * as vscode from "vscode";
-import { MARKDOWN_PREVIEW_TAB_VIEW_TYPE, fallbackName, resolvePreviewFile } from "./preview-quote";
+import { MARKDOWN_PREVIEW_CUSTOM_VIEW_TYPE, MARKDOWN_PREVIEW_TAB_VIEW_TYPE, fallbackName, resolvePreviewFile } from "./preview-quote";
 import type { PreviewDocument } from "./preview-quote";
 
 /** How long a Copy from the preview may take to reach the clipboard: also how long an empty selection is waited for. */
 const COPY_WAIT_MS = 600;
 const COPY_POLL_MS = 25;
 
-/** The label of the active tab when it is a Markdown preview (also a locked one and one opened to the side), else `null`. */
-export function activePreviewLabel(): string | null {
-	const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-	return tab !== undefined && tab.input instanceof vscode.TabInputWebview && tab.input.viewType === MARKDOWN_PREVIEW_TAB_VIEW_TYPE ? tab.label : null;
+/** The Markdown preview that is the active tab: its tab label and, for a preview opened as an editor, the file it shows (`null` for the webview panel, which names none). */
+export interface ActivePreview {
+  readonly label: string;
+  readonly fsPath: string | null;
+}
+
+/** The active tab when it is a Markdown preview: the preview panel (also a locked one and one opened to the side) or the preview as an editor; else `null`. */
+export function activePreview(): ActivePreview | null {
+  const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+  if (tab === undefined || tab === null) return null;
+  const input = tab.input;
+  if (input instanceof vscode.TabInputWebview && input.viewType === MARKDOWN_PREVIEW_TAB_VIEW_TYPE) return { label: tab.label, fsPath: null };
+  if (input instanceof vscode.TabInputCustom && input.viewType === MARKDOWN_PREVIEW_CUSTOM_VIEW_TYPE && input.uri.scheme === "file") return { label: tab.label, fsPath: input.uri.fsPath };
+  return null;
 }
 
 /** The selected rendered text of the preview that has the focus (`""`: nothing is selected), leaving the clipboard's text as it was. */
@@ -45,7 +55,9 @@ export async function copyPreviewSelection(): Promise<string> {
  * workspace's Markdown files (a locked preview of a document that is closed). Several different files with that name, or none: the
  * name alone.
  */
-export async function previewDocumentOf(label: string): Promise<PreviewDocument> {
+export async function previewDocumentOf(preview: ActivePreview): Promise<PreviewDocument> {
+  const { label } = preview;
+  if (preview.fsPath !== null) return { fsPath: preview.fsPath, name: preview.fsPath.split(/[\\/]/).pop() ?? fallbackName(label) };
 	const open = vscode.workspace.textDocuments.filter(document => document.uri.scheme === "file" && document.languageId === "markdown").map(document => document.uri.fsPath);
 	let fsPath = resolvePreviewFile(label, open);
 	if (fsPath === null && !open.some(path => resolvePreviewFile(label, [path]) !== null)) {

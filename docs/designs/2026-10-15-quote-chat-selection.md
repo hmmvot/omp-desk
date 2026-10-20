@@ -538,6 +538,15 @@ All of this was measured on VS Code 1.142.0 in a hidden test window (`scripts/te
 
 `Alt+Q` runs `ompDesk.quoteEditorSelection` under `activeWebviewPanelId == 'markdown.preview'`; no other `when` of the key widened. The command is always in the Command Palette and checks the active tab itself, so it also works from the palette while the preview is active. Tests: `src/wiring/preview-quote.test.ts` (label matching, location, refusals), the lifecycle harness (`extension-lifecycle.test.ts`: the copy command, the clipboard restored, the empty notice, no session, a foreign webview), `contributions.test.ts` (the binding).
 
+### Second mode: the preview opened as an editor (2026-10-20, a user report)
+
+Alt+Q did nothing in a preview whose tab is the plain file name with a "Markdown Preview ⌄" picker on the right of the breadcrumbs. That is the Markdown extension's **custom editor** (*Reopen Editor With… → Markdown Preview*, or `workbench.editorAssociations` `*.md` → `vscode.markdown.preview.editor`), not its webview panel. Reproduced in a hidden window on 1.142.0 with the user's layout, and measured:
+
+- The tab input is a `TabInputCustom` with `viewType` `vscode.markdown.preview.editor` and the file's `uri`, so the document is known **exactly**: no label matching and no ambiguity between same-named files. The label is the plain file name.
+- The context key is `activeCustomEditorId == 'vscode.markdown.preview.editor'` (the panel's `activeWebviewPanelId == 'markdown.preview'` does not hold here); a second `Alt+Q` binding of `ompDesk.quoteEditorSelection` carries it.
+- The same Copy command copies from this editor: the selection `quote. Second paragraph here.` was quoted, the draft held `> \`docs/guide/chat.md\`` over it, the clipboard text came back, and an empty selection showed the notice.
+- No other `Alt+Q` wins: the only bindings of the key in the user's extensions and `keybindings.json` are Desk's own four (Chat, text editor, the preview panel, the preview editor).
+
 ## Related Decisions
 
 - [ADR-0077: Edit the Chat draft in a contenteditable surface rendered from the Markdown string](../decisions/0077-edit-the-chat-draft-in-a-contenteditable-surface-rendered-from-the-markdown-string.md) and the [composer surface design](2026-10-15-composer-contenteditable-surface.md): **not amended**: a quote is a per-line property of the rendering like the code band, and the string stays the single source of truth.
