@@ -9,11 +9,18 @@
  * handle. An operation is cleared by its handle's `end`, by `dispose`, or by the window going away; its age never clears it (the
  * 60 s mark only changes the words and logs once, because the awaited work may still finish).
  *
+ * A launch that ends `running` is not over while its process is still booting: the entry returns when the broker has started the
+ * process, but OMP then needs seconds more (20 s and more with many plugins and providers) before it answers. An operation that has
+ * reached the launching steps and ends `running` while `launchReady` says `booting` is *held*: it stays displayed (`Starting…`,
+ * with the step the booting process is in) and ends by itself when the launch is ready, or gone. The check runs when the launch
+ * says so ({@link PendingOperations.settle}: a conversation phase change, host control verified) and once a second as a net.
+ *
  * Nothing here imports `vscode`.
  */
 import {
 	PENDING_STILL_AFTER_MS,
 	isLaunchFamily,
+	isLaunchingStep,
 	sameFamily,
 	type PendingEnd,
 	type PendingKind,
@@ -60,12 +67,20 @@ export interface PendingTimers {
 	clear(handle: unknown): void;
 }
 
+/** Whether the writer a launch started is still booting (its conversation or host control is not ready yet), ready, or no longer there. */
+export type LaunchReadiness = "booting" | "ready" | "gone";
+
 export interface PendingOperationsOptions {
 	readonly now?: () => number;
 	readonly timers?: PendingTimers;
 	/** One line, for the 60 s mark. */
 	readonly log?: (line: string) => void;
+	/** The readiness of the writer of a launch key; without it nothing is ever held. */
+	readonly launchReady?: (key: string) => LaunchReadiness;
 }
+
+/** How often a held launch re-checks its readiness when nothing told it. */
+const SETTLE_POLL_MS = 1_000;
 
 interface Live {
 	readonly key: string;
@@ -76,6 +91,8 @@ interface Live {
 	readonly startedAt: number;
 	still: boolean;
 	handles: number;
+	/** Ended `running` while its process was still booting: displayed until the launch is ready. */
+	holding: boolean;
 	timer: unknown;
 }
 
@@ -88,15 +105,18 @@ export class PendingOperations {
 	readonly #now: () => number;
 	readonly #timers: PendingTimers;
 	readonly #log: (line: string) => void;
+	readonly #launchReady: ((key: string) => LaunchReadiness) | undefined;
 	/** Per key, oldest first; the last one is the displayed operation. */
 	readonly #byKey = new Map<string, Live[]>();
 	readonly #listeners = new Set<(change: PendingChange) => void>();
+	#settleTimer: unknown;
 	#disposed = false;
 
 	constructor(options: PendingOperationsOptions = {}) {
 		this.#now = options.now ?? Date.now;
 		this.#timers = options.timers ?? REAL_TIMERS;
 		this.#log = options.log ?? (() => undefined);
+		this.#launchReady = options.launchReady;
 	}
 
 	/** Listen to changes (begin, step, end); returns the way to stop. */
@@ -116,7 +136,7 @@ export class PendingOperations {
 		if (operation === undefined) {
 			operation = {
 				key, kind, step: options.step ?? "waiting", origin: options.origin ?? "command", requestId: options.requestId ?? null,
-				startedAt: this.#now(), still: false, handles: 0, timer: undefined,
+				startedAt: this.#now(), still: false, handles: 0, holding: false, timer: undefined,
 			};
 			const created = operation;
 			operation.timer = this.#timers.set(() => this.#markStill(created), PENDING_STILL_AFTER_MS);
@@ -144,17 +164,59 @@ export class PendingOperations {
 				if (ended) return;
 				ended = true;
 				operation.handles -= 1;
-				if (operation.handles > 0) return;
-				this.#timers.clear(operation.timer);
-				const live = this.#byKey.get(operation.key);
-				if (live !== undefined) {
-					const at = live.indexOf(operation);
-					if (at >= 0) live.splice(at, 1);
-					if (live.length === 0) this.#byKey.delete(operation.key);
+				// A later handle of the same attempt (a second click that joined) never ends the launch the held operation waits for.
+				if (operation.handles > 0 || operation.holding) return;
+				if (status === "running" && this.#booting(operation)) {
+					operation.holding = true;
+					this.#armSettle();
+					this.#emit({ key: operation.key });
+					return;
 				}
-				this.#emit({ key: operation.key, ended: { kind: operation.kind, requestId: operation.requestId, status } });
+				this.#remove(operation, status);
 			},
 		};
+	}
+
+	/** Whether an operation that just ended `running` is a launch whose process has not finished starting. */
+	#booting(operation: Live): boolean {
+		const launches = isLaunchFamily(operation.kind) || operation.kind === "view-switch";
+		return launches && isLaunchingStep(operation.step) && this.#launchReady?.(operation.key) === "booting";
+	}
+
+	#remove(operation: Live, status: PendingEnd): void {
+		operation.holding = false;
+		this.#timers.clear(operation.timer);
+		const live = this.#byKey.get(operation.key);
+		if (live !== undefined) {
+			const at = live.indexOf(operation);
+			if (at >= 0) live.splice(at, 1);
+			if (live.length === 0) this.#byKey.delete(operation.key);
+		}
+		this.#emit({ key: operation.key, ended: { kind: operation.kind, requestId: operation.requestId, status } });
+	}
+
+	/**
+	 * The launch of `key` says something about its writer changed (its conversation reached a phase, host control was verified or the
+	 * launch was given up): a held operation of the key ends when its launch is ready (`running`) or gone (`failed`), and stays
+	 * while it is still booting. Nothing happens without a held operation.
+	 */
+	settle(key: string): void {
+		const ready = this.#launchReady;
+		if (ready === undefined) return;
+		for (const operation of [...(this.#byKey.get(key) ?? [])]) {
+			if (!operation.holding) continue;
+			const readiness = ready(key);
+			if (readiness !== "booting") this.#remove(operation, readiness === "ready" ? "running" : "failed");
+		}
+	}
+
+	#armSettle(): void {
+		if (this.#settleTimer !== undefined || this.#disposed) return;
+		this.#settleTimer = this.#timers.set(() => {
+			this.#settleTimer = undefined;
+			for (const key of [...this.#byKey.keys()]) this.settle(key);
+			for (const live of this.#byKey.values()) if (live.some(operation => operation.holding)) { this.#armSettle(); break; }
+		}, SETTLE_POLL_MS);
 	}
 
 	/**
@@ -201,6 +263,8 @@ export class PendingOperations {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		for (const live of this.#byKey.values()) for (const operation of live) this.#timers.clear(operation.timer);
+		if (this.#settleTimer !== undefined) this.#timers.clear(this.#settleTimer);
+		this.#settleTimer = undefined;
 		this.#byKey.clear();
 		this.#listeners.clear();
 	}
@@ -211,7 +275,7 @@ export class PendingOperations {
 	}
 
 	#markStill(operation: Live): void {
-		if (operation.still || operation.handles === 0) return;
+		if (operation.still || (operation.handles === 0 && !operation.holding)) return;
 		operation.still = true;
 		this.#log(`window timing: ${operation.kind} ${operation.key} still at ${operation.step} after ${Math.round(PENDING_STILL_AFTER_MS / 1000)} s`);
 		this.#emit({ key: operation.key });

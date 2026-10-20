@@ -73,19 +73,27 @@ describe("launch timeline", () => {
 		assert.equal(t.instance.reached("tab:none"), null);
 	});
 
-	it("tells its observer of each lap and added phase of a tab that has a run, and of nothing else", () => {
+	it("tells its observer of each lap, added phase and end of a tab that has a run, and of nothing else", () => {
 		const t = timeline();
 		const told: string[] = [];
-		t.instance.observe({ onLap: (tabId, lap) => told.push(`${tabId} lap ${lap}`), onAdd: tabId => told.push(`${tabId} add`) });
+		t.instance.observe({ onLap: (tabId, lap) => told.push(`${tabId} lap ${lap}`), onAdd: tabId => told.push(`${tabId} add`), onEnd: tabId => told.push(`${tabId} end`) });
 		t.instance.lap("tab:a", "panel");
 		t.instance.add("tab:a", "spawn", 1);
-		assert.deepEqual(told, [], "no run: no lap and no observation");
+		t.instance.finish("tab:a");
+		t.instance.discard("tab:a");
+		assert.deepEqual(told, [], "no run: no lap, no end and no observation");
 		t.instance.begin("tab:a", "view switch");
 		t.instance.lap("tab:a", "admission");
 		t.instance.add("tab:a", "spawn", 1);
 		assert.deepEqual(told, ["tab:a lap admission", "tab:a add"]);
+		t.instance.finish("tab:a");
+		t.instance.begin("tab:b", "resume");
+		t.instance.discard("tab:b");
+		assert.deepEqual(told, ["tab:a lap admission", "tab:a add", "tab:a end", "tab:b end"], "finish and discard both end a run, once");
 		t.instance.observe(null);
-		t.instance.lap("tab:a", "stage");
-		assert.equal(told.length, 2);
+		t.instance.begin("tab:c", "resume");
+		t.instance.lap("tab:c", "stage");
+		t.instance.finish("tab:c");
+		assert.equal(told.length, 4);
 	});
 });

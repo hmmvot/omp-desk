@@ -77,8 +77,9 @@ One module, imported by the registry, the tree, the status-bar controller and th
   | `admission` | claiming the session | `SessionIndex.restore` until the launcher takes the launch |
   | `prepare` | preparing OMP | launcher staging and host-control keys |
   | `runtime` | checking the runtime | broker client and PTY runtime proof, editor document, broker slot |
-  | `spawn` | starting OMP | the broker launch call: resolution, the ADR-0075 probe, the ADR-0074 trust read and proof, the spawn and the handshake |
-  | `connect` | connecting | conversation start and run intent |
+  | `spawn` | starting the background process | the broker launch call: resolution, the ADR-0075 probe, the ADR-0074 trust read and proof, the spawn and the handshake |
+  | `boot` | OMP is starting | the process exists and OMP has not said `ready` (Chat: the conversation is `starting` or `attaching`; Terminal: host control is not verified yet); slice 7 |
+  | `connect` | connecting | Chat only: OMP said `ready` and the conversation reads its first state (`resyncing`); slice 7 |
   | `checking` | checking | Delete/Close/Rename pre-checks, Forget reconcile, Kill identity probe |
   | `working` | working | the action's own execution (Stop, Kill, delete, forget, rename, export, reload, switch) |
   | `saving` | saving | inventory toggle |
@@ -169,6 +170,15 @@ Each entry is a `begin`/`finally end` pair; a modal brackets itself with `step("
 
 Interactions: `openingTabs` and the index's duplicate-restore guard stay the authorities for de-duplication; the registry only displays them. The durable run intent and the catalog are untouched.
 
+### Starting until ready (slice 7)
+
+Measured on the maintainer's machine: a row turned `Running` 24 s before its Chat was live, and the whole start took 45 s. The entry returns when the broker has started the process (`running in N ms` in the log: 0.8 to 13 s) and the registry ended the operation there; OMP then needs 6 to 35 s more before it answers (`host control verified N ms after the command`), during which the page said "joining the session…".
+
+- **Held operations.** `PendingOperations` takes an optional `launchReady(key)` returning `booting | ready | gone` (`src/host/launch-readiness.ts`, from the window's facts: Chat is ready when its conversation is `live`, `starting`/`attaching`/`resyncing` are booting; Terminal is ready when host control is verified, failed, or never carried (it has no other signal of OMP being up), and `gone` without a process). A launch-family or view-switch operation that has reached the launching steps and ends `running` while its writer is `booting` is **held**: it stays displayed, with its step, and ends `running` when the writer is ready or `failed` when it is `gone`. A second click that joins a held operation neither ends nor restarts it. The check runs when the launch says so (a conversation phase event, the end of the launch timeline's run, which host control verification ends) and once a second as a net, so an event nobody reports cannot leave a row starting. The existing bounds end it in the end: the Chat session's `ready` timeout fails the conversation, the control rendezvous wait fails the host control, a process exit makes the writer `gone`. Nothing else about the operation changes: it is presentation only, the 60 s `still` mark applies to it, and `end("failed")` of the entry still ends it at once.
+- **Steps.** The conversation phase is the step once the process runs (`stepAfterChatPhase`): `starting` and `attaching` are `boot`, `resyncing` is `connect`; the laps put a launch in `boot` when the process exists. `spawn` reads "starting the background process". The Chat banner already shows the host's operation while the conversation is not live; the empty transcript now shows the same text in place of "joining the session…" (`Transcript` `startupText`), and keeps the old words for an attach nobody asked for (a reload).
+- **What OMP exposes while it boots (verified against OMP 18.12.2).** In RPC mode OMP writes nothing to stdout until its `ready` frame. On stderr it writes, every 10 s from the start, `Still starting after Ns — phase: <open span path>` plus the path of its log file; with `PI_DEBUG_STARTUP=1` it streams `[startup] <phase>:start|done` markers, hundreds of them, for overlapping phases (plugin roots, model registry, extensions, skills, MCP, memory) with no marker for "checking providers" as one step; its log file holds provider discovery warnings. `ready` arrives in the middle of this (OMP goes on loading MCP tools and commands after it). Desk does not turn any of that into steps: the phase path is free text from OMP's internals, only visible after 10 s and naming one of several concurrent phases; the markers would need an environment variable on every launch and would fill the broker's stderr tail that exit reasons are read from; reading OMP's log file couples Desk to its format and location. So the boot is **one honest step**, `OMP is starting`, with the seconds. If OMP one day reports its progress through the RPC protocol (a frame before `ready`), it becomes steps here and nowhere else.
+- **Not changed.** The error paths (a failed or timed out connection, a refused admission, a spawn failure) show where they did; the launch's own timeouts bound the work. Other windows still do not show `Starting` for a launch of this window. A restored session after a reload has no operation and shows what it showed.
+
 ### Slices
 
 1. **Slice 1, Resume and Open feel immediate** (`efc7aac`): vocabulary, registry, timeline observer, entry wrappers (Open, Resume, Restart), tree display layer (text, icon, menus, fixed position, `setPending`, ticker, view progress), page store, `omp:chat-operation`, Composer and banner, status bar for command origin, and the Chat page's own **Stop** acknowledgement (page-local: the Stop button shows `Stopping…` in the frame of the click and returns with the next host state; it has no registry kind). Tests: registry, timeline mapping, tree, protocol, ChatClient, ChatRuntime, owned-Chromium composer harness, extension lifecycle.
@@ -177,6 +187,7 @@ Interactions: `openingTabs` and the index's duplicate-restore guard stay the aut
 4. **Slice 4, view switch** (`a606796`): a Chat/Terminal switch (and a Reload) is a `view-switch` operation, or the `resume` it ends in for a stopped session, with `checking`, `waiting for your answer` and `working`; it begins a `view switch` timeline run like Restart.
 5. **Slice 5, Export HTML and Reload All Windows** (`1e16382`): command-origin operations under the key `window`, shown in the status bar after the grace; Export HTML shows from the end of its Save dialog.
 6. **Slice 6, inventory toggles** (`697fcf8`): `InventoryController.toggle` begins an `inventory-toggle` operation at the click; the row reads `Saving <name>…` and a second switch of it is dropped (and the row repainted as it is) until the write is done.
+7. **Slice 7, Starting until ready**: the held operation, the `boot` step and the startup text of the empty Chat transcript (above). Tests: registry hold, settle and poll, launch readiness and the chat-phase steps, the timeline observer's `onEnd`, the tree row at `boot`, the extension lifecycle (a launch stays pending through the conversation phases and ends on `live` or a failure), and the owned-Chromium page (the empty transcript names each step).
 
 Each slice commits on its own with its focused tests.
 
@@ -211,7 +222,7 @@ Each slice commits on its own with its focused tests.
 
 ## Rollout and Verification
 
-Implemented in the six slices above, one commit per slice on `main`, not pushed (`efc7aac`, `0f46c41`, `38567f0`, `a606796`, `1e16382`, `697fcf8`). Cancel before the launch starts and the cross-window "Starting" display stay out of scope as decided.
+Implemented in the seven slices above, one commit per slice on `main`, not pushed (`efc7aac`, `0f46c41`, `38567f0`, `a606796`, `1e16382`, `697fcf8`, and slice 7 in the commit that follows them). Cancel before the launch starts and the cross-window "Starting" display stay out of scope as decided.
 
 - Unit: the registry (join and upgrade, step, end, idempotence, 60 s mark, dispose), the lap-to-step table over every `LaunchLap`, `pendingText` (elapsed after 5 s, `confirm` shows no seconds, `still`, `Opening` becoming `Starting`), tree display layer (state and published status unchanged, menus hidden, fixed position, stop family only `Stopping` from `working`), the `omp:chat-operation` parser, `ChatClient` page-local lifecycle (ack, host contact, refusal, stall timeout, route change), `ChatRuntime` posting, re-posting to attached pages and the refusal `ended`.
 - Webview (owned Chromium harness, `chat-ui.test.ts` pattern): the Resume button is disabled with the spinner in the frame after the click with the host stubbed silent, the banner names the step, and the stall timeout returns the button.

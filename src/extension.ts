@@ -116,6 +116,8 @@ import { LaunchTimeline, type LaunchKind } from "./host/launch-timeline";
 import { PendingOperations, type PendingHandle } from "./host/pending-operations";
 import { PendingDisplay } from "./host/pending-display";
 import { observeLaunchSteps } from "./host/pending-steps";
+import { launchReadiness, stepAfterChatPhase } from "./host/launch-readiness";
+import type { LaunchReadiness } from "./host/pending-operations";
 import type { PendingEnd, PendingKind, PendingOrigin, PendingStep } from "./shared/pending-operation";
 import { pendingDisplayShell } from "./wiring/pending-shell";
 import { PersistFailureReporter } from "./host/persist-report";
@@ -1300,7 +1302,7 @@ function bridgeHostDeps(): BridgeHostDeps<TabState> {
 
 /** The initial state of one window: every collection empty, every handle not yet created. */
 function createWindowState(context: vscode.ExtensionContext): WindowState {
-  const pending = new PendingOperations({ log: line => log.debug(line) });
+  const pending = new PendingOperations({ log: line => log.debug(line), launchReady: launchReadinessOf });
   const launchTimeline = new LaunchTimeline();
   launchTimeline.observe(observeLaunchSteps(pending));
   return {
@@ -3985,6 +3987,22 @@ function recordFor(state: TabState): ConversationRecord {
 /** The process this window runs for the editor's conversation. */
 function hostOf(state: { readonly tabId: string | null } | null | undefined): SessionHostRuntime | null {
   return recordOf(state)?.runtime ?? null;
+}
+
+/**
+ * Whether the writer a launch started is ready for what the user opened it for (`src/host/launch-readiness.ts`): the Sessions row
+ * and the Chat page say `Starting…` until it is, not until the broker has started the process.
+ */
+function launchReadinessOf(tabId: string): LaunchReadiness {
+  const s = windowState();
+  const record = s.sessionRuntime.records.get(tabId);
+  const runtime = record?.runtime ?? null;
+  return launchReadiness({
+    runtime: runtime === null ? null : { kind: runtime.kind, carriesControl: runtime.control !== null, stopping: runtime.kind === "terminal" && runtime.stopping },
+    chatPhase: s.sessionRuntime.conversations.stateOf(tabId)?.phase ?? null,
+    controlVerified: record?.control != null,
+    controlFailed: record?.controlFailure != null,
+  });
 }
 
 /** The verified host-control channel of the editor's conversation. */
@@ -7011,6 +7029,11 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         const runtime = hostOf(stateOf(tabId)) ?? null;
         if (runtime?.kind === "chat") void s.sessionRuntime.exit.rpcExited(tabId, runtime);
       }
+      // The conversation's own phases are the launch's steps once the process runs: waiting for OMP's `ready`, then the first
+      // state read; `live` or an end of the connection ends the launch the row and the page show as starting.
+      const bootStep = stepAfterChatPhase(phase);
+      if (bootStep !== null) s.pending.step(tabId, bootStep);
+      s.pending.settle(tabId);
       refreshLauncher();
       return;
     }

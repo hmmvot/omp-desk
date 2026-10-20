@@ -110,6 +110,8 @@ export interface TranscriptProps {
 	settled?: boolean;
 	asyncPaused?: boolean;
 	pagedHistory?: boolean;
+	/** What the host says the session is doing while it starts (`Starting the session · OMP is starting · 12 s`); the empty transcript shows it instead of "joining the session…". */
+	startupText?: string | null;
 	footerByHost?: ReadonlyMap<string, ReplyFooterData>;
 	/** The served-model substitutions to announce, by the entry of the request they were found on (`chat/served-model.ts`). */
 	servedByEntry?: ReadonlyMap<string, ServedModelMismatch>;
@@ -607,7 +609,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			<div ref={contentRef} className="omp-transcript-content">
 			{canonical.length === 0 && cleared === null && stream === null && !working && (
 				loading || (props.depth ?? 0) > 0
-					? <div className="omp-empty">{loading ? "joining the session…" : "no activity yet"}</div>
+					? <div className="omp-empty">{loading ? props.startupText ?? "joining the session…" : "no activity yet"}</div>
 					: <EmptyState cwd={props.cwd} model={props.model} thinkingLevel={props.thinkingLevel} />
 			)}
 			{props.pagedHistory ? <nav className="omp-history-pages" aria-label="History pages">

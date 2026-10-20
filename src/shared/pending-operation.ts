@@ -39,6 +39,7 @@ export const PENDING_STEPS = [
 	"runtime",
 	"spawn",
 	"connect",
+	"boot",
 	"checking",
 	"working",
 	"saving",
@@ -83,7 +84,12 @@ export function sameFamily(a: PendingKind, b: PendingKind): boolean {
 }
 
 /** The steps past the point where an `open` is only showing history. */
-const LAUNCHING_STEPS: Partial<Record<PendingStep, true>> = { admission: true, prepare: true, runtime: true, spawn: true, connect: true };
+const LAUNCHING_STEPS: Partial<Record<PendingStep, true>> = { admission: true, prepare: true, runtime: true, spawn: true, boot: true, connect: true };
+
+/** Whether the step is one a launch passes through after the ownership checks: the work of starting the process, not the checks before it. */
+export function isLaunchingStep(step: PendingStep): boolean {
+	return LAUNCHING_STEPS[step] === true;
+}
 
 const VERB: Record<PendingKind, string> = {
 	open: "Opening",
@@ -110,7 +116,10 @@ const PHRASE: Record<PendingStep, string> = {
 	admission: "claiming the session",
 	prepare: "preparing OMP",
 	runtime: "checking the runtime",
-	spawn: "starting OMP",
+	spawn: "starting the background process",
+	// OMP's own start (plugins, extensions, model providers) is not reported while it runs: the extension sees only that the process
+	// exists and that OMP has not said `ready`, so the step says no more than that.
+	boot: "OMP is starting",
 	connect: "connecting",
 	checking: "checking",
 	working: "working",
@@ -124,9 +133,10 @@ export function pendingVerb(kind: PendingKind, step: PendingStep): string {
 	return VERB[kind];
 }
 
-/** The lower-case phrase of a step. */
-export function pendingPhrase(step: PendingStep): string {
-	return PHRASE[step];
+/** The lower-case phrase of a step; past the 60 s mark it says the wait goes on (`still checking the runtime`). */
+export function pendingPhrase(step: PendingStep, still = false): string {
+	if (!still || step === "confirm") return PHRASE[step];
+	return step === "boot" ? "OMP is still starting" : `still ${PHRASE[step]}`;
 }
 
 /** Whole seconds as ` · 7 s`, or the empty string while the wait is short or the step is the user's own answer. */
@@ -136,11 +146,11 @@ export function elapsedSuffix(step: PendingStep, elapsedMs: number): string {
 }
 
 /**
- * The words of one pending operation: `Starting · checking for another OMP process · 7 s`. `still` prefixes the phrase for an
- * operation past {@link PENDING_STILL_AFTER_MS}.
+ * The words of one pending operation: `Starting · checking for another OMP process · 7 s`. `still` marks an operation past
+ * {@link PENDING_STILL_AFTER_MS} (`still checking the runtime`).
  */
 export function pendingText(kind: PendingKind, step: PendingStep, elapsedMs: number, still = false): string {
-	return `${pendingVerb(kind, step)} · ${still && step !== "confirm" ? "still " : ""}${PHRASE[step]}${elapsedSuffix(step, elapsedMs)}`;
+	return `${pendingVerb(kind, step)} · ${pendingPhrase(step, still)}${elapsedSuffix(step, elapsedMs)}`;
 }
 
 /** The Chat banner's sentence for the action: `Starting the session`. */
@@ -164,5 +174,5 @@ export function pendingSubject(kind: PendingKind, step: PendingStep): string {
 
 /** `Starting the session · checking for another OMP process · 7 s`, as the Chat banner shows it. */
 export function pendingBannerText(kind: PendingKind, step: PendingStep, elapsedMs: number, still = false): string {
-	return `${pendingSubject(kind, step)} · ${still && step !== "confirm" ? "still " : ""}${PHRASE[step]}${elapsedSuffix(step, elapsedMs)}`;
+	return `${pendingSubject(kind, step)} · ${pendingPhrase(step, still)}${elapsedSuffix(step, elapsedMs)}`;
 }

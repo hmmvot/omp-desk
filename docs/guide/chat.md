@@ -2,6 +2,8 @@
 
 Chat is the rich editor view of a session. It opens in an editor tab, shows the conversation as it streams, and follows your light, dark or high-contrast theme. The same tab can be switched to OMP's native [Terminal](terminal.md) at any time. New sessions open in Chat.
 
+While a session starts (New Session, Resume, Restart), the notice above the conversation, and the empty conversation under it, name the step OMP Desk is in: `checking the runtime`, `starting the background process`, `OMP is starting`, `connecting`, with the seconds once it passes five, until OMP is ready; see [Sessions](sessions.md). Starting OMP itself can take 20 s or more with many plugins and model providers.
+
 ![A Chat mid-turn: a drawn diagram and links in the reply, a running turn with a queued follow-up, and a draft with an image and a code block](../../media/readme/chat-features.png)
 
 ## Writing and sending

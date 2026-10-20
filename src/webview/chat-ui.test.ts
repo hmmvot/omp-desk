@@ -2741,6 +2741,32 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("the empty transcript of a starting session names the host's startup step in place of \"joining the session…\", and says the old words again when no launch is pending", async () => {
+			await reset("joining-view");
+			await ui.evaluate("window.ui.push({phase:'attaching',header:{id:'joining-h',cwd:'D:/work/alpha-desk/',timestamp:'2026-10-13T10:00:00.000Z'},entries:[],durableCount:0,working:false,settled:true})");
+			await ui.wait("document.querySelector('.omp-empty')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty').textContent"), "joining the session…", "an attach nobody asked for has no step to name");
+			const step = (name: string, elapsedMs: number) => ui.evaluate(`window.ui.receive({type:'omp:chat-operation',operation:{kind:'resume',step:${JSON.stringify(name)},elapsedMs:${elapsedMs},requestId:null,still:false}})`);
+			await step("runtime", 1200);
+			await ui.wait("document.querySelector('.omp-empty')?.textContent==='Starting the session · checking the runtime'");
+			await step("spawn", 3000);
+			await ui.wait("document.querySelector('.omp-empty')?.textContent==='Starting the session · starting the background process'");
+			await step("boot", 12400);
+			await ui.wait("document.querySelector('.omp-empty')?.textContent==='Starting the session · OMP is starting · 12 s'");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice-description').textContent"), "Starting the session · OMP is starting · 12 s", "the banner and the transcript say the same step");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice').getAttribute('aria-busy')"), "true");
+			await step("connect", 21000);
+			await ui.wait("document.querySelector('.omp-empty')?.textContent==='Starting the session · connecting · 21 s'");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-operation',operation:null,ended:{kind:'resume',requestId:null,status:'failed'}})");
+			await ui.wait("document.querySelector('.omp-empty')?.textContent==='joining the session…'");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice-description').textContent"), "Connecting to the session…", "a failed or ended launch returns the page to the connection's own words");
+			await step("boot", 6000);
+			await ui.evaluate("window.ui.push({phase:'live'})");
+			await ui.wait("!document.querySelector('.omp-notice') && document.querySelector('.omp-empty-state')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-empty')"), null, "a live session shows its start page, never a startup step");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("an autonomous exit shows plain-text stderr and a stopped-session provider login action", async () => {
 			await reset("child-exit-reason");
 			await ui.evaluate(`window.ui.push({phase:'stopped',code:'child-exited',readOnlyReason:'stopped',exitReason:{exitCode:1,stderr:'No default model selected. Use /login.\\n<script>not markup</script>'}})`);

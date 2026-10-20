@@ -1764,7 +1764,8 @@ describe("a row whose action is being processed", () => {
 		assert.equal(row.state, "stopped", "the state the click recognizer and the published status read is the real one");
 		assert.match(tooltipText(row), /Starting · checking for another OMP process$/);
 		const later = present(state, stopped, facts, operation("resume", "spawn", 12_000));
-		assert.equal(later.description, "Starting · starting OMP · 8 s", "seconds appear after 5 s");
+		assert.equal(later.description, "Starting · starting the background process · 8 s", "seconds appear after 5 s");
+		assert.equal(present(state, stopped, facts, operation("resume", "boot", 10_000)).description, "Starting · OMP is starting · 10 s", "a process that runs but has not said ready is still Starting");
 		assert.equal(present(state, stopped, facts, null).description, "Stopped");
 	});
 

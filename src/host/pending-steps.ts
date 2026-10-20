@@ -27,14 +27,19 @@ export const STEP_AFTER_LAP: Record<LaunchLap, PendingStep | null> = {
 	"editor document": "runtime",
 	// The broker launch call follows: resolution, the Bun probe and trust read, the spawn and the handshake.
 	"broker slot": "spawn",
-	conversation: "connect",
+	// The process exists and the conversation is attached to it (a Terminal launch reports no timed phases, so this is where it
+	// leaves the spawn step): OMP is booting until it says `ready`, and the chat phase moves the step from here.
+	conversation: "boot",
 	"run intent": null,
 };
 
-/** The step once the broker launch has returned and its own timings were added. */
-export const STEP_AFTER_ADD: PendingStep = "connect";
+/** The step once the broker launch has returned and its own timings were added: the process is up. */
+export const STEP_AFTER_ADD: PendingStep = "boot";
 
-/** Feeds a registry from a launch timeline: the deep steps of a launch come from the laps it already records. */
+/**
+ * Feeds a registry from a launch timeline: the deep steps of a launch come from the laps it already records, and the end of a
+ * run (host control verified, or the launch given up) is a moment the registry re-checks whether a launch it holds is ready.
+ */
 export function observeLaunchSteps(pending: PendingOperations): LaunchTimelineObserver {
 	return {
 		onLap(tabId, lap) {
@@ -43,6 +48,9 @@ export function observeLaunchSteps(pending: PendingOperations): LaunchTimelineOb
 		},
 		onAdd(tabId) {
 			pending.step(tabId, STEP_AFTER_ADD);
+		},
+		onEnd(tabId) {
+			pending.settle(tabId);
 		},
 	};
 }

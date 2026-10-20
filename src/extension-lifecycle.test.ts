@@ -2595,6 +2595,35 @@ describe("verified-owned-writer policy fixtures", () => {
     } finally { operation.end("running"); panels.restore(); harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
   });
 
+  it("a launch whose process the broker has started stays pending while OMP boots: the step follows the conversation phase, and a live conversation or a failed one ends it", async () => {
+    const native = runtime(931); const index = indexFixture(native);
+    const session = { phase: "starting", start: async () => undefined };
+    harness.reset(index, conversation(session));
+    harness.record(harness.state(TAB)).runtime = native;
+    const context = storage().context;
+    const registry = harness.window() as unknown as { pending: { begin(key: string, kind: string, options?: { step: string }): { end(status: string): void }; get(key: string): { step: string } | undefined; settle(key: string): void } };
+    const phase = (next: string) => { session.phase = next; harness.handleChatEvent(context, index, TAB, { type: "state", payload: { phase: next, code: null, sessionId: null, title: null } }); };
+    try {
+      registry.pending.begin(TAB, "resume", { step: "spawn" }).end("running");
+      assert.equal(registry.pending.get(TAB)?.step, "spawn", "the entry returned, but the process has not said ready: the row stays Starting");
+      phase("attaching");
+      assert.equal(registry.pending.get(TAB)?.step, "boot", "OMP is starting");
+      phase("resyncing");
+      assert.equal(registry.pending.get(TAB)?.step, "connect", "OMP said ready: the first state read");
+      // The live event also refreshes the footer and the model list, which this fixture's conversation does not serve: the readiness
+      // read is what ends the launch, and the event only asks for it.
+      session.phase = "live";
+      registry.pending.settle(TAB);
+      assert.equal(registry.pending.get(TAB), undefined, "ready: the row shows its real state");
+
+      session.phase = "attaching";
+      registry.pending.begin(TAB, "resume", { step: "boot" }).end("running");
+      assert.equal(registry.pending.get(TAB)?.step, "boot");
+      phase("failed");
+      assert.equal(registry.pending.get(TAB), undefined, "a failed connection ends the pending state; the failure shows where it always did");
+    } finally { registry.pending.settle(TAB); }
+  });
+
   it("Cancel of Open Anyway keeps the editor of a stopped row (read-only history) and closes the editor an attempt created for a row that is not stopped; neither starts anything", async () => {
     const stopped = await legacyFixture("cancel-stopped", false, true);
     harness.window().externalLeases = leaseObserver({ held: true, fresh: 0 });

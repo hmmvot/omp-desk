@@ -291,6 +291,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						olderCount={snapshot.olderCount}
 						onLoadOlder={() => client.loadOlder()}
 						pending={snapshot.pending}
+						startupText={pending}
 						cards={snapshot.ephemeral}
 						durableCount={snapshot.durableCount}
 						streamId={snapshot.streamId}

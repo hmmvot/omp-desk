@@ -43,6 +43,8 @@ export interface LaunchTimelineObserver {
 	onLap(tabId: string, lap: LaunchLap): void;
 	/** A phase the caller timed itself was added (the broker launch's own timings, reported after it returns). */
 	onAdd(tabId: string): void;
+	/** The tab's run ended: host control was verified (`finish`) or the launch failed or the tab closed (`discard`). */
+	onEnd(tabId: string): void;
 }
 
 interface Run {
@@ -146,6 +148,7 @@ export class LaunchTimeline {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return null;
 		this.#runs.delete(tabId);
+		this.#observer?.onEnd(tabId);
 		return { kind: run.kind, totalMs: Math.round(this.#now() - run.startedAt) };
 	}
 
@@ -156,6 +159,6 @@ export class LaunchTimeline {
 
 	/** The tab's run ends without a report (the launch failed or the tab closed). */
 	discard(tabId: string): void {
-		this.#runs.delete(tabId);
+		if (this.#runs.delete(tabId)) this.#observer?.onEnd(tabId);
 	}
 }
