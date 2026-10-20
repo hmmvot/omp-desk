@@ -1427,13 +1427,15 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	);
 
 	// Quoting (docs/designs/2026-10-15-quote-chat-selection.md): every trigger asks this composer through the sink, so the refusals, the edit and the notice are the same whoever asked.
+	const quoteSettling = snapshot.phase === "starting" || snapshot.phase === "attaching" || snapshot.phase === "resyncing";
 	const { notice: quoteNotice, quote } = useQuoteDraft({
 		surface: () => surfaceRef.current,
 		captured: () => captureRef.current !== null,
 		composing: () => composingRef.current,
 		defer: work => { deferredRef.current.push(work); },
 		writable: () => canPrompt,
-	});
+		settling: () => quoteSettling,
+	}, quoteSettling);
 	useEffect(() => provideQuoteSink(quote), [quote]);
 
 	/** Remove quote: the run that starts at `start` and its line break, one undo step; an open composition finishes first. */

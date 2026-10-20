@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DraftSurface } from "./draft-surface.ts";
 import { quoteSizeRefusal } from "../../shared/quote-limit.ts";
 import { placeQuote, quoteBlock, quoteLineCount } from "./quote-draft.ts";
+import { createQuoteHold } from "./quote-hold.ts";
 import type { QuoteRequest } from "./quote-sink.ts";
 
 /** How long the notice stays under the field. */
@@ -22,15 +23,20 @@ export interface QuoteHost {
 	readonly defer: (work: () => void) => void;
 	/** The session can take a message. */
 	readonly writable: () => boolean;
+	/** The session has not settled yet (starting, attaching, resyncing): a host-sent quote waits for it instead of being refused. */
+	readonly settling: () => boolean;
 }
+
 
 const HELD = "Your draft is being moved to a new editor; quote again in a moment";
 
-export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: (request: QuoteRequest) => void } {
+/** `settling` is the same fact as `host.settling()`, as render state: the held quotes are tried when it turns false. */
+export function useQuoteDraft(host: QuoteHost, settling: boolean): { notice: string | null; quote: (request: QuoteRequest) => void } {
 	const hostRef = useRef(host);
 	hostRef.current = host;
 	const [notice, setNotice] = useState<string | null>(null);
 	const timer = useRef<number | undefined>(undefined);
+	const held = useRef(createQuoteHold());
 	const say = useCallback((words: string): void => {
 		clearTimeout(timer.current);
 		setNotice(words);
@@ -44,6 +50,7 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 		// What each quote is made of: a Chat selection is one quote, an editor's selections are one quote each.
 		const sources = request.kind === "selection" ? [request.source] : request.sources;
 		if (sources.every(source => source.trim().length === 0)) { say(request.kind === "selection" ? "Select text in the conversation first" : "Select some text first"); return; }
+		if (held.current.hold(request, current.settling())) return;
 		if (current.surface() === null || !current.writable()) { say("This session cannot take a message"); return; }
 		if (current.captured()) { say(HELD); return; }
 		const tooLong = quoteSizeRefusal(request.kind === "selection" ? request.source.length : request.size);
@@ -66,6 +73,12 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 		if (current.composing()) current.defer(place);
 		else place();
 	}, [say]);
+
+	// A quote the host sent while the session was starting is placed (or refused, by the rules above) once the session has settled.
+	useEffect(() => {
+		if (settling) return;
+		for (const request of held.current.release()) quote(request);
+	}, [settling, quote]);
 
 	return { notice, quote };
 }
