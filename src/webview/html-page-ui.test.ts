@@ -450,18 +450,21 @@ setTimeout(()=>{report('done','1');try{location.href='${origin}/canary/navigate'
 			await open("streaming-cap");
 			const lines = Array.from({ length: 300 }, (_, index) => `<p>line ${index}</p>`).join("\n");
 			await ui.evaluate(show([assistant(fence(lines, false))]));
-			await ui.until("document.querySelector('.omp-htmlpage-streaming') && document.querySelector('.omp-htmlpage-more')");
+			await ui.until("document.querySelector('.omp-htmlpage-streaming') && document.querySelector('.omp-output-more')");
 			const box = (): Promise<{ height: number; atBottom: boolean; full: number }> => ui.evaluate("(()=>{const b=document.querySelector('.omp-htmlpage-streaming');return{height:b.getBoundingClientRect().height,atBottom:b.scrollTop+b.clientHeight>=b.scrollHeight-4,full:b.scrollHeight}})()");
-			const capped = await box();
-			assert.ok(capped.height <= 800 && capped.full > 800, `capped at 800 (${capped.height}, content ${capped.full})`);
-			assert.equal(capped.atBottom, true, "a streaming block follows its tail");
+			const small = await box();
+			assert.ok(small.height < 400 && small.full > 800, `a small preview, not the page cap (${small.height}, content ${small.full})`);
+			assert.equal(small.atBottom, true, "a streaming block follows its tail");
 			assert.equal(await frames(), 0);
-			await ui.evaluate("document.querySelector('.omp-htmlpage-more').click()");
-			await ui.until("document.querySelector('.omp-htmlpage-streaming').getBoundingClientRect().height>800");
-			assert.equal((await ui.evaluate<string>("document.querySelector('.omp-htmlpage-more').textContent")), "Show less");
+			assert.equal(await ui.evaluate<string>("document.querySelector('.omp-output-more').textContent"), "Show all 300 lines");
+			await ui.evaluate("document.querySelector('.omp-output-more').click()");
+			await ui.until("document.querySelector('.omp-htmlpage-streaming').getBoundingClientRect().height>400");
+			const big = await box();
+			assert.ok(big.height <= 800 && big.full > 800, `expanded is bounded by the page cap (${big.height})`);
+			assert.equal(await ui.evaluate<string>("document.querySelector('.omp-output-more').textContent"), "Collapse");
 			await ui.evaluate(reply(lines));
 			await ui.until("document.querySelector('iframe.omp-htmlpage-frame')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-streaming')"), null, "a closed page replaces the capped source");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-htmlpage-streaming')"), null, "a closed page replaces the preview");
 		});
 
 		await t.test("a page cannot take the keyboard from the composer by itself, but the user can click into it", async () => {

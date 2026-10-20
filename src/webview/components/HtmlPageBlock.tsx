@@ -20,6 +20,7 @@ import { htmlPageFrameUrl, useHtmlPageTheme } from "../lib/html-page-theme.ts";
 import { useHtmlPagesEnabled } from "../lib/html-pages-enabled.ts";
 import { AssistantReplyContext } from "./FileLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
+import { PREVIEW_ROWS } from "./tool-view.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 
 /** Longest reason shown on the one muted line. */
@@ -60,36 +61,49 @@ function PageBlock({ source, closed, leaf }: { source: string; closed: boolean; 
 }
 
 /**
- * The code block, and one muted line saying why it is not a page, when there is a reason. The source is capped at the page's collapsed height:
- * a streaming fence (or a closed one that did not become a page) of hundreds of lines would otherwise push the transcript down. While it streams the
- * capped block follows its tail unless the reader scrolled up inside it; Show full source lifts the cap.
+ * The code block, and one muted line saying why it is not a page, when there is a reason. The source is a small preview of the tool outputs' size
+ * (`PREVIEW_ROWS` lines): a streaming fence (or a closed one that did not become a page) of hundreds of lines would otherwise push the transcript
+ * down. The preview follows its tail unless the reader scrolled up inside it; Show all lines lifts it to at most `HTML_PAGE_MAX_HEIGHT`, scrolling inside.
  */
 function CodeWithNote({ source, closed, reason, leaf }: { source: string; closed: boolean; reason: string | null; leaf?: number }) {
 	const box = useRef<HTMLDivElement>(null);
 	const stick = useRef(true);
+	const [preview, setPreview] = useState<number | null>(null);
 	const [long, setLong] = useState(false);
 	const [full, setFull] = useState(false);
+	const lines = useMemo(() => source.replace(/\n$/, "").split("\n").length, [source]);
 	useLayoutEffect(() => {
 		const element = box.current;
 		if (element === null) return;
-		if (element.scrollHeight > HTML_PAGE_MAX_HEIGHT + 1) setLong(true);
-		if (!full && stick.current) element.scrollTop = element.scrollHeight;
-	}, [source, full]);
+		let height = preview;
+		if (height === null) {
+			const pre = element.querySelector("pre");
+			if (pre !== null) {
+				const style = getComputedStyle(pre);
+				const line = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5;
+				height = Math.ceil(line * PREVIEW_ROWS + (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0));
+				setPreview(height);
+			}
+		}
+		if (height !== null && lines > PREVIEW_ROWS && element.scrollHeight > height + 1) setLong(true);
+		if (stick.current) element.scrollTop = element.scrollHeight;
+	}, [source, full, preview, lines]);
 	const capped = long && !full;
+	const limit = full ? HTML_PAGE_MAX_HEIGHT : preview ?? undefined;
 	return (
 		<div className="omp-mermaid">
 			<div
 				ref={box}
 				className="omp-htmlpage-streaming"
 				data-capped={capped ? "" : undefined}
-				style={full ? undefined : { maxHeight: HTML_PAGE_MAX_HEIGHT }}
+				style={{ maxHeight: limit }}
 				onScroll={event => { const el = event.currentTarget; stick.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 4; }}
 			>
 				<CodeBlock language="html" source={source} closed={closed} leaf={leaf} />
 			</div>
 			{long && (
-				<button type="button" className="omp-htmlpage-more" aria-expanded={full} onClick={() => setFull(value => !value)}>
-					{full ? "Show less" : "Show full source"}
+				<button type="button" className="omp-output-more" aria-expanded={full} onClick={() => setFull(value => !value)}>
+					{full ? <><span className="codicon codicon-chevron-up" aria-hidden="true" />Collapse</> : `Show all ${lines.toLocaleString("en-US")} lines`}
 				</button>
 			)}
 			{reason !== null && (
