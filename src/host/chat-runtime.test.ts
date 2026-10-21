@@ -1167,6 +1167,64 @@ describe("Stop", () => {
 		await runtime.handleMessage(TAB, { type: "omp:chat-abort", requestId: "stop-2" }, page);
 		assert.deepEqual(page.ofType("omp:chat-abort-result").map(answer => [answer.status, answer.entries.length]), [["refused", 0]]);
 	});
+
+	describe("a Stop that took the message back (ADR-0082)", () => {
+		const PNG = "iVBORw0KGgo=";
+		const queued = { text: "queued steer", images: [] as never[] };
+
+		/** The session's verdict is stubbed: its own rules are tested over `FakeRpcChannel` in session-stop-withdraw.test.ts. */
+		async function stopWith(withdrawal: unknown, page: RecordingPage, others: RecordingPage[] = []): Promise<void> {
+			const { runtime } = await liveRig({ isStreaming: true });
+			const original = RpcSession.prototype.abortAndRestore;
+			RpcSession.prototype.abortAndRestore = (async () => ({ status: "accepted", restored: { entries: [queued], imagesDropped: false, truncated: false }, withdrawal })) as never;
+			try {
+				runtime.attachPage(TAB, page);
+				for (const other of others) runtime.attachPage(TAB, other);
+				await runtime.handleMessage(TAB, { type: "omp:chat-abort", requestId: "stop-3", takeBack: true }, page);
+			} finally {
+				RpcSession.prototype.abortAndRestore = original;
+			}
+			runtime.dispose();
+		}
+
+		it("carries the message, its images and the unconfirmed flag to the page that stopped", async () => {
+			const page = new RecordingPage("editor");
+			const other = new RecordingPage("other");
+			const images = [{ type: "image", data: PNG, mimeType: "image/png" }];
+			await stopWith({ status: "withdrawn", text: "fix the typo", images, unconfirmed: true }, page, [other]);
+			const [answer] = page.ofType("omp:chat-abort-result");
+			assert.deepEqual(answer?.withdrawn, { text: "fix the typo", images, unconfirmed: true });
+			assert.equal(answer?.kept, undefined);
+			assert.deepEqual(answer?.entries, [{ text: "queued steer" }]);
+			assert.equal(other.ofType("omp:chat-abort-result").length, 0);
+		});
+
+		it("says kept when the message qualified but could not be taken out", async () => {
+			const page = new RecordingPage("editor");
+			await stopWith({ status: "kept" }, page);
+			const [answer] = page.ofType("omp:chat-abort-result");
+			assert.equal(answer?.kept, true);
+			assert.equal(answer?.withdrawn, undefined);
+		});
+
+		it("resends a draft too large for its route with the text, the images counted as unavailable, and the queue shrunk first", async () => {
+			const page = new RecordingPage("bridge");
+			const images = [{ type: "image", data: PNG, mimeType: "image/png" }, { type: "image", data: PNG, mimeType: "image/png" }];
+			// Refuses anything carrying an image; then anything carrying the queued entry as well.
+			page.refuse = message => {
+				if (message.type !== "omp:chat-abort-result") return "sent";
+				const carriesImages = (message.withdrawn?.images?.length ?? 0) > 0;
+				return carriesImages || message.entries.length > 0 ? "too-large" : "sent";
+			};
+			await stopWith({ status: "withdrawn", text: "fix the typo", images, unconfirmed: false }, page);
+			const answers = page.ofType("omp:chat-abort-result");
+			assert.equal(answers.length, 1);
+			assert.deepEqual(answers[0]?.withdrawn, { text: "fix the typo", unavailableImages: 2 });
+			assert.deepEqual(answers[0]?.entries, [], "the queue shrank before the draft lost anything more");
+			assert.equal(answers[0]?.truncated, true);
+			assert.equal(answers[0]?.imagesDropped, undefined);
+		});
+	});
 });
 
 /**

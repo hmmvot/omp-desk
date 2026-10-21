@@ -128,6 +128,8 @@ const QUOTE_HINTS: Record<ChatSendWith, string> = {
 };
 /** How long a quote's notice stays above the conversation. */
 const QUOTE_NOTICE_MS = 5000;
+/** How long the notice that a Stop took a message back (or could not) stays above the conversation. */
+const STOP_NOTICE_MS = 8000;
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
@@ -1295,6 +1297,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (captureRef.current !== null) { deferredRef.current.push(place); return; }
 			const held = imagesRef.current.length;
 			const heldDocuments = documentsRef.current.length;
+			const wasEmpty = textRef.current.trim().length === 0 && held === 0 && heldDocuments === 0;
 			const merged = mergeRestoredQueued({ text: textRef.current, images: imagesRef.current, documents: documentsRef.current, nextNumber: nextNumberRef.current, nextDocumentNumber: nextDocumentNumberRef.current, nextId: imageSeqRef.current + 1 }, entries);
 			nextNumberRef.current = merged.nextNumber;
 			nextDocumentNumberRef.current = merged.nextDocumentNumber;
@@ -1304,6 +1307,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const presentFiles = referencedNumbers(merged.text, "file", (kind, number, name) => kind === "file" && isKnownDocument(merged.documents, number, name));
 			publishDocuments(pruneInactiveDocuments(merged.documents, number => presentFiles.has(number), new Set(merged.documents.slice(heldDocuments).map(document => document.number))));
 			writeDraft(merged.text, { caret: merged.text.length, history: "record" });
+			// A taken-back message that filled an empty composer on its own: Undo of its move clears it while it is unedited
+			// (`rewoundRef`, as after Rewind). Never a typed draft, and never a refill that also carries messages the Stop
+			// took out of OMP's queue: they exist nowhere else.
+			if (wasEmpty && entries.length === 1 && entries[0]!.withdrawn === true) rewoundRef.current = draftRevisionRef.current;
 			const sentences = [...(merged.imagesLost > 0 ? [`${merged.imagesLost} image${merged.imagesLost === 1 ? "" : "s"} of the edited message could not be attached (unsupported format).`] : []), ...merged.notes];
 			setAttachError(sentences.length > 0 ? sentences.join(" ") : null);
 		};
@@ -1385,11 +1392,26 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 
 	/**
 	 * Stop the running turn; a refusal (session not live, host unreachable) is shown, never dropped. Like the TUI's
-	 * Escape, the messages still queued come back into the draft (after what it holds) instead of running later.
+	 * Escape, the messages still queued come back into the draft (after what it holds) instead of running later. A Stop
+	 * right after a send may also take that message back out of the conversation (ADR-0082): it comes first among
+	 * what the hand-over places, so a refill of an empty composer is that message, and a composer that already holds
+	 * a draft keeps it, with the message after it.
 	 */
 	const stop = useCallback((): void => {
 		const result = client.sendAbort(answer => {
-			offerQueuedForEditing(answer.entries.map(entry => ({ text: entry.text, images: entry.images ?? [] })));
+			const taken = answer.withdrawn;
+			const lost = taken?.unavailableImages ?? 0;
+			offerQueuedForEditing([
+				...(taken === undefined ? [] : [{ text: taken.text, images: taken.images ?? [], withdrawn: true as const, ...(lost > 0 ? { notes: [`${lost} image${lost === 1 ? "" : "s"} of the message could not be restored.`] } : {}) }]),
+				...answer.entries.map(entry => ({ text: entry.text, images: entry.images ?? [] })),
+			]);
+			if (taken !== undefined) {
+				client.notices.post({ key: "stop-withdraw", level: "info", ttlMs: STOP_NOTICE_MS, text: taken.unconfirmed === true
+					? "Stopped. Your message is back in the composer. OMP did not confirm taking it out of the conversation, so it may still be there."
+					: "Stopped. Your message is back in the composer." });
+			} else if (answer.kept === true) {
+				client.notices.post({ key: "stop-withdraw", level: "warn", ttlMs: STOP_NOTICE_MS, text: "Stopped. OMP could not take the message back out of the conversation, so it stays there." });
+			}
 			if (!mountedRef.current) return;
 			if (answer.truncated === true) setSendError("Stopped. OMP could not hand back every queued message, so some were discarded.");
 			else if (answer.imagesDropped === true) setSendError("Stopped. Some images of the queued messages could not be restored to the composer.");

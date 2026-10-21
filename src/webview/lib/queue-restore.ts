@@ -40,6 +40,8 @@ export interface RestoredQueued {
 	images: readonly RestoredImage[];
 	documents?: readonly RestoredLinked[];
 	notes?: readonly string[];
+	/** The message a Stop took back out of the conversation (ADR-0082), not one withdrawn from a queue. */
+	withdrawn?: true;
 }
 
 /** An image of the composer's draft: the attachment plus its stable reference number. */

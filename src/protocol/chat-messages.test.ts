@@ -159,6 +159,24 @@ describe("parseChatHostMessage", () => {
 		assert.equal(parseChatHostMessage({ ...message, entries: [{ text: 7 }] }), null);
 	});
 
+	it("carries the message a Stop took back, and what it could not carry", () => {
+		const base = { type: "omp:chat-abort-result", epoch: EPOCH, requestId: REQUEST_ID, status: "accepted", entries: [] };
+		const image = { type: "image", mimeType: "image/png", data: "AA==" };
+		const withdrawn = { text: "fix the typo", images: [image], unavailableImages: 2, unconfirmed: true };
+		assert.deepEqual(parseChatHostMessage({ ...base, withdrawn }), { ...base, withdrawn });
+		assert.deepEqual(parseChatHostMessage({ ...base, withdrawn: { text: "plain" } }), { ...base, withdrawn: { text: "plain" } });
+		assert.deepEqual(parseChatHostMessage({ ...base, kept: true }), { ...base, kept: true });
+		assert.deepEqual(parseChatHostMessage({ ...base, kept: false }), base, "kept is carried only when true");
+		assert.deepEqual(parseChatHostMessage({ ...base, withdrawn: { text: "plain" }, kept: true }), { ...base, withdrawn: { text: "plain" } }, "a draft wins over kept");
+		assert.equal(parseChatHostMessage({ ...base, withdrawn: { text: 7 } }), null);
+		assert.equal(parseChatHostMessage({ ...base, withdrawn: { text: "x".repeat(MAX_CHAT_TEXT_LENGTH + 1) } }), null);
+		assert.equal(parseChatHostMessage({ ...base, withdrawn: "text" }), null);
+		assert.deepEqual(parseChatHostMessage({ ...base, withdrawn: { text: "t", images: "nope" } }), { ...base, withdrawn: { text: "t", unavailableImages: 1 } }, "an unreadable image is counted unavailable");
+		assert.deepEqual(parseChatHostMessage({ ...base, withdrawn: { text: "t", images: [image, { nope: 1 }], unavailableImages: 1 } }), { ...base, withdrawn: { text: "t", unavailableImages: 3 } }, "a set with an unreadable image is lost as a whole and counted");
+		const refused = { ...base, status: "refused" };
+		assert.deepEqual(parseChatHostMessage({ ...refused, withdrawn: { text: "t" }, kept: true }), refused, "a refused stop carries neither");
+	});
+
 	it("carries promotion results and the remembered transcript defaults", () => {
 		const result = { type: "omp:chat-queue-result", epoch: EPOCH, requestId: REQUEST_ID, purpose: "promote", results: [{ status: "removed" }, { status: "gone" }] };
 		assert.deepEqual(parseChatHostMessage(result), result);
@@ -262,6 +280,13 @@ describe("parseChatWebviewMessage", () => {
 	it("refuses a command without a minted request id", () => {
 		for (const requestId of [undefined, "abc", "1", REQUEST_ID.toUpperCase(), 3]) {
 			assert.equal(parseChatWebviewMessage({ type: "omp:chat-abort", requestId }), null, String(requestId));
+		}
+	});
+
+	it("carries takeBack on a Stop only when it is true", () => {
+		assert.deepEqual(parseChatWebviewMessage({ type: "omp:chat-abort", requestId: REQUEST_ID, takeBack: true }), { type: "omp:chat-abort", requestId: REQUEST_ID, takeBack: true });
+		for (const takeBack of [false, "true", 1, undefined]) {
+			assert.deepEqual(parseChatWebviewMessage({ type: "omp:chat-abort", requestId: REQUEST_ID, takeBack }), { type: "omp:chat-abort", requestId: REQUEST_ID }, String(takeBack));
 		}
 	});
 

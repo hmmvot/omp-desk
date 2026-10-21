@@ -69,8 +69,14 @@ export function treeObservation(event: unknown): TreeObservation | null {
 	return { oldLeafId: record.oldLeafId, newLeafId: record.newLeafId, summarized: typeof record.summaryEntry === "object" && record.summaryEntry !== null };
 }
 
-function isUserMessage(entry: unknown): boolean {
-	if (typeof entry !== "object" || entry === null || !("type" in entry) || entry.type !== "message" || !("message" in entry)) return false;
+/**
+ * A user request OMP's own `navigateTree` rewinds past (`isUserRequestEntry`): a user message, or a skill invocation
+ * the user typed (a `skill-prompt` custom message attributed to `user`, which OMP writes instead of a user message).
+ */
+function isUserRequest(entry: unknown): boolean {
+	if (typeof entry !== "object" || entry === null || !("type" in entry)) return false;
+	if (entry.type === "custom_message") return "customType" in entry && entry.customType === "skill-prompt" && "attribution" in entry && entry.attribution === "user";
+	if (entry.type !== "message" || !("message" in entry)) return false;
 	const message = entry.message;
 	return typeof message === "object" && message !== null && "role" in message && message.role === "user";
 }
@@ -104,7 +110,7 @@ export async function runNavigateCommand(
 	if (target === undefined || target === null) throw navigateError("target");
 	const onBranch = (): boolean => sessions.getBranch().some(entry => idOf(entry) === request.targetId);
 	if (request.kind === "rewind") {
-		if (!isUserMessage(target) || !onBranch()) throw navigateError("target");
+		if (!isUserRequest(target) || !onBranch()) throw navigateError("target");
 	} else if (request.kind === "switch") {
 		// A target on the current branch would be an unlabelled rewind without its prompt.
 		if (onBranch()) throw navigateError("target");

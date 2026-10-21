@@ -241,7 +241,7 @@ export class ChatClient {
 				const answer = this.#aborts.get(message.requestId);
 				if (answer === undefined) return true;
 				this.#aborts.delete(message.requestId);
-				answer({ status: message.status, entries: message.entries, ...(message.imagesDropped ? { imagesDropped: true } : {}), ...(message.truncated ? { truncated: true } : {}) });
+				answer({ status: message.status, entries: message.entries, ...(message.imagesDropped ? { imagesDropped: true } : {}), ...(message.truncated ? { truncated: true } : {}), ...(message.withdrawn === undefined ? {} : { withdrawn: message.withdrawn }), ...(message.kept ? { kept: true } : {}) });
 				return true;
 			}
 			case "omp:chat-navigate-result": {
@@ -422,7 +422,9 @@ export class ChatClient {
 	/**
 	 * Stop the running turn; the session continues. Like the TUI's Escape, the host withdraws the user's queued
 	 * messages first (`abort_and_restore_queue`) so they neither run after the stop nor vanish: `onAnswer` gets them
-	 * back, oldest first, whenever the host answers — the composer puts them into the draft.
+	 * back, oldest first, whenever the host answers — the composer puts them into the draft. A Stop right after the
+	 * send also asks for the message that started the turn back (`takeBack`, ADR-0082): the answer's `withdrawn` is
+	 * that message, already out of the conversation, and `kept` says it qualified but could not be taken out.
 	 */
 	sendAbort(onAnswer?: (answer: ChatAbortAnswer) => void): ChatSendResult {
 		const refusal = this.#refusal();
@@ -434,7 +436,7 @@ export class ChatClient {
 			this.#aborts.set(requestId, onAnswer);
 			if (this.#aborts.size > MAX_PENDING_ABORTS) this.#aborts.delete(this.#aborts.keys().next().value!);
 		}
-		const result = this.#send({ type: "omp:chat-abort", requestId });
+		const result = this.#send({ type: "omp:chat-abort", requestId, takeBack: true });
 		if (!result.ok) {
 			this.#aborts.delete(requestId);
 			this.#operations.abandon(requestId);

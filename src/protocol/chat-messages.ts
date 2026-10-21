@@ -29,7 +29,7 @@
  * | `omp:chat-operation` | the action the user asked for on this tab that is still being processed (kind, step id, elapsed time, request id), or none, with the end of the last one; epoch-free presentation only |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
- * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, for its composer |
+ * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, and the message that started the turn when the Stop took it back (ADR-0082), for its composer |
  * | `omp:chat-navigate-result` | the outcome of an in-place Rewind/Undo/branch switch, and a rewound prompt for the composer |
  * | `omp:chat-btw`, `omp:chat-btw-delta`, `omp:chat-btw-result` | `/btw` side questions: records, streamed text and the answer to a panel request (`btw-messages.ts`); never part of the transcript |
  *
@@ -325,9 +325,23 @@ export interface ChatRestoredMessage {
 }
 
 /**
+ * The message a Stop took back (ADR-0082): it left the conversation, or OMP dropped it before it was written, and the
+ * composer gets what was typed. `unavailableImages` counts attachments that could not be carried back; `unconfirmed`
+ * says OMP did not confirm the removal, so the message may still be on the branch.
+ */
+export interface ChatWithdrawnMessage {
+	text: string;
+	images?: ChatImageWire[];
+	unavailableImages?: number;
+	unconfirmed?: true;
+}
+
+/**
  * The answer to one `omp:chat-abort`, sent to the page that asked: what `abort_and_restore_queue` took out of the
  * steering and follow-up queues (oldest first), for that page's composer. `imagesDropped`/`truncated` say some
  * images, or the newest texts, could not be carried; `refused`/`unconfirmed` withdrew nothing the page can know of.
+ * With `takeBack` on the request, `withdrawn` is the message that started the turn when the Stop took it back, and
+ * `kept` says it qualified but could not be taken out of the conversation (so it stays); neither is set otherwise.
  */
 export interface ChatAbortResultMessage {
 	type: "omp:chat-abort-result";
@@ -337,6 +351,8 @@ export interface ChatAbortResultMessage {
 	entries: ChatRestoredMessage[];
 	imagesDropped?: true;
 	truncated?: true;
+	withdrawn?: ChatWithdrawnMessage;
+	kept?: true;
 }
 
 /**
@@ -418,6 +434,8 @@ export interface ChatFollowUpMessage {
 export interface ChatAbortMessage {
 	type: "omp:chat-abort";
 	requestId: string;
+	/** The page can put a taken-back message into its composer (ADR-0082); a page that does not say so gets today's Stop. */
+	takeBack?: true;
 }
 
 /** The user's answer to one dialog; the host answers OMP at most once per dialog id. */
@@ -1140,7 +1158,20 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				if (images.imagesDropped) imagesDropped = true;
 				entries.push(images.images === undefined ? { text: raw.text } : { text: raw.text, images: images.images });
 			}
-			return { type: value.type, epoch, requestId: value.requestId, status: value.status, entries, ...(imagesDropped ? { imagesDropped: true as const } : {}), ...(value.truncated === true ? { truncated: true as const } : {}) };
+			const answer: ChatAbortResultMessage = { type: value.type, epoch, requestId: value.requestId, status: value.status, entries, ...(imagesDropped ? { imagesDropped: true as const } : {}), ...(value.truncated === true ? { truncated: true as const } : {}) };
+			if (value.status !== "accepted") return answer;
+			if (value.withdrawn !== undefined) {
+				const draft = value.withdrawn;
+				if (!isRecord(draft) || typeof draft.text !== "string" || draft.text.length > MAX_CHAT_TEXT_LENGTH || (draft.unavailableImages !== undefined && !isCount(draft.unavailableImages))) return null;
+				const images = parseRestoredImages(draft.images, false);
+				// A set over the per-prompt budget is dropped as a whole: every image of it is one the user lost.
+				const lost = images.imagesDropped ? (Array.isArray(draft.images) ? Math.max(1, draft.images.length) : 1) : 0;
+				const unavailable = (typeof draft.unavailableImages === "number" ? draft.unavailableImages : 0) + lost;
+				answer.withdrawn = { text: draft.text, ...(images.images === undefined ? {} : { images: images.images }), ...(unavailable > 0 ? { unavailableImages: unavailable } : {}), ...(draft.unconfirmed === true ? { unconfirmed: true as const } : {}) };
+			} else if (value.kept === true) {
+				answer.kept = true;
+			}
+			return answer;
 		}
 		case "omp:chat-navigate-result": {
 			if (!isChatRequestId(value.requestId) || (value.status !== "done" && value.status !== "refused" && value.status !== "unconfirmed")) return null;
@@ -1399,7 +1430,7 @@ export function parseChatWebviewMessage(value: unknown): ChatWebviewMessage | nu
 			return message;
 		}
 		case "omp:chat-abort":
-			return { type: "omp:chat-abort", requestId };
+			return { type: "omp:chat-abort", requestId, ...(value.takeBack === true ? { takeBack: true as const } : {}) };
 		case "omp:chat-navigate": {
 			const { kind, targetId, expectedLeafId, summarize } = value;
 			if ((kind !== "rewind" && kind !== "undo" && kind !== "switch") || !isName(targetId, MAX_ID_LENGTH) || (expectedLeafId !== null && !isName(expectedLeafId, MAX_ID_LENGTH)) || typeof summarize !== "boolean") return null;

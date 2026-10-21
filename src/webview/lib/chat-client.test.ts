@@ -519,6 +519,26 @@ describe("chat quick actions", () => {
 		assert.deepEqual(answers, [{ status: "accepted", entries: [{ text: "queued steer" }], imagesDropped: true }]);
 	});
 
+	it("asks a Stop to take the message back and hands the withdrawn draft or the kept flag to the answer", () => {
+		const { client, sent } = harness();
+		client.handle(snapshotMessage());
+		const answers: unknown[] = [];
+		assert.deepEqual(client.sendAbort(answer => answers.push(answer)), { ok: true });
+		const abort = sent.at(-1);
+		assert.ok(abort?.type === "omp:chat-abort");
+		assert.deepEqual(abort, { type: "omp:chat-abort", requestId: abort.requestId, takeBack: true });
+		const withdrawn = { text: "fix the typo", unavailableImages: 1, unconfirmed: true as const };
+		client.handle({ type: "omp:chat-abort-result", epoch: EPOCH, requestId: abort.requestId, status: "accepted", entries: [], withdrawn });
+		assert.deepEqual([...answers], [{ status: "accepted", entries: [], withdrawn }]);
+
+		const second = client.sendAbort(answer => answers.push(answer));
+		assert.deepEqual(second, { ok: true });
+		const again = sent.at(-1);
+		assert.ok(again?.type === "omp:chat-abort");
+		client.handle({ type: "omp:chat-abort-result", epoch: EPOCH, requestId: again.requestId, status: "accepted", entries: [], kept: true });
+		assert.deepEqual(answers.at(-1), { status: "accepted", entries: [], kept: true });
+	});
+
 	it("forgets a Stop the route never carried", () => {
 		const { client, sent, setReachable } = harness();
 		client.handle(snapshotMessage());

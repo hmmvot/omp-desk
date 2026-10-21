@@ -7034,6 +7034,98 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// A Stop that takes the message back (ADR-0082): the answer carries `withdrawn` or `kept`.
+		const stopWithAnswer = async (answer: Record<string, unknown>, typed?: string): Promise<void> => {
+			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});window.composer.focus()");
+			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
+			if (typed !== undefined) await ui.call("Input.insertText", { text: typed });
+			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-abort')");
+			await ui.evaluate(`const abort=window.sent.find(message=>message.type==='omp:chat-abort');
+			 window.ui.receive({type:'omp:chat-abort-result',epoch:window.ui.current().epoch,requestId:abort.requestId,status:'accepted',entries:[],...${JSON.stringify(answer)}})`);
+		};
+		const stopNotice = (): Promise<string | null> => ui.evaluate("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"] .omp-notice-description')?.textContent ?? null");
+		const undoAnswer = (): Promise<unknown> => ui.evaluate(`window.ui.receive({type:'omp:chat-navigate-result',requestId:'${"0".repeat(32)}',status:'done',kind:'undo',summarized:false})`);
+
+		await t.test("Stop takes a message back into an empty composer and says so; the abort asks for it", async () => {
+			await reset("stop-withdraw-empty");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo" } });
+			await ui.wait("window.composer.value()==='fix the typo'");
+			assert.equal(await ui.evaluate("window.sent.find(message=>message.type==='omp:chat-abort').takeBack"), true);
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
+			assert.equal(await stopNotice(), "Stopped. Your message is back in the composer.");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "the message is not sent again");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Stop keeps a typed draft, puts the taken-back message after it and the queued messages after that", async () => {
+			await reset("stop-withdraw-draft");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo" }, entries: [{ text: "queued steer" }] }, "new draft");
+			await ui.wait("window.composer.value().includes('queued steer')");
+			const merged = await draftValue();
+			assert.ok(merged.startsWith("new draft") && merged.indexOf("new draft") < merged.indexOf("fix the typo") && merged.indexOf("fix the typo") < merged.indexOf("queued steer"), merged);
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Stop that kept the message warns, and leaves the composer alone", async () => {
+			await reset("stop-withdraw-kept");
+			await stopWithAnswer({ kept: true }, "new draft");
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
+			assert.equal(await stopNotice(), "Stopped. OMP could not take the message back out of the conversation, so it stays there.");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]').classList.contains('omp-notice--warning')"), true);
+			assert.equal(await draftValue(), "new draft");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Stop whose removal OMP did not confirm returns the message and says that it may still be there", async () => {
+			await reset("stop-withdraw-unconfirmed");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo", unconfirmed: true } });
+			await ui.wait("window.composer.value()==='fix the typo'");
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
+			assert.equal(await stopNotice(), "Stopped. Your message is back in the composer. OMP did not confirm taking it out of the conversation, so it may still be there.");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Undo of the Stop's move clears the unedited refill, never an edited one, a typed draft, or a refill that carries queued messages", async () => {
+			// An unedited refill of an empty composer goes.
+			await reset("stop-withdraw-undo");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo" } });
+			await ui.wait("window.composer.value()==='fix the typo'");
+			await undoAnswer();
+			await ui.wait("window.composer.value()===''");
+
+			// A refill the user edited stays.
+			await reset("stop-withdraw-undo-edited");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo" } });
+			await ui.wait("window.composer.value()==='fix the typo'");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: " now" });
+			await ui.wait("window.composer.value()==='fix the typo now'");
+			await undoAnswer();
+			await settleFrames();
+			assert.equal(await draftValue(), "fix the typo now");
+
+			// A refill that also carries a queued message stays: the queued one exists nowhere else.
+			await reset("stop-withdraw-undo-queued");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo" }, entries: [{ text: "queued steer" }] });
+			await ui.wait("window.composer.value().includes('queued steer')");
+			const handed = await draftValue();
+			await undoAnswer();
+			await settleFrames();
+			assert.equal(await draftValue(), handed);
+
+			// A typed draft is never cleared.
+			await reset("stop-withdraw-undo-typed");
+			await stopWithAnswer({ withdrawn: { text: "fix the typo" } }, "new draft");
+			await ui.wait("window.composer.value().includes('fix the typo')");
+			const kept = await draftValue();
+			await undoAnswer();
+			await settleFrames();
+			assert.equal(await draftValue(), kept);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("extension widgets render at their placement as plain text, and a warning notice is dismissible", async () => {
 			await reset("quick-extension-surfaces");
 			const frame = (value: Record<string, unknown>) => ui.evaluate(`window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`);

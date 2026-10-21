@@ -43,7 +43,7 @@ import type { HistoryReader } from "./rpc/history-reader.ts";
 import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../protocol/rpc.ts";
 import type { InputReclaim, RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
-import type { ClearOutcome, NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
+import type { AbortRestoreOutcome, ClearOutcome, NavigateOutcome, NavigateRequest, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";
 import { SettingsRefusal } from "./omp-settings-core.ts";
 import { OmpUnavailableError } from "../shared/omp-unavailable.ts";
@@ -648,9 +648,9 @@ export class ChatRuntime {
 				return this.#settle(conversation, origin, await session.followUp({ requestId: message.requestId, text: message.text, ...(message.images === undefined ? {} : { images: message.images }) }));
 			case "omp:chat-abort": {
 				const epoch = session.epoch;
-				const outcome = await session.abortAndRestore(message.requestId);
+				const outcome = await session.abortAndRestore(message.requestId, { takeBack: message.takeBack === true });
 				if (conversation.disposed) return "ignored";
-				this.#answerAbort(origin, epoch, message.requestId, outcome.status === "accepted" ? outcome.restored : outcome.status);
+				this.#answerAbort(origin, epoch, message.requestId, outcome);
 				return this.#settle(conversation, origin, outcome.status === "accepted" ? { status: "accepted", agentInvoked: null } : outcome);
 			}
 			case "omp:chat-queue-remove":
@@ -1110,22 +1110,31 @@ export class ChatRuntime {
 
 	/**
 	 * Tell the route that stopped the turn what `abort_and_restore_queue` handed back, so its composer can put the
-	 * withdrawn messages into the draft. An answer the route cannot carry is resent without images, then with an
-	 * oldest-first prefix of the texts, flagged either way: withdrawn text is never dropped silently.
+	 * withdrawn messages into the draft, and the message the Stop took back out of the conversation (ADR-0082). An
+	 * answer the route cannot carry is resent without images, then with an oldest-first prefix of the queued texts,
+	 * flagged either way: withdrawn text is never dropped silently, and the taken-back message is never dropped at all.
 	 */
-	#answerAbort(origin: ChatPage | null, epoch: ChatEpoch, requestId: string, restored: RestoredQueue | "refused" | "unconfirmed"): void {
+	#answerAbort(origin: ChatPage | null, epoch: ChatEpoch, requestId: string, outcome: AbortRestoreOutcome): void {
 		if (origin === null) return;
 		const base = { type: "omp:chat-abort-result" as const, epoch, requestId };
-		if (typeof restored === "string") { origin.post({ ...base, status: restored, entries: [] }); return; }
-		const answer = (entries: ChatAbortResultMessage["entries"], imagesDropped: boolean, truncated: boolean): ChatAbortResultMessage =>
-			({ ...base, status: "accepted", entries, ...(imagesDropped ? { imagesDropped: true as const } : {}), ...(truncated ? { truncated: true as const } : {}) });
+		if (outcome.status !== "accepted") { origin.post({ ...base, status: outcome.status, entries: [] }); return; }
+		const { restored, withdrawal } = outcome;
+		const draft = (images: boolean): Pick<ChatAbortResultMessage, "withdrawn" | "kept"> => {
+			if (withdrawal === undefined) return {};
+			if (withdrawal.status === "kept") return { kept: true };
+			const carried = images ? withdrawal.images.slice(0, MAX_ATTACH_ITEMS).map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data })) : [];
+			const unavailable = withdrawal.images.length - carried.length;
+			return { withdrawn: { text: withdrawal.text.slice(0, MAX_CHAT_TEXT_LENGTH), ...(carried.length > 0 ? { images: carried } : {}), ...(unavailable > 0 ? { unavailableImages: unavailable } : {}), ...(withdrawal.unconfirmed ? { unconfirmed: true as const } : {}) } };
+		};
+		const answer = (entries: ChatAbortResultMessage["entries"], imagesDropped: boolean, truncated: boolean, images: boolean): ChatAbortResultMessage =>
+			({ ...base, status: "accepted", entries, ...(imagesDropped ? { imagesDropped: true as const } : {}), ...(truncated ? { truncated: true as const } : {}), ...draft(images) });
 		const clipped = restored.entries.some(entry => entry.text.length > MAX_CHAT_TEXT_LENGTH);
 		const full = restored.entries.map(entry => ({ text: entry.text.slice(0, MAX_CHAT_TEXT_LENGTH), ...(entry.images.length > 0 ? { images: entry.images.map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data })) } : {}) }));
-		if (origin.post(answer(full, restored.imagesDropped, restored.truncated || clipped)) !== "too-large") return;
+		if (origin.post(answer(full, restored.imagesDropped, restored.truncated || clipped, true)) !== "too-large") return;
 		const texts = full.map(entry => ({ text: entry.text }));
 		const imagesDropped = restored.imagesDropped || restored.entries.some(entry => entry.images.length > 0);
 		for (let count = texts.length; count >= 0; count = count === 0 ? -1 : Math.floor(count / 2)) {
-			if (origin.post(answer(texts.slice(0, count), imagesDropped, restored.truncated || clipped || count < texts.length)) !== "too-large") return;
+			if (origin.post(answer(texts.slice(0, count), imagesDropped, restored.truncated || clipped || count < texts.length, false)) !== "too-large") return;
 		}
 	}
 

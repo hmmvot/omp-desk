@@ -7,6 +7,8 @@ date: 2026-10-09
 
 > Narrowly amended by [ADR-0071](0071-edit-omps-settings-from-its-own-registry-in-a-staged-worker-and-write-one-layer-at-a-time.md): a bare `/settings` and its terminal-only guidance now open the OMP Settings editor instead of the Models editor, and the interception runs before the advertised-name rule, as `/models` and `/agents` do.
 
+> Amended 2026-10-21 by [ADR-0082](0082-stop-takes-a-message-back-out-of-the-conversation-when-nothing-was-answered-or-done.md): a Stop that comes before the turn has answered or acted, with `takeBack` requested, also removes the message that started the turn from the session through Rewind's mechanism and returns it to the composer, ahead of the queued messages this record hands back. Plain `abort` and every other Stop are unchanged.
+
 ## Context and Problem Statement
 
 Chat is an `omp --mode rpc-ui` child ([ADR-0038](0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md)). Bringing more of the terminal UI's everyday controls into Chat raised four questions:

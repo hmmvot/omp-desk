@@ -5,6 +5,8 @@ date: 2026-10-09
 
 # ADR-0051: Rewind Chat in place through a Desk-registered OMP command with a durable marker
 
+> Amended 2026-10-21 by [ADR-0082](0082-stop-takes-a-message-back-out-of-the-conversation-when-nothing-was-answered-or-done.md): the host also starts a rewind itself (a Stop that takes a just-sent message back), and the command accepts the user's own skill invocation (a `skill-prompt` custom message attributed to the user, which OMP's own `navigateTree` rewinds past like a user message) as a target besides a user message; the picker's target list is unchanged.
+
 ## Context and Problem Statement
 
 Chat needs the TUI's in-place rewind: move the active branch of the same session file to an earlier entry, keep the later messages as a sibling branch, and put a rewound prompt's text and images back into the composer.

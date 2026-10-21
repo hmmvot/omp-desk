@@ -19,6 +19,7 @@
  * reconciles at `agent_end`, `prompt_result`, `session_settled` and on every reattach, and flags rows still
  * unmatched after three attempts and one settle as *not yet saved* — never dropping or duplicating them.
  */
+import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { CHAT_EXIT_STDERR_BYTES, parseChatExitReason, type ChatExitReason } from "../../chat/exit-reason.ts";
@@ -70,6 +71,7 @@ import {
 } from "../../chat/clear.ts";
 import type { ForkSource } from "../../chat/fork.ts";
 import { routesAsPrompt } from "../../chat/prompt-routing.ts";
+import { anchorKind, isUserSkillInvocation, mayStillWithdraw, withdrawVerdict, type AnchorKind, type AnchorResult } from "../../chat/stop-withdraw.ts";
 import {
 	NAVIGATE_COMMAND,
 	NAVIGATE_ERROR_PATH,
@@ -393,8 +395,17 @@ export interface RestoredQueue {
 	readonly truncated: boolean;
 }
 
+/**
+ * What a Stop did about the message that started the turn (ADR-0082). `withdrawn`: the message left the conversation
+ * (or never reached it) and its typed text and images return to the composer; `unconfirmed`: OMP did not answer the
+ * move, so the message may still be on the branch. `kept`: the move was eligible but failed, nothing was taken.
+ */
+export type StopWithdrawal =
+	| { status: "withdrawn"; text: string; images: readonly RpcImage[]; unconfirmed: boolean }
+	| { status: "kept" };
+
 export type AbortRestoreOutcome =
-	| { status: "accepted"; restored: RestoredQueue }
+	| { status: "accepted"; restored: RestoredQueue; withdrawal?: StopWithdrawal }
 	| { status: "refused"; reason: SendRefusal }
 	| { status: "unconfirmed" };
 
@@ -550,6 +561,10 @@ const FRAME_FAILURE_RESYNC_GAP_MS = 2_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,120}$/;
 const MAX_REMEMBERED_REQUESTS = 256;
 const MAX_LEDGER = 64;
+/** How long a Stop that may take its message back waits for OMP to settle and report the prompt's result. */
+const WITHDRAW_SETTLE_MS = 5_000;
+/** Reads of the branch a Stop that may take its message back makes while rows stay unreconciled. */
+const WITHDRAW_READ_PASSES = 4;
 const NO_HELD: HeldChoices = { model: null, modelCycles: 0, thinking: null, thinkingCycles: 0 };
 const MAX_HELD_CYCLES = 16;
 const STDERR_TAIL_BYTES = CHAT_EXIT_STDERR_BYTES;
@@ -595,11 +610,38 @@ interface PendingCommand {
 	queueRevision: number;
 }
 
+/** The prompt that started a turn, kept so a Stop right after the send can take it back (ADR-0082). */
+interface Anchor {
+	kind: AnchorKind;
+	images: readonly RpcImage[];
+	/** The newest durable entry the host held at the send (`null`: an empty conversation). */
+	baselineId: string | null;
+	/** OMP acknowledged this very prompt without saying the agent stays out of it; until then nothing is proven. */
+	armed: boolean;
+}
+
 interface LedgerEntry {
 	requestId: string;
 	text: string;
 	sentAt: number;
 	unconfirmed: boolean;
+	/** OMP answered this prompt as one it handled itself, or refused it: no `prompt_result` is owed, so the entry no longer counts as an open prompt. */
+	quiet?: boolean;
+	anchor: Anchor | null;
+}
+
+/** A Stop that took the anchor and has not decided yet: every other mutation is refused until it has. */
+interface Withdrawal {
+	anchor: Anchor;
+	/** The ledger request id of the anchor's own `prompt`, and the text sent. */
+	promptRequestId: string;
+	text: string;
+	/** The host's clock at the Stop request minus the send time. */
+	elapsedMs: number;
+	/** The anchor's `prompt_result`, once seen. */
+	result: AnchorResult | null;
+	/** Re-checks what the settle wait is waiting for; called after every model change. */
+	wake: (() => void) | null;
 }
 
 /** Whether two file paths name the same file (Windows: case- and separator-insensitive). */
@@ -669,6 +711,8 @@ export class RpcSession {
 	readonly #queueRequests = new Map<string, Promise<RemoveQueuedOutcome>>();
 	readonly #abortRequests = new Map<string, Promise<AbortRestoreOutcome>>();
 	readonly #ledger: LedgerEntry[] = [];
+	/** The Stop that holds the anchor of the turn and has not decided (ADR-0082); its fence refuses every other mutation. */
+	#withdrawal: Withdrawal | null = null;
 	/** Clears the TODO row of a fully closed list after OMP's delay (`src/host/rpc/todo-hud.ts`). */
 	readonly #todoHud: TodoHudClock;
 	/** What the session file last said about the latest durable todo list and its row. */
@@ -1004,13 +1048,33 @@ export class RpcSession {
 	#sendPrompt(request: PromptRequest, streamingBehavior: "steer" | "followUp"): Promise<SendOutcome> {
 		this.cancelDeferredClear();
 		this.#slashArmed = request.text.trimStart().startsWith("/");
-		this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false });
+		this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false, anchor: this.#newAnchor(request) });
 		return this.#sendUser(request.requestId, {
 			type: "prompt",
 			message: request.text,
 			...(request.images !== undefined && request.images.length > 0 ? { images: request.images } : {}),
 			streamingBehavior,
+		}).then(outcome => {
+			// OMP 18.12.2 acknowledges a prompt that starts the agent bare (`agentInvoked` comes with the `prompt_result`); only an
+			// acknowledgement that says the agent is not invoked (a command OMP ran itself), a refusal or an unknown fate disarms.
+			const entry = this.#ledger.find(item => item.requestId === request.requestId);
+			if (entry !== undefined && (outcome.status === "refused" || (outcome.status === "accepted" && outcome.agentInvoked === false))) entry.quiet = true;
+			if (entry !== undefined && entry.anchor !== null) entry.anchor = outcome.status === "accepted" && outcome.agentInvoked !== false ? { ...entry.anchor, armed: true } : null;
+			return outcome;
 		});
+	}
+
+	/**
+	 * The anchor of a prompt that starts a turn (ADR-0082): none unless nothing runs, nothing waits (no queue, no dialog,
+	 * no unreconciled row, no other prompt in the ledger) and OMP takes the text as plain input, a template or a skill.
+	 */
+	#newAnchor(request: PromptRequest): Anchor | null {
+		const model = this.#model;
+		if (this.#ledger.some(entry => entry.quiet !== true) || model.working || model.state?.isStreaming === true || !model.settled || model.asyncPaused || model.uiRequest !== null || (model.state?.queuedMessageCount ?? 0) > 0) return null;
+		if (model.state?.isCompacting === true || model.maintenance?.status === "working") return null;
+		if ([...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return null;
+		const kind = anchorKind(request.text, model.commands);
+		return kind === null ? null : { kind, images: request.images ?? [], baselineId: model.durableCount > 0 ? model.entries[model.durableCount - 1]!.id : null, armed: false };
 	}
 
 	/**
@@ -1107,24 +1171,45 @@ export class RpcSession {
 	 * them back for the draft. Queues behind any command the child is already running (serial FIFO), so the answer is
 	 * awaited past the longest serial command. An OMP without the command (before 18.8.5) gets a plain `abort`: the
 	 * turn still stops, and its queue stays in OMP, where the dock keeps showing it. Exactly-once per `requestId`.
+	 *
+	 * With `takeBack` (ADR-0082) a Stop right after the send also takes the message that started the turn out of the
+	 * conversation when the turn has done nothing the user would count as an answer or an action: see {@link #withdraw}.
+	 * The plain `abort` fallback never does, because OMP's drain starts the next turn from a queue that is still there.
 	 */
-	abortAndRestore(requestId: string): Promise<AbortRestoreOutcome> {
+	abortAndRestore(requestId: string, options: { takeBack?: boolean } = {}): Promise<AbortRestoreOutcome> {
 		if (!REQUEST_ID_PATTERN.test(requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
 		const known = this.#abortRequests.get(requestId);
 		if (known !== undefined) return known;
 		const promise = (async (): Promise<AbortRestoreOutcome> => {
-			const refusal = this.#controlRefusal();
+			const refusal = this.#controlRefusal(true);
 			if (refusal !== null) return { status: "refused", reason: refusal };
+			// Taken before the first await: a second Stop finds no anchor.
+			const withdrawal = options.takeBack === true ? this.#takeAnchor() : null;
 			this.#applyLocal({ type: "abort_requested" });
 			try {
 				const response = await this.#send(`${VSC_ID_PREFIX}${requestId}`, { type: "abort_and_restore_queue" }, ABORT_RESTORE_TIMEOUT_MS);
-				if (response.success) { this.#endStoppedPass(); return { status: "accepted", restored: parseRestoredQueue(response.data) }; }
+				if (response.success) {
+					this.#endStoppedPass();
+					const restored = parseRestoredQueue(response.data);
+					if (withdrawal === null) return { status: "accepted", restored };
+					// The queue has already left OMP: whatever goes wrong deciding about the message, the Stop still hands it back.
+					try {
+						return await this.#withdraw(withdrawal, restored);
+					} catch {
+						return { status: "accepted", restored };
+					}
+				}
 				if (response.error !== "Unknown command: abort_and_restore_queue") return { status: "refused", reason: "rejected" };
 				const fallback = await this.#sendInternal({ type: "abort" });
 				if (fallback.status === "accepted") this.#endStoppedPass();
 				return fallback.status === "accepted" ? { status: "accepted", restored: { entries: [], imagesDropped: false, truncated: false } } : fallback;
 			} catch (error) {
 				return this.#failureOutcome(error, requestId);
+			} finally {
+				if (withdrawal !== null && this.#withdrawal === withdrawal) {
+					this.#withdrawal = null;
+					this.#syncHeld();
+				}
 			}
 		})();
 		this.#abortRequests.set(requestId, promise);
@@ -1133,6 +1218,86 @@ export class RpcSession {
 			if (oldest.done !== true) this.#abortRequests.delete(oldest.value);
 		}
 		return promise;
+	}
+
+	/**
+	 * Take the anchor of the turn out of its ledger entry for this Stop, or none: no armed anchor, one a Stop already
+	 * took, or a turn that can no longer qualify (a tool call, a second request, text older than the grace). In that last
+	 * case the Stop is today's Stop with no extra wait. Otherwise the Stop holds every other mutation until it decides.
+	 */
+	#takeAnchor(): Withdrawal | null {
+		if (this.#withdrawal !== null) return null;
+		const entry = this.#ledger.find(item => item.anchor?.armed === true);
+		const anchor = entry?.anchor ?? null;
+		if (entry === undefined || anchor === null) return null;
+		entry.anchor = null;
+		const elapsedMs = this.#timers.now() - entry.sentAt;
+		const model = this.#model;
+		if (!mayStillWithdraw(model.entries, anchor.baselineId, { stream: model.stream, activeTools: model.activeTools.size }, elapsedMs)) return null;
+		this.#withdrawal = { anchor, promptRequestId: entry.requestId, text: entry.text, elapsedMs, result: null, wake: null };
+		return this.#withdrawal;
+	}
+
+	/**
+	 * The decision after OMP answered the Stop: wait (bounded) until the turn has settled and the anchor's own
+	 * `prompt_result` is in, re-read the branch until every row is reconciled, then decide with `withdrawVerdict`:
+	 * `remove` moves the leaf past the message through the Rewind path, `dropped` (OMP never wrote the prompt) needs no
+	 * move, anything else leaves the Stop as it was. A move that failed says `kept`; one OMP did not answer says
+	 * `unconfirmed`, and the draft returns either way it may have happened.
+	 */
+	async #withdraw(withdrawal: Withdrawal, restored: RestoredQueue): Promise<AbortRestoreOutcome> {
+		const unchanged: AbortRestoreOutcome = { status: "accepted", restored };
+		if (!await this.#awaitWithdrawalSettled(withdrawal)) return unchanged;
+		for (let pass = 1; ; pass += 1) {
+			await this.#reconcileSettled();
+			if (!this.#hasUnreconciledRows()) break;
+			if (pass >= WITHDRAW_READ_PASSES) return unchanged;
+			await new Promise<void>(resolve => this.#timers.setTimeout(resolve, REBUILD_RETRY_MS));
+		}
+		if (!this.#live) return unchanged;
+		const model = this.#model;
+		const { anchor } = withdrawal;
+		const verdict = withdrawVerdict({ entries: model.entries.slice(0, model.durableCount), baselineId: anchor.baselineId, kind: anchor.kind, text: withdrawal.text, elapsedMs: withdrawal.elapsedMs, result: withdrawal.result });
+		const draft = (unconfirmed: boolean): StopWithdrawal => ({ status: "withdrawn", text: withdrawal.text, images: anchor.images, unconfirmed });
+		switch (verdict.action) {
+			case "keep":
+				return unchanged;
+			case "dropped": {
+				// The same prompt may also have come back in the queue; the composer gets it once.
+				const duplicate = restored.entries.findIndex(entry => entry.text === withdrawal.text);
+				return { status: "accepted", restored: duplicate < 0 ? restored : { ...restored, entries: restored.entries.filter((_, index) => index !== duplicate) }, withdrawal: draft(false) };
+			}
+			case "remove": {
+				const moved = await this.#navigateOnce({ requestId: randomBytes(16).toString("hex"), kind: "rewind", targetId: verdict.targetId, expectedLeafId: model.leafId, summarize: false }, true);
+				return { status: "accepted", restored, withdrawal: moved.status === "done" ? draft(false) : moved.status === "unconfirmed" ? draft(true) : { status: "kept" } };
+			}
+		}
+	}
+
+	/** Waits for what `#withdraw` needs before it reads the branch; false when the time ran out or the session is gone. */
+	#awaitWithdrawalSettled(withdrawal: Withdrawal): Promise<boolean> {
+		const ready = (): boolean => {
+			const model = this.#model;
+			return !this.#live || (withdrawal.result !== null && !model.working && model.state?.isStreaming !== true && model.settled && !model.asyncPaused);
+		};
+		if (ready()) return Promise.resolve(this.#live);
+		return new Promise<boolean>(resolve => {
+			const timer = this.#timers.setTimeout(() => {
+				withdrawal.wake = null;
+				resolve(false);
+			}, WITHDRAW_SETTLE_MS);
+			withdrawal.wake = () => {
+				if (!ready()) return;
+				this.#timers.clearTimeout(timer);
+				withdrawal.wake = null;
+				resolve(this.#live);
+			};
+		});
+	}
+
+	/** A row the host showed that the branch read does not hold yet: whether it is the message or its answer is unknown. */
+	#hasUnreconciledRows(): boolean {
+		return [...this.#model.pending.values()].some(row => !row.unsaved && row.hidden !== true);
 	}
 
 	/**
@@ -1178,11 +1343,20 @@ export class RpcSession {
 	 * written to the prompt ledger, never a pending user row. Exactly-once per `requestId`.
 	 */
 	navigate(request: NavigateRequest): Promise<NavigateOutcome> {
+		return this.#navigateOnce(request, false);
+	}
+
+	/**
+	 * One navigation per request id. `own`: a Stop that took its message back makes it (ADR-0082): it passes the
+	 * Stop's withdrawal fence, may target the user's skill invocation as well as a user message, and needs no draft
+	 * (the Stop returns what was sent from its ledger entry).
+	 */
+	#navigateOnce(request: NavigateRequest, own: boolean): Promise<NavigateOutcome> {
 		if (!NAVIGATE_REQUEST_ID.test(request.requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
 		const known = this.#navigateRequests.get(request.requestId);
 		if (known !== undefined) return known;
 		this.cancelDeferredClear();
-		const promise = this.#navigate(request);
+		const promise = this.#navigate(request, own);
 		this.#navigateRequests.set(request.requestId, promise);
 		if (this.#navigateRequests.size > MAX_REMEMBERED_REQUESTS) {
 			const oldest = this.#navigateRequests.keys().next();
@@ -1192,8 +1366,8 @@ export class RpcSession {
 	}
 
 	/** Why a navigation cannot start now, or null. Every check is on host-known state; OMP re-checks its own. */
-	#navigationRefusal(request: NavigateRequest): NavigateRefusal | null {
-		const control = this.#controlRefusal();
+	#navigationRefusal(request: NavigateRequest, own: boolean): NavigateRefusal | null {
+		const control = this.#controlRefusal(own);
 		if (control !== null) return control === "busy" ? "busy" : "not-live";
 		const model = this.#model;
 		if (model.state?.isCompacting === true || model.maintenance?.status === "working") return "compacting";
@@ -1208,8 +1382,9 @@ export class RpcSession {
 		switch (request.kind) {
 			case "rewind": {
 				const target = durable.find(entry => entry.id === request.targetId);
-				if (target === undefined || !isRewindTarget(target) || !rewindTargets(durable).some(candidate => candidate.id === target.id)) return "target";
-				return null;
+				if (target === undefined) return "target";
+				if (own && isUserSkillInvocation(target)) return null;
+				return !isRewindTarget(target) || !rewindTargets(durable).some(candidate => candidate.id === target.id) ? "target" : null;
 			}
 			case "undo":
 				return undoOffer(durable, model.leafId)?.from === request.targetId ? null : "stale";
@@ -1218,17 +1393,17 @@ export class RpcSession {
 		}
 	}
 
-	async #navigate(request: NavigateRequest): Promise<NavigateOutcome> {
-		let refusal = this.#navigationRefusal(request);
+	async #navigate(request: NavigateRequest, own: boolean): Promise<NavigateOutcome> {
+		let refusal = this.#navigationRefusal(request, own);
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		// The model the request was checked against must be the one the command runs on.
 		while (this.#reconcileRunning) await new Promise<void>(resolve => this.#reconcileIdleWaiters.push(resolve));
-		refusal = this.#navigationRefusal(request);
+		refusal = this.#navigationRefusal(request, own);
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const sessionId = this.#model.header?.id ?? this.#boundId;
 		if (sessionId === null) return { status: "refused", reason: "not-live" };
 		// The draft comes from the entry the host holds: OMP's extension wrapper drops `editorText`/`editorImages`.
-		const target = request.kind === "rewind" ? this.#model.entries.find(entry => entry.id === request.targetId) : undefined;
+		const target = request.kind === "rewind" && !own ? this.#model.entries.find(entry => entry.id === request.targetId) : undefined;
 		const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
 		const wait = Promise.withResolvers<NavigationWait>();
 		const navigation = { id, requestId: request.requestId, errorPath: NAVIGATE_ERROR_PATH, errors: [] as string[], finish: (how: NavigationWait) => wait.resolve(how), waitEnded: false };
@@ -2699,6 +2874,10 @@ export class RpcSession {
 			case "todo_auto_clear":
 				if (this.#live) void this.#refreshState();
 				return;
+			case "tool_execution_start":
+				// A tool ran: no Stop can take the message back now, so its images are no longer worth holding.
+				for (const entry of this.#ledger) entry.anchor = null;
+				return;
 			case "tool_execution_end":
 				if (frame.toolName === "eval" && this.#live) void this.#refreshState();
 				return;
@@ -2736,6 +2915,11 @@ export class RpcSession {
 		if (requestId !== null) {
 			const at = this.#ledger.findIndex(entry => entry.requestId === requestId);
 			if (at >= 0) this.#ledger.splice(at, 1);
+			const withdrawal = this.#withdrawal;
+			if (withdrawal !== null && withdrawal.promptRequestId === requestId) {
+				withdrawal.result = { status: frame.status, agentInvoked: frame.agentInvoked };
+				withdrawal.wake?.();
+			}
 		}
 		this.#emit({ type: "prompt-result", requestId, result });
 		if (this.#slashArmed && !frame.agentInvoked && this.#live) void this.#checkIdentity();
@@ -3056,10 +3240,11 @@ export class RpcSession {
 
 	/**
 	 * Why a mutation cannot be sent now, or null. A navigation in flight, or one whose answer never came, fences every
-	 * mutation (prompts, queue edits, settings, compaction) so nothing appends to the branch it is moving.
+	 * mutation (prompts, queue edits, settings, compaction) so nothing appends to the branch it is moving. So does a
+	 * Stop that holds the anchor of the turn until it has decided; the Stop and the move it makes are `own` and pass.
 	 */
-	#controlRefusal(): SendRefusal | null {
-		return this.#mutationFence !== null || this.#navigation !== null || this.#navigationFence !== null || this.#contextRequest !== null ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
+	#controlRefusal(own = false): SendRefusal | null {
+		return this.#mutationFence !== null || this.#navigation !== null || this.#navigationFence !== null || this.#contextRequest !== null || (this.#withdrawal !== null && !own) ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
 	}
 
 	/**
@@ -3128,6 +3313,7 @@ export class RpcSession {
 
 	/** Send held choices once OMP can take them; abandon them when the session can no longer. */
 	#syncHeld(): void {
+		this.#withdrawal?.wake?.();
 		this.#syncDeferredClear();
 		if (!this.#hasHeld()) return;
 		const block = this.#choiceBlock();

@@ -4,8 +4,9 @@ import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, encodeNavigateCommand, type N
 import { registerNavigateCommand, runNavigateCommand, type NavigateCommandApi, type NavigateCommandContext, type TreeObservation, type TreeObserver } from "./navigate-command.ts";
 
 const REQUEST = "00112233445566778899aabbccddeeff";
-type Entry = { type: string; id: string; parentId: string | null; message?: { role: string }; customType?: string; data?: unknown };
+type Entry = { type: string; id: string; parentId: string | null; message?: { role: string }; customType?: string; attribution?: string; data?: unknown };
 const user = (id: string, parentId: string | null): Entry => ({ type: "message", id, parentId, message: { role: "user" } });
+const skill = (id: string, parentId: string | null, attribution: string): Entry => ({ type: "custom_message", id, parentId, customType: "skill-prompt", attribution });
 const assistant = (id: string, parentId: string | null): Entry => ({ type: "message", id, parentId, message: { role: "assistant" } });
 
 /** A session tree with a movable leaf, the `navigateTree` OMP runs, and the `session_tree` events it emits. */
@@ -20,7 +21,7 @@ class FakeSession {
 	/** Replaces the move OMP performs; the default moves to the target's parent for a user target, else the target. */
 	move: (targetId: string, summarize: boolean) => Promise<{ cancelled: boolean }> = async (targetId, summarize) => {
 		const target = this.entries.get(targetId)!;
-		const to = target.message?.role === "user" ? target.parentId : targetId;
+		const to = target.message?.role === "user" || (target.customType === "skill-prompt" && target.attribution === "user") ? target.parentId : targetId;
 		this.tree(this.leafId, to, summarize);
 		this.leafId = to;
 		return { cancelled: false };
@@ -81,6 +82,15 @@ describe("omp-desk-navigate command", () => {
 		assert.deepEqual(marker, { v: 1, requestId: REQUEST, kind: "rewind", from: "a2", target: "u2", to: "a1", summarized: true });
 		assert.deepEqual(session.appended, [{ customType: NAVIGATION_MARKER_TYPE, data: marker }]);
 		assert.equal(session.entries.get("m1")?.parentId, "a1", "the marker makes the move durable on the new branch");
+	});
+
+	it("rewinds a skill invocation the user typed, as OMP's own navigation does, and refuses one the agent injected", async () => {
+		const typed = new FakeSession([user("u1", null), assistant("a1", "u1"), skill("s2", "a1", "user"), assistant("a2", "s2")], "a2");
+		const marker = await typed.run({ targetId: "s2" });
+		assert.deepEqual([marker.target, marker.from, marker.to], ["s2", "a2", "a1"]);
+		const injected = new FakeSession([user("u1", null), assistant("a1", "u1"), skill("s2", "a1", "agent"), assistant("a2", "s2")], "a2");
+		await assert.rejects(injected.run({ targetId: "s2" }), refusal("target"));
+		assert.deepEqual(injected.appended, []);
 	});
 
 	it("refuses before anything moves: wrong mode, busy, other session, moved leaf, non-prompt or off-branch target", async () => {
