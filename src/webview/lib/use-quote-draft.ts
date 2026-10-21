@@ -3,15 +3,13 @@
  * notice. The edit is one undo step at the end of the draft; a held draft capture refuses the quote (a deferral would be
  * lost when the capture ends in an editor replacement), an open IME composition defers it to its settle in the same editor.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import type { ChatNoticeLevel } from "./chat-notices.ts";
 import type { DraftSurface } from "./draft-surface.ts";
 import { quoteSizeRefusal } from "../../shared/quote-limit.ts";
 import { placeQuote, quoteBlock, quoteLineCount } from "./quote-draft.ts";
 import { createQuoteHold } from "./quote-hold.ts";
 import type { QuoteRequest } from "./quote-sink.ts";
-
-/** How long the notice stays under the field. */
-const NOTICE_MS = 5000;
 
 /** What the quote needs to know about the composer, read at the moment it runs. */
 export interface QuoteHost {
@@ -25,24 +23,19 @@ export interface QuoteHost {
 	readonly writable: () => boolean;
 	/** The session has not settled yet (starting, attaching, resyncing): a host-sent quote waits for it instead of being refused. */
 	readonly settling: () => boolean;
+	/** Shows a sentence about the quote where the page shows its notices, for a few seconds. */
+	readonly notify: (words: string, level: ChatNoticeLevel) => void;
 }
 
 
 const HELD = "Your draft is being moved to a new editor; quote again in a moment";
 
 /** `settling` is the same fact as `host.settling()`, as render state: the held quotes are tried when it turns false. */
-export function useQuoteDraft(host: QuoteHost, settling: boolean): { notice: string | null; quote: (request: QuoteRequest) => void } {
+export function useQuoteDraft(host: QuoteHost, settling: boolean): { quote: (request: QuoteRequest) => void } {
 	const hostRef = useRef(host);
 	hostRef.current = host;
-	const [notice, setNotice] = useState<string | null>(null);
-	const timer = useRef<number | undefined>(undefined);
 	const held = useRef(createQuoteHold());
-	const say = useCallback((words: string): void => {
-		clearTimeout(timer.current);
-		setNotice(words);
-		timer.current = window.setTimeout(() => setNotice(null), NOTICE_MS);
-	}, []);
-	useEffect(() => () => clearTimeout(timer.current), []);
+	const say = useCallback((words: string, level: ChatNoticeLevel = "warn"): void => { hostRef.current.notify(words, level); }, []);
 
 	const quote = useCallback((request: QuoteRequest): void => {
 		const current = hostRef.current;
@@ -68,7 +61,7 @@ export function useQuoteDraft(host: QuoteHost, settling: boolean): { notice: str
 			surface.focus();
 			const lines = quoteLineCount(block);
 			const plain = request.kind === "selection" && request.plain;
-			say(plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
+			say(plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`, "info");
 		};
 		if (current.composing()) current.defer(place);
 		else place();
@@ -80,5 +73,5 @@ export function useQuoteDraft(host: QuoteHost, settling: boolean): { notice: str
 		for (const request of held.current.release()) quote(request);
 	}, [settling, quote]);
 
-	return { notice, quote };
+	return { quote };
 }

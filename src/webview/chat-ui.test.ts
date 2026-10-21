@@ -450,9 +450,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		await t.test("a /clear waiting for OMP shows what it waits for until it runs", async () => {
 			await reset("clear-pending");
 			await ui.evaluate("window.ui.push({clearPending:'unsettled'})");
-			await ui.wait("document.querySelector('.omp-footer-feedback[data-clear-pending]')?.textContent.includes('/clear will run when OMP finishes the interrupted turn.')");
+			await ui.wait("document.querySelector('.omp-notice[data-clear-pending]')?.textContent.includes('/clear will run when OMP finishes the interrupted turn.')");
 			await ui.evaluate("window.ui.push({clearPending:null})");
-			await ui.wait("!document.querySelector('.omp-footer-feedback[data-clear-pending]')");
+			await ui.wait("!document.querySelector('.omp-notice[data-clear-pending]')");
 		});
 
 		await t.test("only outer user movement detaches, and source position survives prepend, resize and same-session rejoin", async () => {
@@ -2449,16 +2449,16 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.reply(window.ui.last(), {selectedThinking:'high'})");
 			await ui.wait("document.querySelectorAll('.omp-footer-trigger')[1].disabled && window.ui.last().action === 'set-thinking'");
 			await ui.evaluate("window.fixtureClock.fire(35000)");
-			await ui.wait("document.querySelector('.omp-footer-feedback')");
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"control\"]')");
 			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-footer-trigger')[1].disabled"), true);
 			await ui.evaluate("window.fixtureClock.fire(6000)");
-			await ui.wait("!document.querySelector('.omp-footer-feedback')");
+			await ui.wait("!document.querySelector('.omp-notice[data-notice=\"control\"]')");
 			assert.equal(await ui.evaluate("window.ui.requests().filter(request=>request.action==='set-thinking').length"), 1);
 			await ui.evaluate("window.ui.reply(window.ui.last(),{notice:'The host rejected the change.'})");
-			await ui.wait("document.querySelector('.omp-footer-feedback > span')?.textContent === 'The host rejected the change.'");
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"control\"] .omp-notice-description')?.textContent === 'The host rejected the change.'");
 			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-footer-trigger')[1].textContent.trim()"), "low");
 			await ui.evaluate("window.fixtureClock.fire(6000)");
-			await ui.wait("!document.querySelector('.omp-footer-feedback')");
+			await ui.wait("!document.querySelector('.omp-notice[data-notice=\"control\"]')");
 			await ui.wait("!document.querySelectorAll('.omp-footer-trigger')[1].disabled");
 		});
 
@@ -2467,7 +2467,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-footer-trigger').click()");
 			await ui.wait("window.ui.last().picker === 'model'");
 			await ui.evaluate("window.fixtureClock.fire(35000)");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-footer-feedback')"), null);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice[data-notice=\"control\"]')"), null);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-footer-trigger').disabled"), true);
 			await ui.evaluate("window.ui.reply()");
 			await ui.wait("!document.querySelector('.omp-footer-trigger').disabled");
@@ -2787,22 +2787,22 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`window.ui.receive({type:'omp:footer-metadata',provider:'one',branch:'dock-branch',windows:[],accounts:[],accountSelection:null});
 			 window.ui.push({uiRequests:[{id:'dock-ask',method:'confirm',title:'Continue?',message:'Continue with this action?'}]});
 			 window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:{type:'command_feedback',message:'Native command feedback'}})`);
-			await ui.wait("document.querySelector('.omp-ask') && document.querySelector('.omp-footer-feedback')");
+			await ui.wait("document.querySelector('.omp-ask') && document.querySelector('.omp-notice[data-notice=\"command\"]')");
 			assert.deepEqual(await ui.evaluate(`(()=>{
-			 const card=document.querySelector('.omp-composer'),ask=card.querySelector('.omp-ask').getBoundingClientRect(),toolbar=card.querySelector('.omp-composer-toolbar').getBoundingClientRect();
+			 const card=document.querySelector('.omp-composer'),ask=card.querySelector('.omp-ask').getBoundingClientRect(),toolbar=card.querySelector('.omp-composer-toolbar').getBoundingClientRect(),notice=document.querySelector('.omp-notice[data-notice="command"]');
 			 return {branch:card.querySelector('.omp-composer-toolbar .omp-composer-branch').textContent.trim(),
 			  controls:card.querySelectorAll('.omp-footer-trigger').length,enabled:!card.querySelector('.omp-footer-trigger').disabled,
-			  afterAsk:toolbar.top>=ask.bottom,feedback:card.querySelector('.omp-footer-feedback > span').textContent,
-			  dismiss:card.querySelector('.omp-footer-feedback button')?.getAttribute('aria-label')!==null};})()`),
-				{ branch: "dock-branch", controls: 2, enabled: true, afterAsk: true, feedback: "Native command feedback", dismiss: true });
+			  afterAsk:toolbar.top>=ask.bottom,feedback:notice.querySelector('.omp-notice-description').textContent,inComposer:card.contains(notice),
+			  dismiss:notice.querySelector('button')?.getAttribute('aria-label')!==null};})()`),
+				{ branch: "dock-branch", controls: 2, enabled: true, afterAsk: true, feedback: "Native command feedback", inComposer: false, dismiss: true });
 			await ui.evaluate("window.ui.push({uiRequests:[]})");
 			await ui.wait("!document.querySelector('.omp-ask') && document.querySelector('.omp-composer-attach')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer .omp-composer-branch').textContent.trim()"), "dock-branch");
 			assert.equal(await ui.evaluate("window.ui.requests().length"), 1, "switching to/from an ask does not discard host control readback");
 			await ui.evaluate("window.fixtureClock.fire(6000);window.fixtureClock.fire(45000)");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-footer-feedback > span').textContent"), "Native command feedback", "native feedback stays until acknowledged");
-			await ui.evaluate("document.querySelector('.omp-footer-feedback button').click()");
-			await ui.wait("!document.querySelector('.omp-footer-feedback')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice[data-notice=\"command\"] .omp-notice-description').textContent"), "Native command feedback", "native feedback stays until acknowledged");
+			await ui.evaluate("document.querySelector('.omp-notice[data-notice=\"command\"] button').click()");
+			await ui.wait("!document.querySelector('.omp-notice[data-notice=\"command\"]')");
 		});
 		for (const surface of ["chat", "shell"]) await t.test(`OSC 8 and validated plain file clicks carry editor positions, and OSC 8 web links open like Chat web links, in the ${surface} terminal`, async () => {
 			await reset(`file-links-${surface}`);
@@ -4123,7 +4123,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		});
 
 		const quoteIn = (source: string): Promise<unknown> => ui.evaluate(`window.requestQuote({kind:'selection',plain:false,source:${JSON.stringify(source)}})`);
-		const hintText = (): Promise<string | null> => codeHint();
+		const hintText = (): Promise<string | null> => ui.evaluate("document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent ?? null");
 
 		await t.test("a quote lands at the end of the draft after a blank line, the caret on the line under it with the focus in the field, and one Ctrl+Z takes it back", async () => {
 			await reset("quote-insert");
@@ -4159,15 +4159,15 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:900})");
 			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===900)&&window.composer.readOnly()");
 			await quoteIn("must not land");
-			await ui.wait("(document.querySelector('.omp-composer-hint--code')?.textContent??'').startsWith('Your draft is being moved to a new editor')");
+			await ui.wait("(document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent??'').startsWith('Your draft is being moved to a new editor')");
 			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:900})");
 			await ui.wait("!window.composer.readOnly()");
 			await settleFrames();
 			assert.equal((await areaState()).value, "kept", "released, still nothing inserted");
 			await quoteIn("x".repeat(31_482));
-			await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='That selection is 31 482 characters; Quote takes at most 20 000.'");
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent==='That selection is 31 482 characters; Quote takes at most 20 000.'");
 			await quoteIn("  \n ");
-			await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'");
+			await ui.wait("document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent==='Select text in the conversation first'");
 			await quoteIn("x".repeat(20_000));
 			await ui.wait("window.composer.value().length>20000");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
@@ -4630,9 +4630,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await waitDraft("window.composer.value()==='> Reply with `code` inside\\n'");
 				await setDraft("");
 				await ui.evaluate("(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('.omp-reply-footer'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);window.ui.receive({type:'omp:webview-action',action:'quote-selection'})})()");
-				await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'||document.querySelector('.omp-composer-hint--code')?.textContent==='That selection has no message text to quote'");
+				await ui.wait("['Select text in the conversation first','That selection has no message text to quote'].includes(document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent)");
 				await ui.evaluate("getSelection().removeAllRanges();window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
-				await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'");
+				await ui.wait("document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent==='Select text in the conversation first'");
 				assert.equal((await areaState()).value, "", "nothing was inserted");
 				assert.equal(await sendCount(), 0, "quoting never sends");
 				assert.deepEqual(await ui.evaluate("window.errors"), []);

@@ -21,6 +21,7 @@ import { backgroundWaitOf } from "../chat/background-wait";
 import { jobsViewOf, sameJobsView, type GoneJobs, type JobsView } from "../chat/background-jobs";
 import { jobsCancelBlocked } from "../chat/jobs-hud";
 import { chatTurnInProgress } from "../chat/model";
+import { CLEAR_DEFERRED_SENTENCES } from "../chat/clear";
 import { Composer } from "./components/Composer";
 import { FileLinksProvider } from "./components/FileLinks";
 import { WebLinksProvider } from "./components/WebLinks";
@@ -249,15 +250,32 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 			: unansweredRestart
 				? { level: "warn", icon: "debug-disconnect", text: "OMP has not answered a state request. Reconnect keeps the same process; Restart can stop it and reopen the saved conversation. Unconfirmed input is kept and never resent automatically." }
 				: banner;
-	const banners = notice === null ? null : (
+	// The notices posted by the page (`ChatNoticeStore`) and the deferred /clear follow the connection and phase banner in the same block.
+	const posted = useSyncExternalStore(client.notices.subscribe, client.notices.getState);
+	useEffect(() => {
+		const message = snapshot.commandFeedback?.message;
+		if (message !== undefined) client.notices.post({ key: "command", level: "info", text: message });
+	}, [client, snapshot.commandFeedback]);
+	const banners = notice === null && posted.length === 0 && snapshot.clearPending === null ? null : (
 		<div className="omp-notices">
-			<div className={`omp-notice omp-notice--${notice.level === "warn" ? "warning" : notice.level}`} role="status" {...(pending !== null ? { "aria-busy": true } : {})}>
+			{notice !== null && <div className={`omp-notice omp-notice--${notice.level === "warn" ? "warning" : notice.level}`} role="status" {...(pending !== null ? { "aria-busy": true } : {})}>
 				<span className={`codicon codicon-${notice.icon}`} aria-hidden="true" />
 				<span className={`omp-notice-description${snapshot.exitReason === undefined ? "" : " omp-notice-exit"}`}>{notice.text}</span>
 				{!hostLost && pending === null && (banner?.action === "reconnect" || unansweredRestart) && <button type="button" className="omp-btn" disabled={snapshot.phase !== "failed"} onClick={() => client.reconnect()}>Reconnect</button>}
 				{!hostLost && pending === null && snapshot.epoch !== null && (unansweredRestart || banner?.action === "restart") && <button type="button" className="omp-btn" onClick={() => client.restart()}>Restart</button>}
 				{!hostLost && banner?.action === "provider-login" && <button type="button" className="omp-btn" onClick={() => guestTransport.post({ type: "omp:chat-command", command: "provider-login" })}>Log In to Provider</button>}
-			</div>
+			</div>}
+			{snapshot.clearPending !== null && <div className="omp-notice omp-notice--info" role="status" aria-busy="true" data-clear-pending={snapshot.clearPending}>
+				<span className="codicon codicon-loading codicon-modifier-spin" aria-hidden="true" />
+				<span className="omp-notice-description">{CLEAR_DEFERRED_SENTENCES[snapshot.clearPending]}</span>
+			</div>}
+			{posted.map(entry => (
+				<div key={entry.key} className={`omp-notice omp-notice--${entry.level === "warn" ? "warning" : entry.level}`} role="status" data-notice={entry.key}>
+					<span className={`codicon codicon-${entry.level === "warn" ? "warning" : entry.level}`} aria-hidden="true" />
+					<span className="omp-notice-description">{entry.text}</span>
+					<button type="button" className="omp-btn" aria-label="Dismiss message" title="Dismiss message" onClick={() => client.notices.dismiss(entry.key)}><span aria-hidden="true" className="codicon codicon-close" /></button>
+				</div>
+			))}
 		</div>
 	);
 

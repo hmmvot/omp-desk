@@ -6,7 +6,6 @@ import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import type { ControlModelRef, GuestControlAction, GuestControlStateMessage } from "../../protocol/messages";
 import type { FooterMetadataMessage } from "../../shared/footer-metadata";
 import { newControlScope } from "../../protocol/messages";
-import { CLEAR_DEFERRED_SENTENCES } from "../../chat/clear";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { HostSignalChips } from "./HostSignalChips";
 import { quotaUsedPercent } from "../../shared/context-indicator";
@@ -14,12 +13,14 @@ import { provideModelPicker } from "../lib/model-picker";
 
 const CONTROL_WAIT_TIMEOUT_MS = 35_000;
 const FEEDBACK_MS = 6_000;
+/** The key of the notice that tells what the host did with a model or thinking change; see `ChatNoticeStore`. */
+const CONTROL_NOTICE = "control";
 type ControlRequest =
 	| { action: "snapshot"; picker?: "model" | "thinking" }
 	| { action: "set-model"; model: ControlModelRef }
 	| { action: "set-thinking"; level: string };
 interface ControlBook { client: ChatClient; scope: string; nextId: number; lastSent: number; action: GuestControlAction; picker?: "model" | "thinking" }
-interface ControlView { client: ChatClient; state: GuestControlStateMessage | null; awaiting: number | null; action: GuestControlAction; feedback: string | null }
+interface ControlView { client: ChatClient; state: GuestControlStateMessage | null; awaiting: number | null; action: GuestControlAction }
 
 export function ChatFooter({ client, snapshot, commandsAction, trailingActions }: {
 	client: ChatClient;
@@ -29,7 +30,7 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 	trailingActions?: ReactNode;
 }): ReactNode {
 	const preferences = useSyncExternalStore(client.subscribe, client.getDisplayPreferences);
-	const [view, setView] = useState<ControlView>({ client, state: null, awaiting: null, action: "snapshot", feedback: null });
+	const [view, setView] = useState<ControlView>({ client, state: null, awaiting: null, action: "snapshot" });
 	const bookRef = useRef<ControlBook | null>(null);
 	const [snapshotOwed, setSnapshotOwed] = useState(false);
 	const [metadata, setMetadata] = useState<FooterMetadataMessage | null>(null);
@@ -37,7 +38,7 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 		bookRef.current = { client, scope: newControlScope(), nextId: 1, lastSent: 0, action: "snapshot" };
 	}
 	if (view.client !== client) {
-		setView({ client, state: null, awaiting: null, action: "snapshot", feedback: null });
+		setView({ client, state: null, awaiting: null, action: "snapshot" });
 		setSnapshotOwed(false);
 		setMetadata(null);
 	}
@@ -48,7 +49,8 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 		book.lastSent = requestId;
 		book.action = request.action;
 		book.picker = request.action === "snapshot" ? request.picker : undefined;
-		setView(previous => ({ ...previous, awaiting: requestId, action: request.action, feedback: null }));
+		client.notices.dismiss(CONTROL_NOTICE);
+		setView(previous => ({ ...previous, awaiting: requestId, action: request.action }));
 		guestTransport.post({ type: "omp:control-request", scope: book.scope, requestId, ...request,
 			...(request.action === "snapshot" ? {} : { actionSeq: guestTransport.nextActionSeq() }) });
 	}, [client]);
@@ -64,10 +66,10 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 		if (book === null || message.scope !== book.scope || message.requestId !== book.lastSent) return;
 		const picker = book.picker;
 		book.picker = undefined;
-		setView(previous => previous.client !== book.client ? previous : {
-			client: previous.client, state: message, awaiting: null, action: book.action,
-			feedback: message.notice ?? (!message.available && book.action !== "snapshot" ? message.reason ?? "The change could not be confirmed." : null),
-		});
+		const feedback = message.notice ?? (!message.available && book.action !== "snapshot" ? message.reason ?? "The change could not be confirmed." : null);
+		if (feedback === null) client.notices.dismiss(CONTROL_NOTICE);
+		else client.notices.post({ key: CONTROL_NOTICE, level: "warn", ttlMs: FEEDBACK_MS, text: feedback });
+		setView(previous => previous.client !== book.client ? previous : { client: previous.client, state: message, awaiting: null, action: book.action });
 		// The reducer updates synchronously; a state push and picker reply can precede React's next render.
 		const current = client.getSnapshot();
 		if (!message.available || current.phase !== "live" || current.readOnlyReason !== null) return;
@@ -94,27 +96,15 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 		if (!book || book.picker === undefined) return;
 		book.picker = undefined;
 		book.lastSent = -1; // A late selection from the abandoned route cannot mutate the new route.
-		setView(previous => ({ ...previous, awaiting: null, state: null, feedback: "The host connection changed; the picker was cancelled." }));
+		setView(previous => ({ ...previous, awaiting: null, state: null }));
+		client.notices.post({ key: CONTROL_NOTICE, level: "warn", ttlMs: FEEDBACK_MS, text: "The host connection changed; the picker was cancelled." });
 		setSnapshotOwed(true);
-	}), []);
+	}), [client]);
 	useEffect(() => {
 		if (view.awaiting === null || bookRef.current?.picker !== undefined) return;
-		const awaited = view.awaiting;
-		const timer = setTimeout(() => setView(previous => previous.client === client && previous.awaiting === awaited ? {
-			...previous, feedback: "The host has not reported this request's outcome. It was not sent again.",
-		} : previous), CONTROL_WAIT_TIMEOUT_MS);
+		const timer = setTimeout(() => client.notices.post({ key: CONTROL_NOTICE, level: "warn", ttlMs: FEEDBACK_MS, text: "The host has not reported this request's outcome. It was not sent again." }), CONTROL_WAIT_TIMEOUT_MS);
 		return () => clearTimeout(timer);
 	}, [client, view.awaiting]);
-	useEffect(() => {
-		if (view.feedback === null) return;
-		const timer = setTimeout(() => setView(previous => ({ ...previous, feedback: null })), FEEDBACK_MS);
-		return () => clearTimeout(timer);
-	}, [view.feedback]);
-	const [commandFeedback, setCommandFeedback] = useState<string | null>(null);
-	useEffect(() => {
-		const message = snapshot.commandFeedback?.message;
-		if (message !== undefined) setCommandFeedback(message);
-	}, [snapshot.commandFeedback]);
 	const pending = snapshot.pendingControl;
 	const modelHeld = pending?.model !== undefined || (pending?.modelCycles ?? 0) > 0;
 	const levelHeld = pending?.thinking !== undefined || (pending?.thinkingCycles ?? 0) > 0;
@@ -145,7 +135,7 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 		};
 	}, [metadata, model?.provider]);
 	// Model, thinking, Tools and branch share one toolbar with context and composer actions.
-	// Session notices and queued messages already have their own rows above the composer.
+	// Notices about these controls, the session and queued messages are shown above the conversation (`ChatNoticeStore`), never under the composer.
 	return (
 		<>
 			<div className="omp-composer-toolbar">
@@ -174,16 +164,6 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 					{trailingActions}
 				</div>
 			</div>
-			{snapshot.clearPending !== null && <div className="omp-footer-feedback" role="status" data-clear-pending={snapshot.clearPending}>
-				<span><span aria-hidden="true" className="codicon codicon-loading codicon-modifier-spin" /> {CLEAR_DEFERRED_SENTENCES[snapshot.clearPending]}</span>
-			</div>}
-			{snapshot.clearPending === null && (view.feedback ?? commandFeedback) !== null && <div className="omp-footer-feedback" role="status">
-				<span>{view.feedback ?? commandFeedback}</span>
-				<button type="button" className="omp-btn" aria-label="Dismiss message" title="Dismiss message" onClick={() => {
-					if (view.feedback !== null) setView(previous => ({ ...previous, feedback: null }));
-					else setCommandFeedback(null);
-				}}><span aria-hidden="true" className="codicon codicon-close" /></button>
-			</div>}
 		</>
 	);
 }

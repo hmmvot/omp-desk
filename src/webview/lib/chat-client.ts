@@ -47,6 +47,7 @@ import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResult
 import type { NavigationKind } from "../../chat/rewind.ts";
 import { parseSubagentPage, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { ChatOperationStore, type ChatOperationState, type ChatOperationStoreOptions } from "./chat-operation.ts";
+import { ChatNoticeStore } from "./chat-notices.ts";
 import { BtwClient } from "./btw-client.ts";
 
 /** What every surface renders from. */
@@ -162,6 +163,8 @@ export class ChatClient {
 	readonly #operations: ChatOperationStore;
 	/** The side-question store (`/btw`): outside the chat model, so a side answer is never a row of the transcript. */
 	readonly btw: BtwClient;
+	/** Transient notices shown above the conversation (see {@link ChatNoticeStore}). */
+	readonly notices = new ChatNoticeStore();
 	#model: ChatModel = createChatModel();
 	#displayPreferences: ChatDisplayPreferences = { toolCallDetail: "overview", accessibilitySupport: false };
 	#draftHandoffLocked = false;

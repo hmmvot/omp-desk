@@ -83,7 +83,6 @@ ${ANSI_STYLES}
 .omp-footer-trigger:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-composer-toolbar .omp-footer-trigger--pending { border-style: dashed; }
 .omp-footer-trigger--pending .omp-footer-trigger-label { font-style: italic; }
-.omp-footer-feedback { margin-top: 4px; color: var(--vscode-foreground); overflow-wrap: anywhere; }
 .omp-context-indicator { position: relative; display: flex; flex: 0 0 auto; }
 .omp-context-trigger { display: flex; align-items: center; justify-content: center; gap: 4px; height: 28px; padding: 0 5px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
 .omp-context-trigger:hover { background: var(--vscode-button-secondaryHoverBackground); }

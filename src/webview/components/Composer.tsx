@@ -121,6 +121,8 @@ const MAX_ROWS = 8;
 const CODE_HINT = "Code block · Ctrl+Enter: send · Enter: new line · Tab: indent · Shift+Tab: outdent, or leave when there is nothing to outdent";
 /** The words under the field while the caret is in a quote line (docs/designs/2026-10-15-quote-chat-selection.md). */
 const QUOTE_HINT = "Quote · Ctrl+Enter: send · Enter: new line · Shift+Tab: leave the quote";
+/** How long a quote's notice stays above the conversation. */
+const QUOTE_NOTICE_MS = 5000;
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
@@ -1428,13 +1430,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 
 	// Quoting (docs/designs/2026-10-15-quote-chat-selection.md): every trigger asks this composer through the sink, so the refusals, the edit and the notice are the same whoever asked.
 	const quoteSettling = snapshot.phase === "starting" || snapshot.phase === "attaching" || snapshot.phase === "resyncing";
-	const { notice: quoteNotice, quote } = useQuoteDraft({
+	const { quote } = useQuoteDraft({
 		surface: () => surfaceRef.current,
 		captured: () => captureRef.current !== null,
 		composing: () => composingRef.current,
 		defer: work => { deferredRef.current.push(work); },
 		writable: () => canPrompt,
 		settling: () => quoteSettling,
+		notify: (text, level) => client.notices.post({ key: "quote", text, level, ttlMs: QUOTE_NOTICE_MS }),
 	}, quoteSettling);
 	useEffect(() => provideQuoteSink(quote), [quote]);
 
@@ -1915,10 +1918,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					<span className="omp-sr-only" role="status">{suggestionStatus}</span>
 				</div>
 			</div>
-			{(blocks.length > 0 || quoteLayout.runs.length > 0 || quoteNotice !== null) && (
-				// The row stays while the draft holds a block or a quote and only its words come and go with the caret, so a click into one never moves the text under the pointer. A quote's notice takes the row for a few seconds.
-				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={quoteNotice ?? (caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : undefined)}>
-					{quoteNotice ?? (caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : "")}
+			{(blocks.length > 0 || quoteLayout.runs.length > 0) && (
+				// The row stays while the draft holds a block or a quote and only its words come and go with the caret, so a click into one never moves the text under the pointer.
+				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : undefined}>
+					{caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : ""}
 				</div>
 			)}
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />
