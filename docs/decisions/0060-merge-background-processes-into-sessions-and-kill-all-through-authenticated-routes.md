@@ -70,6 +70,10 @@ The user decided that the Sessions context menu gets **Kill**: it ends the sessi
 - **Skip the identity check.** Rejected by the product owner's own conservative default: killing an id Desk no longer owns could end an unrelated process.
 
 
+### Amendment note (2026-10-21)
+
+The statement above that the window driving a session "cannot tell a Kill from a crash" is superseded by [ADR-0034](0034-store-sessions-in-one-profile-catalog.md) (amendment of 2026-10-21): the driving window now reads the committed run intent (`SessionIndex.committedRunIntent`) when its process ends, so a Kill or Stop another window recorded is reported as stopped. The Kill still records the stopped intent first: it is what survives when no window sees the process end.
+
 ## Related Documents
 
 - [Sessions unify design](../designs/2026-10-11-sessions-unify-processes.md)

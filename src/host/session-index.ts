@@ -135,6 +135,8 @@ export interface SessionIndexStore {
 	get<T>(key: string): T | undefined;
 	update(key: string, value: unknown, base?: unknown): unknown;
 	transactRecords?(changes: readonly CatalogRecordChange[]): Promise<void>;
+	/** Re-read the committed record; the profile catalog does, a plain memento has nothing to re-read. */
+	refresh?(): Promise<unknown>;
 }
 
 // Catalog rows
@@ -562,7 +564,32 @@ export interface CloseSessionOptions {
 export interface CloseSessionResult {
 	readonly released: boolean;
 	readonly detail: string;
+	/**
+	 * The run intent the committed row holds after the close's write, when the close wrote and could read it back. A close that
+	 * is not the user's stop (`runIntent: "unchanged"`) never decides the intent, so another window's Stop or Kill shows here.
+	 */
+	readonly runIntent?: RunIntent;
 }
+
+/** The run an intent write is about: the launch attempt a caller examined, and its broker when it named one. */
+export interface RunIntentTarget {
+	readonly attemptStartedAt: string;
+	readonly pid: number | null;
+	readonly broker?: { readonly slot: string; readonly brokerId: string; readonly brokerGeneration: string };
+}
+
+export interface RecordRunIntentOptions {
+	/** Write only while the committed row's host is exactly this run (see {@link SessionIndex.recordRunIntent}). */
+	readonly expect?: RunIntentTarget;
+	/** This window's own observation text for the row, set with the intent. */
+	readonly detail?: string;
+}
+
+export type RecordRunIntentResult =
+	| { readonly status: "recorded"; readonly previous: RunIntent }
+	| { readonly status: "target-changed" }
+	| { readonly status: "unknown-tab" }
+	| { readonly status: "failed"; readonly detail: string };
 
 /** The incarnation of a driven host a detach is bound to: what the window serves and what the row must still record. */
 export interface DetachExpectation {
@@ -597,6 +624,12 @@ type CapturedHostRecord = { readonly startedAt: string; readonly pid: number | n
 function recordsCapturedHost(host: CapturedHostRecord | null, captured: KilledHostCapture): boolean {
 	return host !== null && host.startedAt === captured.attemptStartedAt && host.pid === captured.hostPid &&
 		host.rpc?.slot === captured.slot && host.rpc?.brokerId === captured.brokerId && host.rpc?.brokerGeneration === captured.brokerGeneration;
+}
+
+/** Whether a row's host record is exactly the run an intent write names (the broker only when the write named one). */
+function runIntentTargetMatches(host: CapturedHostRecord | null, target: RunIntentTarget): boolean {
+	if (host === null || host.startedAt !== target.attemptStartedAt || host.pid !== target.pid) return false;
+	return target.broker === undefined || (host.rpc?.slot === target.broker.slot && host.rpc?.brokerId === target.broker.brokerId && host.rpc?.brokerGeneration === target.broker.brokerGeneration);
 }
 
 /** Whether two host records name the same incarnation of a recorded process. */
@@ -2356,7 +2389,49 @@ export class SessionIndex {
 		const detail = options.detail ?? "This session is stopped. Resume to continue.";
 		await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", detail);
 		await this.#persist();
-		return { released: true, detail };
+		// The write above applied the run state field by field to the newest committed row: a Stop or Kill another window recorded
+		// meanwhile stands, and this window's copy follows it (a close that is not the user's stop never decides the intent).
+		const settled = this.#persistError === null ? this.#adoptSettledRunState(entry) : null;
+		return { released: true, detail, ...(settled === null ? {} : { runIntent: settled }) };
+	}
+
+	/**
+	 * Make a row of this window follow the run state (intent, host, release) the catalog's merge settled for it after a write of
+	 * this window's own landed, and move the merge base with it, so the next write does not read the adoption as this window's
+	 * own change of the field. Only the fields that differ are touched. `null` when the committed row cannot be read.
+	 */
+	#adoptSettledRunState(entry: MutableEntry): RunIntent | null {
+		const raw = this.#store.get<unknown>(SESSION_INDEX_STORAGE_KEY);
+		if (raw === undefined || raw === null || !isPersistedSnapshot(raw)) return null;
+		const committed = raw.entries.find(row => row.tabId === entry.tabId);
+		if (committed === undefined) return null;
+		const row = cloneSharedEntry(committed);
+		if (sameRecord([entry.runIntent, entry.host, entry.ownership], [row.runIntent, row.host, row.ownership])) return row.runIntent;
+		entry.runIntent = row.runIntent;
+		entry.host = row.host;
+		entry.ownership = row.ownership;
+		const base = isPersistedSnapshot(this.#sharedBase) ? this.#sharedBase : null;
+		if (base !== null) {
+			this.#sharedBase = {
+				...base,
+				entries: base.entries.map(held => held.tabId === row.tabId ? { ...held, runIntent: row.runIntent, host: row.host === null ? null : { ...row.host }, ownership: row.ownership === null ? null : { ...row.ownership } } : held),
+			} satisfies SharedSnapshot;
+		}
+		return row.runIntent;
+	}
+
+	/**
+	 * The run intent the newest committed record holds for a row, read now: the catalog is re-read first, so a Stop or Kill another
+	 * window committed a moment ago is seen before this window's own watch has adopted it. `null` when the row or the catalog
+	 * cannot be read. It changes nothing; an exit that asks it decides what to say, never what to record.
+	 */
+	async committedRunIntent(tabId: string): Promise<RunIntent | null> {
+		try {
+			await this.#store.refresh?.();
+		} catch {
+			/* the last adopted value below is the best this window has */
+		}
+		return this.#committedRunIntentOf(tabId);
 	}
 
 	/**
@@ -2469,10 +2544,18 @@ export class SessionIndex {
 			return refuse("This session could not be prepared to stop. Refresh Sessions and try again.");
 		}
 		// The durable intent goes first: whatever happens to the stop below, a reload can
-		// never turn this explicit request into an automatic launch.
+		// never turn this explicit request into an automatic launch. It is conditional on the committed row still recording the
+		// attempt that was confirmed, so a run another window replaced meanwhile is not recorded stopped.
 		const previousIntent = entry.runIntent;
-		entry.runIntent = "stopped";
-		await this.#persist();
+		const intentWrite = await this.#recordExpectedStop(tabId, { attemptStartedAt: options.expect.attemptStartedAt, pid: options.expect.pid });
+		if (intentWrite.status === "failed") {
+			if (publishedTemporaryClaim && claim !== null) await this.#releaseQuietly(claim);
+			return refuse(`The stopped intent could not be recorded (${intentWrite.detail}), so nothing was stopped.`);
+		}
+		if (intentWrite.status === "target-changed") {
+			if (publishedTemporaryClaim && claim !== null) await this.#releaseQuietly(claim);
+			return refuse("This row records a different launch attempt than the one that was confirmed, so nothing was stopped; run the action again to confirm the attempt it records now.");
+		}
 		if (this.#persistError !== null) {
 			const failure = this.#persistError;
 			entry.runIntent = previousIntent;
@@ -2531,14 +2614,17 @@ export class SessionIndex {
 	 */
 	async recordKillIntent(tabId: string, captured: KilledHostCapture): Promise<{ readonly previous: RunIntent } | null> {
 		return await this.withinTabLifecycle(tabId, undefined, async () => {
+			const expect: RunIntentTarget = { attemptStartedAt: captured.attemptStartedAt, pid: captured.hostPid, broker: { slot: captured.slot, brokerId: captured.brokerId, brokerGeneration: captured.brokerGeneration } };
 			const entry = this.#entries.get(tabId);
-			if (entry === undefined || !recordsCapturedHost(entry.host, captured)) return null;
+			if (entry === undefined || !runIntentTargetMatches(entry.host, expect)) return null;
 			const previous = entry.runIntent;
-			if (previous !== "stopped") {
-				entry.runIntent = "stopped";
-				await this.#persist();
-			}
-			return { previous };
+			let recorded = await this.#recordExpectedStop(tabId, expect);
+			// The one place a conditional intent is given up: the Kill goes ahead whether or not the catalog accepted the intent (the
+			// process is ended either way, and an unrecorded Kill would restart the session), so when even the second conditional write
+			// found the catalog unwritable the intent is this window's ordinary save, which the retry timer carries to the catalog.
+			if (recorded.status === "failed") recorded = await this.recordRunIntent(tabId, "stopped");
+			if (recorded.status === "failed") return { previous };
+			return recorded.status === "recorded" ? { previous: recorded.previous } : null;
 		});
 	}
 
@@ -2864,14 +2950,89 @@ export class SessionIndex {
 	 * closed it". It is separate from the observed availability, so a closed editor
 	 * or a restarted extension host does not change it. An explicit close records
 	 * `stopped`; a verified launch or attach records `running`.
+	 *
+	 * It is {@link SessionIndex.recordRunIntent} with no expected incarnation; it throws for an unknown tab.
 	 */
 	async setRunIntent(tabId: string, intent: RunIntent, detail?: string): Promise<SessionIndexEntry> {
 		const entry = this.#entries.get(tabId);
 		if (entry === undefined) throw new SessionIndexError("unknown-tab", `No indexed tab ${tabId}.`);
-		entry.runIntent = intent;
-		if (detail !== undefined) entry.detail = detail;
-		await this.#persist();
+		await this.recordRunIntent(tabId, intent, { detail });
 		return toEntry(entry);
+	}
+
+	/**
+	 * The one place a row's durable run intent is decided and written (ADR-0034, amendment of 2026-10-21).
+	 *
+	 * The write names `intent` as this window's change of the field, so the catalog's merge applies it whatever another window
+	 * recorded meanwhile; no other path writes the field except as an explicit consequence of a launch, an attach or a close
+	 * that the same persist records together with the host (`mergeSessionIndexRecords` takes the field from the committed row
+	 * for every write that does not change it). The merge cannot tell "this window changed the field to the value it already
+	 * held" from "did not touch it", so the committed row is read back: a value other than `intent` means the merge kept
+	 * another window's (this window's copy still held `intent` while the catalog moved on). This window then follows the
+	 * committed row, which makes `intent` a change of the field, and writes once more.
+	 *
+	 * With `expect`, the write is conditional on the *committed* row: it lands only while the committed host is exactly the
+	 * incarnation the caller examined, so a Stop or Kill that was decided against a run another window has since replaced
+	 * records nothing (`target-changed`). Without it the intent is written as the caller's own decision.
+	 *
+	 * The caller holds the tab's lifecycle when it needs one (this method never queues on the gate).
+	 */
+	async recordRunIntent(tabId: string, intent: RunIntent, options: RecordRunIntentOptions = {}): Promise<RecordRunIntentResult> {
+		const entry = this.#entries.get(tabId);
+		if (entry === undefined) return { status: "unknown-tab" };
+		const first = await this.#recordRunIntentOnce(entry, intent, options);
+		if (first.status !== "recorded") return first;
+		const committed = this.#committedRunIntentOf(tabId);
+		if (committed === null || committed === intent) return first;
+		this.#adoptSettledRunState(entry);
+		const second = await this.#recordRunIntentOnce(entry, intent, options);
+		return second.status === "recorded" ? { status: "recorded", previous: second.previous } : second;
+	}
+
+	/** The run intent of the row in the committed record as this window last read it; `null` when it cannot be read (nothing then contradicts a write). */
+	#committedRunIntentOf(tabId: string): RunIntent | null {
+		const raw = this.#store.get<unknown>(SESSION_INDEX_STORAGE_KEY);
+		if (raw === undefined || raw === null || !isPersistedSnapshot(raw)) return null;
+		return raw.entries.find(row => row.tabId === tabId)?.runIntent ?? null;
+	}
+
+	/** One write of {@link SessionIndex.recordRunIntent}: conditional on the committed row with `expect`, otherwise this window's ordinary save. */
+	async #recordRunIntentOnce(entry: MutableEntry, intent: RunIntent, options: RecordRunIntentOptions): Promise<RecordRunIntentResult> {
+		const target = options.expect;
+		const matches = (host: CapturedHostRecord | null): boolean => target === undefined || runIntentTargetMatches(host, target);
+		if (!matches(entry.host)) return { status: "target-changed" };
+		const previous = entry.runIntent;
+		if (target !== undefined && this.#store.transactRecords !== undefined) {
+			// Conditional on the committed row: the tentative row exists only in the private snapshot until the write lands.
+			if (previous === intent && options.detail === undefined) return { status: "recorded", previous };
+			const failure = await this.#persistNow(undefined, undefined, {
+				tabId: entry.tabId,
+				matches,
+				apply: row => { row.runIntent = intent; },
+				publish: () => {
+					entry.runIntent = intent;
+					if (options.detail !== undefined) entry.detail = options.detail;
+				},
+			});
+			if (failure === HOST_CHANGED) {
+				await this.refreshFromStore().catch(() => undefined);
+				return { status: "target-changed" };
+			}
+			if (failure !== null) return { status: "failed", detail: failure };
+			return { status: "recorded", previous };
+		}
+		entry.runIntent = intent;
+		if (options.detail !== undefined) entry.detail = options.detail;
+		await this.#persist();
+		return this.#persistError === null ? { status: "recorded", previous } : { status: "failed", detail: this.#persistError };
+	}
+
+	/** The conditional Stop of a recorded host: tried again once after re-reading the catalog when the first write could not land (the catalog was busy). */
+	async #recordExpectedStop(tabId: string, expect: RunIntentTarget): Promise<RecordRunIntentResult> {
+		const first = await this.recordRunIntent(tabId, "stopped", { expect });
+		if (first.status !== "failed") return first;
+		await this.#store.refresh?.().catch(() => undefined);
+		return await this.recordRunIntent(tabId, "stopped", { expect });
 	}
 
 	/**
@@ -4079,7 +4240,10 @@ export type SharedRecordConflict = RecordConflictDraft;
  * - a row this window changed (or added) keeps this window's facts; where the other
  *   window changed the same row too, both versions are recorded as a conflict and
  *   this window's facts are the ones applied — a user's own action is never
- *   silently replaced by another window's;
+ *   silently replaced by another window's — **except the run state** (`runIntent`, `host`,
+ *   `ownership`), which {@link settleRunState} settles field by field: a field this window did
+ *   not change takes the committed value, so a window that only ends its own process can never
+ *   take back another window's Stop or Kill (ADR-0034, amendment of 2026-10-21);
  * - a row this window did not touch takes the committed value, so another window's
  *   new or updated row survives here;
  * - a row this window removed is removed, unless the other window changed it after
@@ -4126,16 +4290,18 @@ export function mergeSessionIndexRecords(input: {
 			continue;
 		}
 		const merged = theirs === null ? mine : withLaterReplyMarkers(mine, theirs, before);
+		// Both windows changed the row: the run state (intent, host, release) follows the field-conditional rule, not "mine whole".
+		const settled = theirs !== null && before !== null && !sameRecord(before, theirs) ? settleRunState(merged, mine, theirs, before) : merged;
 		// Both windows wrote the same value: nothing was overwritten, so nothing is reported (as `mergeKeyedArray` does).
-		if (theirs !== null && !sameRecord(before, theirs) && !sameRecord(merged, theirs)) {
+		if (theirs !== null && !sameRecord(before, theirs) && !sameRecord(settled, theirs)) {
 			conflicts.push({
 				identity: mine.tabId,
 				reason: "another window changed this row while this window changed it too; this window's own facts were applied",
-				retained: merged,
+				retained: settled,
 				rejected: theirs,
 			});
 		}
-		entries.push(stickyImportConflict(merged, theirs));
+		entries.push(stickyImportConflict(settled, theirs));
 	}
 	for (const candidate of latest.entries) {
 		const theirs = cloneSharedEntry(candidate);
@@ -4167,6 +4333,35 @@ export function mergeSessionIndexRecords(input: {
 			}),
 		},
 		conflicts,
+	};
+}
+
+/**
+ * The run state of a row both windows changed, field by field (ADR-0034, amendment of 2026-10-21).
+ *
+ * `runIntent`, `host` and `ownership` (the release stamp) are what a window's end-of-process write touches. Each
+ * keeps the committed value unless this window changed it relative to the value it last saw (`before`), so an exit that
+ * clears the host and records the release cannot revert the stopped intent another window recorded meanwhile, and an
+ * ordinary edit (a title, a reply identity) never carries a stale host or intent back. Two more rules, for a write that
+ * replaces the *attempt* of the row (a different `startedAt`): one that clears the host of a run (`before.host` set,
+ * `mine.host` null) says nothing about a newer attempt another window committed meanwhile, so the committed run state
+ * stands whole; one that records a new attempt (a launch or an attach) carries its own intent and ownership, so a stop or
+ * a release another window committed for the older attempt does not stay glued to the new one.
+ */
+function settleRunState(merged: SharedEntry, mine: SharedEntry, theirs: SharedEntry, before: SharedEntry): SharedEntry {
+	if (mine.host === null && before.host !== null && theirs.host !== null && theirs.host.startedAt !== before.host.startedAt) {
+		return { ...merged, runIntent: theirs.runIntent, host: theirs.host, ownership: theirs.ownership };
+	}
+	if (mine.host !== null && (before.host === null || mine.host.startedAt !== before.host.startedAt)) {
+		// The mirror case: a launch or an attach records the attempt, its intent and its (unreleased) ownership in one write, so
+		// a stop or a release another window committed for an *older* attempt of the row must not stay glued to the new one.
+		return { ...merged, runIntent: mine.runIntent, host: mine.host, ownership: mine.ownership };
+	}
+	return {
+		...merged,
+		runIntent: sameRecord(mine.runIntent, before.runIntent) ? theirs.runIntent : mine.runIntent,
+		host: sameRecord(mine.host, before.host) ? theirs.host : mine.host,
+		ownership: sameRecord(mine.ownership, before.ownership) ? theirs.ownership : mine.ownership,
 	};
 }
 

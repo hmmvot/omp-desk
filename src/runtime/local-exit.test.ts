@@ -56,6 +56,8 @@ interface FixtureOptions {
 	rootGone?: boolean;
 	/** The run intent the row records when the exit is handled (`running` by default). */
 	intent?: "running" | "stopped";
+	/** The run intent the newest committed catalog record holds (this window's own copy by default); `null` when it cannot be read. */
+	committed?: "running" | "stopped" | null;
 	/** Replace a port; a promise that never settles stands for the await that hangs. */
 	attachBrokerClient?: LocalExitDeps["attachBrokerClient"];
 	proveExit?: LocalExitDeps["proveExit"];
@@ -84,6 +86,7 @@ function fixture(kind: "chat" | "terminal", exit: Exit, options: FixtureOptions 
 			lifecycle: { run: async (_tab: string, operation: (lease: unknown) => Promise<unknown>) => await operation({ tabId: TAB }) },
 			get: () => ({ ownership: { ownerGeneration: "gen-1" }, runIntent: options.intent ?? "running" }),
 			closeSession: async (_tab: string, close: CloseSessionOptions) => { closes.push(close); events.push("closeSession"); return { released: true, detail: "released" }; },
+			committedRunIntent: async () => options.committed === undefined ? (options.intent ?? "running") : options.committed,
 			setRunIntent: async () => { events.push("setRunIntent"); },
 		} as never,
 		window: {
@@ -207,6 +210,23 @@ describe("rpcExited", () => {
 		assert.doesNotMatch(f.closes[0]?.detail ?? "", /unexpectedly|restarts/);
 		assert.equal(infoLines(f.lines, "user stop").length, 1, "the Output names it the user's stop");
 		assert.deepEqual(f.lines.filter(line => line.message.includes("abnormally")), []);
+	});
+
+	it("ends another window's Kill or Stop as a stop although this window's own copy of the row still says running", async () => {
+		// The requester recorded the stopped intent in the catalog; the window that drives the row never adopted it.
+		const f = fixture("chat", undefined, { intent: "running", committed: "stopped", brokerProves: false, rootGone: true });
+		await f.ops.rpcExited(TAB, f.runtime);
+		assert.equal(f.closes.length, 1, f.events.join(" | "));
+		assert.equal(f.closes[0]?.runIntent, "stopped");
+		assert.match(f.closes[0]?.detail ?? "", /^The session was stopped\./);
+		assert.equal(infoLines(f.lines, "user stop").length, 1);
+		assert.deepEqual(f.lines.filter(line => line.message.includes("abnormally")), []);
+	});
+
+	it("keeps the abnormal wording when the catalog cannot be read and this window's copy says running", async () => {
+		const f = fixture("chat", undefined, { intent: "running", committed: null, brokerProves: false, rootGone: true });
+		await f.ops.rpcExited(TAB, f.runtime);
+		assert.equal(f.closes[0]?.runIntent, "unchanged");
 	});
 
 	it("keeps the abnormal wording for a crash of a row that records the running intent", async () => {

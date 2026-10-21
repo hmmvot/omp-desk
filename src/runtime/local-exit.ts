@@ -136,8 +136,10 @@ export interface ExitOutcome {
  * termination, `1` for a startup failure), a signal, no code, and no answer from the broker at all (it was killed
  * with the process). Those leave the run intent as recorded, so the next startup relaunches the row.
  *
- * `recorded` is the intent this window's copy of the row holds; a Kill or Stop another window recorded reaches it only
- * when the window adopts that row, which it does not while it drives the session.
+ * `recorded` is the intent the row holds: this window's copy, else the newest committed record. A Kill or Stop another
+ * window recorded reaches this window's copy only when the window adopts that row, which it does not while it drives the
+ * session, so the exit reads the catalog (`LocalExitOperations.#recordedIntent`) and the close that follows never writes the
+ * intent it did not decide (ADR-0034, amendment of 2026-10-21).
  */
 export function exitOutcome(stop: Pick<NativeStopVerdict, "exit" | "detail">, recorded: RunIntent | null = null): ExitOutcome {
 	const exit = stop.exit;
@@ -224,13 +226,13 @@ export class LocalExitOperations {
 				window.refresh();
 				return;
 			}
-			const outcome = exitOutcome(stop, index.get(tabId)?.runIntent ?? null);
+			const outcome = exitOutcome(stop, await this.#recordedIntent(tabId));
 			log.info(`tab ${tabId}: ${outcome.log}`);
 			try {
 				// The intent, the cleared host and the claim release are one record (`closeSession`): a window
 				// killed between two writes can never leave a stopped intent beside a retained host.
 				const result = await index.closeSession(tabId, { confirmedStopped: stop.writerGone, detail: outcome.detail, runIntent: outcome.intent }, lease);
-				log.info(`tab ${tabId}: closeSession released=${result.released} (${result.detail})`);
+				log.info(`tab ${tabId}: closeSession released=${result.released}${result.runIntent === undefined ? "" : ` runIntent=${result.runIntent}`} (${result.detail})`);
 				if (!result.released) {
 					window.notice(
 						"error",
@@ -253,6 +255,17 @@ export class LocalExitOperations {
 			log.error(`tab ${tabId}: the exit of the OMP process could not be completed: ${messageOf(error)}`);
 			window.notice("error", `The OMP process exited, but OMP Desk could not finish closing its session: ${messageOf(error)}. Refresh Sessions before resuming it.`);
 		});
+	}
+
+	/**
+	 * The run intent that decides what an end of the process means: the user's Stop or Kill from *any* window, as the catalog
+	 * holds it now (this window's own copy of a row it drives follows another window's decision only through the close's own
+	 * write), or this window's own record of it.
+	 */
+	async #recordedIntent(tabId: string): Promise<RunIntent | null> {
+		const local = this.#deps.index.get(tabId)?.runIntent ?? null;
+		if (local === "stopped") return local;
+		return await this.#deps.index.committedRunIntent(tabId).catch(() => null) ?? local;
 	}
 
 	/**
@@ -313,7 +326,7 @@ export class LocalExitOperations {
 			state.nativeWatch = null;
 			state.transitioning = false;
 			await control.release(tabId, owner);
-			const outcome = exitOutcome(stop, index.get(tabId)?.runIntent ?? null);
+			const outcome = exitOutcome(stop, await this.#recordedIntent(tabId));
 			log.info(`tab ${tabId}: ${outcome.log}`);
 			await index.closeSession(tabId, { confirmedStopped: true, detail: outcome.detail, runIntent: outcome.intent }, lease);
 			window.nativeEnded(tabId);

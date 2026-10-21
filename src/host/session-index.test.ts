@@ -29,6 +29,7 @@ import {
 	SessionIndexError,
 } from "./session-index.ts";
 import { CatalogError } from "./profile-catalog.ts";
+import type { CatalogStore } from "./profile-catalog.ts";
 import { isAbsoluteWorkspaceDirectory, normalizeWorkspaceDirectory } from "./session-files.ts";
 import { isRpcHost, resolveSessionOrigin } from "./session-model.ts";
 import {
@@ -1527,6 +1528,208 @@ describe("a close that is not the user's stop", () => {
 		assert.deepEqual(await index.recordKillIntent(tabId, captured), { previous: "running" });
 		assert.equal(index.get(tabId)?.runIntent, "stopped");
 		assert.notEqual(index.get(tabId)?.host, null, "only the intent is recorded; whoever proves the process gone clears the host");
+	});
+});
+
+/** The fields of a committed session row these tests read. */
+interface RunStateRow {
+	readonly tabId: string;
+	readonly runIntent: string;
+	readonly host: unknown;
+	readonly ownership: { readonly releasedAt: string | null } | null;
+	readonly title?: string | null;
+}
+
+/** The rows of a committed session-index snapshot. */
+function rowsOf(snapshot: unknown): RunStateRow[] {
+	assert.ok(typeof snapshot === "object" && snapshot !== null && "entries" in snapshot && Array.isArray(snapshot.entries), "a session-index snapshot");
+	return snapshot.entries;
+}
+
+/** The run intent of a conflict record's row. */
+function runIntentOfRow(row: unknown): string | null {
+	return typeof row === "object" && row !== null && "runIntent" in row && typeof row.runIntent === "string" ? row.runIntent : null;
+}
+
+/**
+ * A Stop or a Kill from any window stays stopped (ADR-0034, amendment of 2026-10-21). The two live incidents behind it: a
+ * requester window recorded the stopped intent for a session another window drove, and about 0.2 s later the driving window
+ * saw the process gone and wrote its own copy of the row (running intent, host cleared) over the catalog, so the next
+ * VS Code start relaunched a session the user had stopped.
+ */
+describe("a Stop or Kill from another window stays stopped", () => {
+	async function windowPair() {
+		const workspace = await tempWorkspace();
+		const open = async () => await createCatalogStore({ paths: catalogPaths(workspace.cwd), mergers: {
+			[SESSION_INDEX_STORAGE_KEY]: mergeSessionIndexRecords, [BROKER_SLOTS_KEY]: mergeBrokerSlotRecords,
+		} });
+		const holderStore = await open();
+		const holder = indexFor(holderStore, workspace.claimDir);
+		const file = await makeSessionFile(workspace.sessionDir, "S-CROSS", workspace.cwd);
+		const entry = await managedSession(holder, file, workspace.cwd);
+		const launched = recordingLauncher({ state: "running", host: runningHandle("S-CROSS") });
+		const restored = await holder.restoreAll({ reconciler: noRecordedHost, launcher: launched.launcher });
+		assert.equal(restored.restored.length, 1);
+		assert.equal(await restored.saved, null, "the restore's own write landed");
+		const requesterStore = await open();
+		const requester = indexFor(requesterStore, workspace.claimDir);
+		assert.equal(requester.get(entry.tabId)?.runIntent, "running", "the requester sees the running row");
+		assert.notEqual(requester.get(entry.tabId)?.host, null);
+		return { ...workspace, open, holder, holderStore, requester, requesterStore, tabId: entry.tabId, file };
+	}
+
+	const committed = (store: { get<T>(key: string): T | undefined }, tabId: string): RunStateRow | undefined =>
+		rowsOf(store.get(SESSION_INDEX_STORAGE_KEY)).find(row => row.tabId === tabId);
+
+	/** A start of VS Code after the catalog settled: does it relaunch the row? */
+	async function relaunchesAtNextStart(f: { open(): Promise<CatalogStore>; claimDir: string; tabId: string }): Promise<boolean> {
+		const next = indexFor(await f.open(), f.claimDir);
+		const relaunch = recordingLauncher({ state: "running", host: runningHandle("S-CROSS") });
+		const report = await next.restoreAll({ reconciler: noRecordedHost, launcher: relaunch.launcher });
+		return report.restored.some(session => session.tabId === f.tabId) || relaunch.requests.length > 0;
+	}
+
+	it("keeps a Kill the requester recorded when the holder's exit follows at once", async () => {
+		const f = await windowPair();
+		const host = f.requester.get(f.tabId)!.host!;
+		const captured = { slot: host.rpc!.slot, brokerId: host.rpc!.brokerId, brokerGeneration: host.rpc!.brokerGeneration, attemptStartedAt: host.startedAt, hostPid: host.pid };
+		assert.deepEqual(await f.requester.recordKillIntent(f.tabId, captured), { previous: "running" });
+		assert.equal(f.holder.get(f.tabId)?.runIntent, "running", "the holder has not adopted the kill: it drives the row");
+		assert.equal(await f.holder.committedRunIntent(f.tabId), "stopped", "but its exit can read the catalog, whose watch event is still on its way");
+
+		const closed = await f.holder.closeSession(f.tabId, { confirmedStopped: true, runIntent: "unchanged", detail: "ended" });
+
+		assert.equal(closed.released, true);
+		assert.equal(closed.runIntent, "stopped", "the close reports the intent the catalog kept");
+		assert.equal(f.holder.get(f.tabId)?.runIntent, "stopped", "and the holder's own copy follows it");
+		const row = committed(f.holderStore, f.tabId);
+		assert.deepEqual([row?.runIntent, row?.host], ["stopped", null]);
+		assert.notEqual(row?.ownership?.releasedAt, null, "the exit's own facts (host, release) are recorded");
+		assert.equal(await relaunchesAtNextStart(f), false, "no later window relaunches a session the user killed");
+		assert.deepEqual(f.holderStore.conflicts().filter(record => record.identity === f.tabId && runIntentOfRow(record.retained) === "running"), [], "no conflict keeps a running intent over the stop");
+	});
+
+	it("keeps a Stop of a recorded host the requester performed when the holder's exit follows at once", async () => {
+		const f = await windowPair();
+		const host = f.requester.get(f.tabId)!.host!;
+		const { port } = recordingStopPort({ kind: "stopped", writerGone: true, treeEmpty: true, detail: "The native OMP process is gone.", slot: host.rpc!.slot });
+		const stopped = await f.requester.stopRecordedHost(f.tabId, { stop: port, expect: { attemptStartedAt: host.startedAt, pid: host.pid } });
+		assert.equal(stopped.stopped, true, stopped.detail);
+
+		await f.holder.closeSession(f.tabId, { confirmedStopped: true, runIntent: "unchanged", detail: "ended" });
+
+		const row = committed(f.holderStore, f.tabId);
+		assert.deepEqual([row?.runIntent, row?.host], ["stopped", null]);
+		assert.equal(await relaunchesAtNextStart(f), false);
+	});
+
+	it("writes a decision the merge would have read as no change", async () => {
+		const f = await windowPair();
+		const host = f.requester.get(f.tabId)!.host!;
+		const captured = { slot: host.rpc!.slot, brokerId: host.rpc!.brokerId, brokerGeneration: host.rpc!.brokerGeneration, attemptStartedAt: host.startedAt, hostPid: host.pid };
+		await f.requester.recordKillIntent(f.tabId, captured);
+		assert.equal(f.holder.get(f.tabId)?.runIntent, "running", "the holder's copy still says running, the value it records below");
+
+		const recorded = await f.holder.recordRunIntent(f.tabId, "running");
+
+		assert.deepEqual(recorded, { status: "recorded", previous: "stopped" }, "the intent the row held when this decision was made, which is the committed stop");
+		assert.equal(committed(f.holderStore, f.tabId)?.runIntent, "running", "the holder's own decision is not lost to the stop it had not adopted");
+	});
+
+	it("still leaves a crash's intent running, and lets the holder's own clean exit record the stop", async () => {
+		const crash = await windowPair();
+		await crash.holder.closeSession(crash.tabId, { confirmedStopped: true, runIntent: "unchanged" });
+		assert.equal(committed(crash.holderStore, crash.tabId)?.runIntent, "running");
+		assert.equal(await relaunchesAtNextStart(crash), true, "an end nobody chose is still relaunched");
+
+		const clean = await windowPair();
+		await clean.holder.closeSession(clean.tabId, { confirmedStopped: true });
+		assert.equal(committed(clean.holderStore, clean.tabId)?.runIntent, "stopped");
+	});
+
+	it("records a Kill only against the committed run it examined", async () => {
+		const f = await windowPair();
+		const host = f.requester.get(f.tabId)!.host!;
+		const captured = { slot: host.rpc!.slot, brokerId: host.rpc!.brokerId, brokerGeneration: host.rpc!.brokerGeneration, attemptStartedAt: host.startedAt, hostPid: host.pid };
+		// Another window ends that run and launches a newer one; the requester has not adopted either yet.
+		await f.holder.closeSession(f.tabId, { confirmedStopped: true });
+		const newer = recordingLauncher({ state: "running", host: { ...runningHandle("S-CROSS"), pid: 5151 } });
+		assert.equal((await f.holder.restore(f.tabId, { reconciler: noRecordedHost, launcher: newer.launcher, resumeStopped: true })).status, "restored", "the row is resumed");
+		try {
+			assert.equal(await f.requester.recordKillIntent(f.tabId, captured), null, "the committed row records a newer run, which is not what was killed");
+			assert.equal(committed(f.holderStore, f.tabId)?.runIntent, "running", "nothing was recorded over the newer run");
+		} finally {
+			await f.holder.closeSession(f.tabId, { confirmedStopped: true });
+		}
+	});
+});
+
+/** The row merge's field-conditional rule for the run state, without a catalog (ADR-0034, amendment of 2026-10-21). */
+describe("the run state of a row two windows changed", () => {
+	const host = (startedAt: string, pid: number | null = 7) => ({ pid, instanceId: null, generation: null, sessionId: "S", startedAt, transport: "rpc", rpc: null });
+	const row = (over: Record<string, unknown>) => ({
+		tabId: "tab:one", origin: "extension", sessionFile: "S.jsonl", sessionId: "S", cwd: process.cwd(), scope: { profile: null, sessionDir: null },
+		sessionDir: null, ownership: { ownerGeneration: "g", draftIdentity: null, releasedAt: null }, host: host("2026-10-21T10:00:00.000Z"),
+		createdAt: "2026-10-21T09:00:00.000Z", lastActiveAt: "2026-10-21T10:00:00.000Z", ordinal: 1, runIntent: "running", title: null,
+		lastCompletedReplyId: null, lastSeenReplyId: null, ...over,
+	});
+	const snapshot = (...entries: unknown[]) => ({ version: 1, nextOrdinal: 2, entries, bindings: [] });
+	const mergeOne = (base: unknown, mine: unknown, theirs: unknown): RunStateRow => {
+		const merged = mergeSessionIndexRecords({ base: snapshot(base), desired: snapshot(mine), latest: snapshot(theirs) });
+		return rowsOf(merged.value)[0]!;
+	};
+	const released = { ownerGeneration: "g", draftIdentity: null, releasedAt: "2026-10-21T10:00:05.000Z" };
+
+	it("takes the stopped intent from the committed row when this window only cleared the host", () => {
+		const before = row({});
+		const mine = row({ host: null, ownership: released });
+		const theirs = row({ runIntent: "stopped" });
+		const merged = mergeOne(before, mine, theirs);
+		assert.deepEqual([merged.runIntent, merged.host, merged.ownership], ["stopped", null, released]);
+	});
+
+	it("applies this window's own change of the intent, whatever the committed row says", () => {
+		const before = row({ runIntent: "stopped", host: null });
+		const resumed = mergeOne(before, row({ runIntent: "running" }), row({ runIntent: "stopped", host: null, title: "renamed elsewhere" }));
+		assert.equal(resumed.runIntent, "running", "the user's Resume is this window's decision");
+		const stopped = mergeOne(row({}), row({ runIntent: "stopped" }), row({ title: "renamed elsewhere" }));
+		assert.equal(stopped.runIntent, "stopped");
+	});
+
+	it("does not carry a stale host or intent back with an unrelated edit", () => {
+		const before = row({});
+		const theirs = row({ runIntent: "stopped", host: null, ownership: released });
+		const merged = mergeOne(before, row({ title: "named here" }), theirs);
+		assert.deepEqual([merged.title, merged.runIntent, merged.host, merged.ownership], ["named here", "stopped", null, released]);
+	});
+
+	it("leaves a newer launch attempt alone when this window only ends the run it knew", () => {
+		const before = row({});
+		const newer = row({ host: host("2026-10-21T10:30:00.000Z", 9), runIntent: "running", ownership: { ownerGeneration: "g", draftIdentity: null, releasedAt: null } });
+		const merged = mergeOne(before, row({ host: null, ownership: released }), newer);
+		assert.deepEqual([merged.runIntent, merged.host], ["running", newer.host]);
+		assert.deepEqual(merged.ownership, newer.ownership, "the older run's release stamp does not describe the newer run");
+	});
+
+	it("does not glue another window's stop and release to the attempt this window records", () => {
+		const before = row({});
+		const launched = row({ host: host("2026-10-21T10:30:00.000Z", 9), runIntent: "running" });
+		const closedElsewhere = row({ host: null, runIntent: "stopped", ownership: released });
+		const merged = mergeOne(before, launched, closedElsewhere);
+		assert.deepEqual([merged.runIntent, merged.host], ["running", launched.host]);
+		assert.equal((merged.ownership as { releasedAt: unknown } | null)?.releasedAt, null, "the older attempt's release does not describe the new one");
+		const fresh = mergeOne(row({ host: null, runIntent: "stopped", ownership: released }), launched, row({ host: null, runIntent: "stopped", ownership: released, title: "renamed elsewhere" }));
+		assert.deepEqual([fresh.runIntent, fresh.host], ["running", launched.host], "a first launch of a row that recorded no host is an attempt too");
+	});
+
+	it("still reports the disagreement when this window really changed what the other did", () => {
+		const before = row({});
+		const result = mergeSessionIndexRecords({
+			base: snapshot(before), desired: snapshot(row({ runIntent: "stopped", host: null, ownership: released })), latest: snapshot(row({ title: "theirs" })),
+		});
+		assert.equal(result.conflicts.length, 1);
+		const [entry] = rowsOf(result.value);
+		assert.deepEqual([entry?.runIntent, entry?.host], ["stopped", null], "this window changed both fields: they are its decision");
 	});
 });
 
