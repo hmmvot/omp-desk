@@ -1219,6 +1219,7 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				...(value.thinkingExpanded === undefined ? {} : { thinkingExpanded: value.thinkingExpanded }),
 				...(value.toolIntent === undefined ? {} : { toolIntent: value.toolIntent }),
 				...(value.htmlPages === undefined ? {} : { htmlPages: value.htmlPages }),
+				...(value.sendWith === undefined ? {} : { sendWith: value.sendWith }),
 				...(value.toolsMode === undefined ? {} : { toolsMode: value.toolsMode }),
 			};
 		}
@@ -1250,7 +1251,6 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 			if (value.readOnlyReason !== null && !isText(value.readOnlyReason, 2_000)) return null;
 			const exitReason = value.exitReason === undefined ? undefined : parseChatExitReason(value.exitReason);
 			if (exitReason === null) return null;
-				...(value.sendWith === undefined ? {} : { sendWith: value.sendWith }),
 			return {
 				type: "omp:chat-state",
 				epoch,

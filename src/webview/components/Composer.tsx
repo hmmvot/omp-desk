@@ -256,9 +256,9 @@ function AskEditor({ prefill, placeholder, disabled, onSubmit }: AskEditorProps)
 	const [draft, setDraft] = useState(prefill ?? "");
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
+	const sendWith = useSendWith();
 
 	useLayoutEffect(() => {
-	const sendWith = useSendWith();
 		autosize(textareaRef.current, 1);
 	}, [draft]);
 
@@ -479,9 +479,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const starting = startsSession(operation);
 	const stopping = operation?.kind === "stop";
 	const busy = snapshot.working;
+	const sendWith = useSendWith();
 	const request = snapshot.uiRequest;
 	useEffect(() => { setSubmitted(false); }, [snapshot.working, snapshot.phase, snapshot.commandFeedback, snapshot.lastPromptResult, progressAvailable]);
-	const sendWith = useSendWith();
 	const keyLabels = SEND_KEY_LABELS[sendWith];
 	// `reading` is the rendered mirror of `readingRef`: it drives what this frame
 	// shows, while `send` enforces the synchronous ref.

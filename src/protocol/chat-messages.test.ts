@@ -172,6 +172,8 @@ describe("parseChatHostMessage", () => {
 		assert.equal(parseChatHostMessage({ ...preferences, toolIntent: "on" }), null);
 		assert.deepEqual(parseChatHostMessage({ ...preferences, htmlPages: false }), { ...preferences, htmlPages: false }, "the HTML-page setting rides along");
 		assert.equal(parseChatHostMessage({ ...preferences, htmlPages: "off" }), null);
+		assert.deepEqual(parseChatHostMessage({ ...preferences, sendWith: "shiftEnter" }), { ...preferences, sendWith: "shiftEnter" }, "the send-key setting rides along");
+		assert.equal(parseChatHostMessage({ ...preferences, sendWith: "ctrlEnter" }), null);
 	});
 
 	it("carries the effective key of each empty-state command with its conflicts, drops undeclared fields, and refuses the rest whole", () => {
@@ -190,8 +192,6 @@ describe("parseChatHostMessage", () => {
 			bad({ key: "Alt+\nT" }),
 			bad({ key: "" }),
 			bad({ conflicts: [{ by: "x", command: "y" }, { by: "x", command: "y" }, { by: "x", command: "y" }, { by: "x", command: "y" }] }),
-		assert.deepEqual(parseChatHostMessage({ ...preferences, sendWith: "shiftEnter" }), { ...preferences, sendWith: "shiftEnter" }, "the send-key setting rides along");
-		assert.equal(parseChatHostMessage({ ...preferences, sendWith: "ctrlEnter" }), null);
 			bad({ conflicts: [{ by: 3, command: "y" }] }),
 			bad({ conflicts: [{ by: "x", command: "y\u001b" }] }),
 			bad({ more: -1 }),
