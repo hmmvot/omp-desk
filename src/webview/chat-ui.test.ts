@@ -6353,6 +6353,54 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("typing in the composer does not re-render the transcript, and a reply being written yields to it: one commit per pace, not one per frame, and the latest text lands once the typing pauses", async () => {
+			await reset("typing-priority");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.hist=Array.from({length:12},(_,i)=>i%2===0?row('u'+i,{role:'user',timestamp:1000+i,content:'Prompt '+i}):row('a'+i,{role:'assistant',model:'m',timestamp:1000+i,stopReason:'stop',content:[{type:'text',text:'Reply '+i}]}));
+			 window.liveText='Streaming start. ';
+			 window.mk=()=>({role:'assistant',model:'m',timestamp:5000,stopReason:'stop',content:[{type:'text',text:window.liveText}]});
+			 window.ui.push({entries:window.hist,durableCount:window.hist.length,working:false,settled:true});
+			 window.commits=0;window.mo=new MutationObserver(records=>{window.commits++});
+			 window.mo.observe(document.querySelector('.omp-transcript'),{childList:true,subtree:true,characterData:true,attributes:true});
+			})()`);
+			await ui.settleGeometry(".omp-transcript");
+			await ui.evaluate("window.composer.focus()");
+			// Nothing about a keystroke concerns the transcript: its DOM is not touched at all.
+			await ui.evaluate("window.mo.takeRecords();window.commits=0");
+			for (const character of "typing alone leaves it be") await ui.call("Input.insertText", { text: character });
+			await settleFrames();
+			assert.equal(await ui.evaluate("window.mo.takeRecords().length+window.commits"), 0, "keystrokes change nothing in the transcript");
+			assert.equal(await ui.evaluate("window.composer.value()"), "typing alone leaves it be");
+			// A reply being written: the same stream (a frame every 30 ms, as the host paces it) with and without typing.
+			await ui.evaluate("window.ui.push({working:true,settled:false,stream:{messageId:'live',message:window.mk()},streamPosition:{anchorId:null,seq:1}});window.composer.focus()");
+			await ui.evaluate(`(()=>{
+			 const doc=Array.from({length:60},(_,i)=>'Paragraph '+i+' with **bold** words and a [link](https://example.com) in it.').join('\\n\\n')+'\\n\\nEND-OF-REPLY';
+			 window.feedFrom=0;window.step=()=>{window.feedFrom=Math.min(doc.length,window.feedFrom+60);window.liveText='Streaming start. '+doc.slice(0,window.feedFrom);window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:{type:'message_update',messageId:'live',message:window.mk()}})};
+			})()`);
+			const phase = async (type: boolean): Promise<number> => {
+				await ui.evaluate("window.mo.takeRecords();window.commits=0;window.feed=setInterval(window.step,30)");
+				const end = Date.now() + 1500;
+				for (let index = 0; type && Date.now() < end; index++) { await ui.call("Input.insertText", { text: String.fromCharCode(97 + index % 26) }); await ui.evaluate("new Promise(r=>setTimeout(r,35))"); }
+				if (!type) await ui.evaluate("new Promise(r=>setTimeout(r,1500))");
+				await ui.evaluate("clearInterval(window.feed)");
+				return ui.evaluate<number>("window.commits");
+			};
+			await ui.evaluate("window.composer.blur()");
+			const untouched = await phase(false);
+			await ui.evaluate("window.ui.push({stream:{messageId:'live',message:{role:'assistant',model:'m',timestamp:5000,stopReason:'stop',content:[{type:'text',text:'Streaming start. '}]}}});window.feedFrom=0;window.composer.focus()");
+			await settleFrames();
+			const typed = await phase(true);
+			assert.ok(untouched >= 20, `the reply alone commits to the transcript on most frames (${untouched})`);
+			assert.ok(typed * 2 <= untouched, `while the user types the transcript commits at the pace, not at every frame (typed ${typed} vs ${untouched})`);
+			// The pause ends the yielding: the whole text arrives, nothing held back.
+			await ui.evaluate("window.step();window.liveText='Streaming start. END-OF-REPLY';window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:{type:'message_update',messageId:'live',message:window.mk()}})");
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('END-OF-REPLY')");
+			assert.ok((await ui.evaluate<string>("window.composer.value()")).length > 20, "typing was not disturbed by the reply");
+			await ui.evaluate("window.mo.disconnect()");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the bottom visible line stays fixed against the dock top while typing and pasting, following or detached", async () => {
 			await reset("dock-anchor");
 			await ui.evaluate(`(()=>{

@@ -44,7 +44,7 @@ import { operationBannerText } from "./lib/chat-operation";
 import { captureDraft, offerRestoredDraft, releaseDraftCapture } from "./lib/draft-handoff";
 import { requestPanelAction } from "./lib/panel-actions";
 import { selectedText } from "../shared/selection-query";
-import { useChatSnapshot, useComposerPopupReport } from "./lib/use-chat";
+import { useChatSnapshot, useComposerPopupReport, useTypingActivity } from "./lib/use-chat";
 import { TerminalPane } from "./components/TerminalPane";
 import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
 import { adoptTranscriptToggles } from "./lib/transcript-toggles";
@@ -162,6 +162,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const route = useRouteKind();
 	// The composer's `@`-popup state goes to the host, whose stop keybinding needs it.
 	useComposerPopupReport();
+	useTypingActivity();
 	const preferences = useSyncExternalStore(client.subscribe, client.getDisplayPreferences);
 	// Screen-reader paging is not a menu choice: it follows VS Code's `editor.accessibilitySupport`, which the host pushes with the display preferences.
 	const pagedHistory = preferences.accessibilitySupport;

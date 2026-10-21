@@ -10,14 +10,14 @@
  * Runner: `node --test src/webview/lib/chat-client.test.ts`.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type { SessionEntry } from "@oh-my-pi/pi-wire";
 import { createChatModel, snapshotOf } from "../../chat/model.ts";
 import type { ChatEpoch, ChatPhase, ChatSnapshotPayload, ChatUiRequest } from "../../chat/model.ts";
 import { REWIND_ARGUMENTS_SENTENCE, SLASH_DENIED_SENTENCE } from "../../protocol/rpc.ts";
 import { splitChatSnapshot } from "../../protocol/chat-messages.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
-import { ChatClient } from "./chat-client.ts";
+import { ChatClient, LIVE_PACE_WHILE_TYPING_MS } from "./chat-client.ts";
 
 const EPOCH: ChatEpoch = { nonce: "host-a", counter: 1 };
 const OTHER_EPOCH: ChatEpoch = { nonce: "host-b", counter: 1 };
@@ -637,5 +637,75 @@ describe("an action the page asked for is acknowledged in the page", () => {
 		setReachable(false);
 		assert.equal(client.sendAbort().ok, false);
 		assert.equal(client.getOperationState().operation, null, "a Stop that went nowhere is not pending");
+	});
+});
+
+describe("a running reply while the user types", () => {
+	const update = (text: string): GuestHostMessage => ({
+		type: "omp:chat-event",
+		epoch: EPOCH,
+		frame: { type: "message_update", messageId: "live", message: { role: "assistant", model: "m", timestamp: 1, stopReason: "stop", content: [{ type: "text", text }] } as never },
+	});
+
+	function pacedClient(): { client: ChatClient; notified: () => number; setTyping(value: boolean): void; advance(ms: number): void } {
+		let typing = false;
+		let clock = 1_700_000_000_000;
+		const client = new ChatClient({ post: () => true }, { now: () => clock, typing: () => typing });
+		client.handle(snapshotMessage({ working: true }));
+		let count = 0;
+		client.subscribe(() => { count += 1; });
+		return { client, notified: () => count, setTyping: value => { typing = value; }, advance: ms => { clock += ms; mock.timers.tick(ms); } };
+	}
+
+	beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
+	afterEach(() => mock.timers.reset());
+
+	it("tells subscribers about every frame while the user is not typing", () => {
+		const { client, notified, advance } = pacedClient();
+		for (let index = 1; index <= 10; index++) { client.handle(update("x".repeat(index))); advance(33); }
+		assert.equal(notified(), 10);
+	});
+
+	it("tells subscribers at most once per pace while the user types, with the latest text, and the first frame at once", () => {
+		const { client, notified, setTyping, advance } = pacedClient();
+		setTyping(true);
+		advance(LIVE_PACE_WHILE_TYPING_MS);
+		client.handle(update("x"));
+		assert.equal(notified(), 1, "the first frame after a pause is not held");
+		for (let index = 2; index <= 10; index++) { advance(10); client.handle(update("x".repeat(index))); }
+		assert.equal(notified(), 1, "frames inside the pace are held");
+		assert.equal(client.getSnapshot().stream?.role, "assistant", "the model already holds the latest frame");
+		advance(LIVE_PACE_WHILE_TYPING_MS);
+		assert.equal(notified(), 2, "one notification carries everything held");
+		advance(LIVE_PACE_WHILE_TYPING_MS * 3);
+		assert.equal(notified(), 2, "nothing is announced twice");
+	});
+
+	it("tells subscribers of any other change at once, and that carries the held frames", () => {
+		const { client, notified, setTyping, advance } = pacedClient();
+		setTyping(true);
+		advance(LIVE_PACE_WHILE_TYPING_MS);
+		client.handle(update("x"));
+		advance(10);
+		client.handle(update("xx"));
+		assert.equal(notified(), 1);
+		client.handle({ type: "omp:chat-event", epoch: EPOCH, frame: { type: "turn_end" } });
+		assert.equal(notified(), 2, "a state change is not paced");
+		advance(LIVE_PACE_WHILE_TYPING_MS * 2);
+		assert.equal(notified(), 2, "the held notice was delivered by the state change, not again later");
+	});
+
+	it("goes back to every frame when the user stops typing", () => {
+		const { client, notified, setTyping, advance } = pacedClient();
+		setTyping(true);
+		advance(LIVE_PACE_WHILE_TYPING_MS);
+		client.handle(update("x"));
+		advance(10);
+		client.handle(update("xx"));
+		setTyping(false);
+		advance(LIVE_PACE_WHILE_TYPING_MS);
+		assert.equal(notified(), 2);
+		client.handle(update("xxx"));
+		assert.equal(notified(), 3);
 	});
 });

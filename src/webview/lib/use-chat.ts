@@ -9,10 +9,16 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { guestTransport } from "../bridge";
 import type { ChatClient, ChatSnapshot } from "./chat-client";
+import { trackTyping } from "./typing-activity";
 import { composerPopupOpen, subscribeComposerPopupOpen } from "./composer-overlay";
 
 export function useChatSnapshot(client: ChatClient): ChatSnapshot {
 	return useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
+}
+
+/** Watches the composer for edits (`lib/typing-activity.ts`): a running reply yields to typing while it goes on. */
+export function useTypingActivity(): void {
+	useEffect(() => trackTyping(document), []);
 }
 
 /** Report every change of the popup state once; the host learns `false` again on unmount. */

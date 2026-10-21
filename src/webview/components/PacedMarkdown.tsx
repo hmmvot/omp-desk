@@ -1,11 +1,12 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { TextReveal, nextTextRevealFrame } from "../lib/text-reveal.ts";
+import { isTyping, subscribeTyping } from "../lib/typing-activity.ts";
 import { Markdown } from "./Markdown.tsx";
 
 export interface PacedMarkdownProps { text: string; streaming: boolean; bypass?: boolean; quotable?: boolean; emphasis?: boolean }
 
-/** Reveals a live message's appended text gradually. The canonical text is never altered; pacing is skipped for reduced motion, a hidden document or an active selection. */
+/** Reveals a live message's appended text gradually. The canonical text is never altered; pacing is skipped for reduced motion, a hidden document, an active selection or while the user types in the composer (each frame of the reveal parses and renders the whole text again, which keystrokes cannot afford). */
 export function PacedMarkdown({ text, streaming, bypass = false, quotable = false, emphasis = true }: PacedMarkdownProps) {
 	const reveal = useRef<TextReveal | null>(null);
 	if (reveal.current === null) reveal.current = new TextReveal(text);
@@ -30,7 +31,7 @@ export function PacedMarkdown({ text, streaming, bypass = false, quotable = fals
 		};
 		const schedule = () => { if (policy.pending && frame.current === null && !selected.current) frame.current = requestAnimationFrame(tick); };
 		reduced.current = matchMedia("(prefers-reduced-motion: reduce)");
-		const pace = () => streaming && !bypass && !document.hidden && !reduced.current!.matches;
+		const pace = () => streaming && !bypass && !document.hidden && !reduced.current!.matches && !isTyping();
 		policy.retarget(text, pace());
 		paint();
 		if (pace()) schedule(); else flush();
@@ -49,8 +50,9 @@ export function PacedMarkdown({ text, streaming, bypass = false, quotable = fals
 		document.addEventListener("selectionchange", selectionChanged);
 		document.addEventListener("visibilitychange", environmentChanged);
 		reduced.current.addEventListener("change", environmentChanged);
+		const unsubscribeTyping = subscribeTyping(environmentChanged);
 		return () => {
-			cancel(); document.removeEventListener("selectionchange", selectionChanged);
+			cancel(); unsubscribeTyping(); document.removeEventListener("selectionchange", selectionChanged);
 			document.removeEventListener("visibilitychange", environmentChanged);
 			reduced.current?.removeEventListener("change", environmentChanged);
 		};

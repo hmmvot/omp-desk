@@ -22,11 +22,16 @@
  *   a repeat click, a stale card or a re-delivered request cannot produce a second answer.
  *   The memory is dropped at the next snapshot: the host guarantees a snapshot holds only
  *   dialogs still unanswered, and it settles each dialog id exactly once on its side.
+ * - **Typing outranks the reply.** The model takes every frame at once, but while the user is typing
+ *   (`lib/typing-activity.ts`) the high-rate frames of a running turn ({@link LIVE_FRAMES}) tell subscribers
+ *   at most once per {@link LIVE_PACE_WHILE_TYPING_MS}; any other change tells them at once, with everything
+ *   the held ones carried.
  * - **Writing needs a live, unlocked session.** A view-only, stopped, legacy, failed or
  *   still-starting conversation refuses every mutation here, in addition to the host's checks.
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
 import type { ImageContent } from "@oh-my-pi/pi-wire";
+import { isTyping } from "./typing-activity.ts";
 import type { ChatModel, ChatEpoch, ChatSnapshotPayload, ChatUiResponse } from "../../chat/model.ts";
 import {
 	applyChatEntries,
@@ -66,7 +71,15 @@ export interface ChatMessageSource {
 	subscribe(listener: (message: GuestHostMessage) => void): () => void;
 }
 
+/** Frames of a running turn that arrive many times a second and change only what is being written; every other frame is a state change a subscriber should see at once. */
+const LIVE_FRAMES: ReadonlySet<string> = new Set(["message_update", "tool_execution_update", "tool_stream_update"]);
+
+/** The longest a subscriber waits for a live frame while the user is typing (the host sends a reply's frames every 33 ms, so this is every fifth). */
+export const LIVE_PACE_WHILE_TYPING_MS = 150;
+
 export interface ChatClientOptions {
+	/** Whether the user is typing in the composer; defaults to the page's activity tracker. Injectable for tests. */
+	typing?: () => boolean;
 	/** Clock for reducer timestamps; injectable for tests. */
 	now?: () => number;
 	/** Mutation id minter; injectable for tests. */
@@ -150,6 +163,9 @@ interface PendingQueueRemoval {
 export class ChatClient {
 	readonly #transport: ChatTransport;
 	readonly #now: () => number;
+	readonly #typing: () => boolean;
+	#heldNotice: unknown;
+	#lastNotice = Number.NEGATIVE_INFINITY;
 	readonly #newRequestId: () => string;
 	readonly #listeners = new Set<() => void>();
 	readonly #assembler = new ChatSnapshotAssembler();
@@ -176,6 +192,7 @@ export class ChatClient {
 	constructor(transport: ChatTransport, options: ChatClientOptions = {}) {
 		this.#transport = transport;
 		this.#now = options.now ?? Date.now;
+		this.#typing = options.typing ?? isTyping;
 		this.#newRequestId = options.newRequestId ?? newChatRequestId;
 		this.#operations = new ChatOperationStore({ now: this.#now, ...options.operations });
 		this.btw = new BtwClient({
@@ -212,14 +229,29 @@ export class ChatClient {
 		return chatWritable(this.#model);
 	}
 
-	#commit(next: ChatModel): void {
+	/** Tell every subscriber now, and drop a held notice: this one carries what it was waiting for. */
+	#notify(): void {
+		clearTimeout(this.#heldNotice as number);
+		this.#heldNotice = undefined;
+		this.#lastNotice = this.#now();
+		for (const listener of [...this.#listeners]) listener();
+	}
+
+	/** A live frame changed the model: tell subscribers now, or once the pace has passed while the user is typing. */
+	#notifyLive(): void {
+		const wait = this.#lastNotice + LIVE_PACE_WHILE_TYPING_MS - this.#now();
+		if (!this.#typing() || wait <= 0) { this.#notify(); return; }
+		this.#heldNotice ??= setTimeout(() => this.#notify(), wait);
+	}
+
+	#commit(next: ChatModel, live = false): void {
 		if (next === this.#model) return;
 		const dialog = this.#model.uiRequest?.id ?? null;
 		this.#model = next;
 		this.#operations.model(next);
 		// A dialog opened or settled: OMP is (or was) waiting for the user, so a send still awaiting its result starts its deadline over.
 		if ((next.uiRequest?.id ?? null) !== dialog) for (const send of this.#textSends.values()) send.restart();
-		for (const listener of [...this.#listeners]) listener();
+		if (live) this.#notifyLive(); else this.#notify();
 	}
 
 	/**
@@ -262,7 +294,7 @@ export class ChatClient {
 					this.#displayPreferences.thinkingExpanded !== message.thinkingExpanded || this.#displayPreferences.toolsMode !== message.toolsMode || this.#displayPreferences.toolIntent !== message.toolIntent || this.#displayPreferences.htmlPages !== message.htmlPages || this.#displayPreferences.sendWith !== message.sendWith) {
 					const { type: _type, epoch: _epoch, ...preferences } = message;
 					this.#displayPreferences = preferences;
-					for (const listener of this.#listeners) listener();
+					this.#notify();
 				}
 				return true;
 			case "omp:chat-queue-result": {
@@ -304,7 +336,7 @@ export class ChatClient {
 				return true;
 			}
 			case "omp:chat-event":
-				this.#commit(applyChatEvent(model, message.epoch, message.frame, clock));
+				this.#commit(applyChatEvent(model, message.epoch, message.frame, clock), LIVE_FRAMES.has(message.frame.type));
 				return true;
 			case "omp:chat-entries":
 				if (sameEpoch(model.epoch, message.epoch)) this.#commit(applyChatEntries(model, message.entries, message.leafId, clock));
