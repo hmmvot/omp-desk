@@ -17,6 +17,7 @@ import { CLEAR_MARKER_TYPE } from "../chat/clear.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview } from "../chat/rewind.ts";
 import { composeFileBlocks, fileMarker, splitFileBlocks } from "../shared/file-blocks.ts";
 import { REWIND_ARGUMENTS_SENTENCE, parseCommands } from "../protocol/rpc.ts";
+import { MAX_PAINTED } from "./lib/find-dom.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
 	"C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -8509,6 +8510,40 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await waitCurrent("a11");
 			assert.equal((await findCurrent())?.text, "zebrafish");
 			await press("Escape", "Escape", 27);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Find paints a bounded number of occurrences and, while the transcript only ticks, creates no Range at all", async () => {
+			// Every live Range is registered with the document and every DOM mutation walks them all: a repaint that remade thousands of
+			// them on each tick of a clock slowed a page with Find open until its tasks took seconds.
+			await reset("find-ranges");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 const text='ab '.repeat(${MAX_PAINTED});
+			 const reply=(id,stamp)=>row(id,{role:'assistant',model:'m',timestamp:stamp,stopReason:'stop',content:[{type:'text',text}]});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'Count'}),reply('a1',2),reply('a2',3)],durableCount:3,working:false,settled:true,olderCount:0});
+			})()`);
+			await ui.wait("document.querySelector('[data-find-id=\"a2\"]')");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find')");
+			await ui.call("Input.insertText", { text: "ab" });
+			await ui.wait(`document.querySelector('.omp-find-status').textContent.endsWith(' of ${(2 * MAX_PAINTED).toLocaleString("en-US")}')`);
+			await ui.evaluate(`(async()=>{const deadline=performance.now()+15000;
+			 while(performance.now()<deadline){if(CSS.highlights.get('omp-find')?.size>0)return true;await new Promise(resolve=>requestAnimationFrame(resolve))}
+			 throw new Error('nothing was painted')})()`);
+			assert.equal(await ui.evaluate("CSS.highlights.get('omp-find').size"), MAX_PAINTED, "twice the cap of matches paints the cap, and the status still counts them all");
+			await ui.evaluate("window.__made=0;const make=Document.prototype.createRange;Document.prototype.createRange=function(){window.__made++;return make.call(this)};window.__painted=CSS.highlights.get('omp-find')");
+			// Each mutation brings a repaint of its own (the mutation-driven ones are at least 200 ms apart): the test waits for the new highlight, not for a time.
+			for (let tick = 0; tick < 4; tick++) {
+				await ui.evaluate(`(async()=>{const before=CSS.highlights.get('omp-find');document.querySelector('.omp-transcript').appendChild(document.createElement('i'));
+				 const deadline=performance.now()+5000;
+				 while(performance.now()<deadline){if(CSS.highlights.get('omp-find')!==before)return true;await new Promise(resolve=>requestAnimationFrame(resolve))}
+				 throw new Error('the transcript mutation was not repainted')})()`);
+			}
+			assert.deepEqual(await ui.evaluate("({made:window.__made,size:CSS.highlights.get('omp-find').size})"), { made: 0, size: MAX_PAINTED }, "repainted four times, with the ranges the rows already had");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

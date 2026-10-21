@@ -44,8 +44,11 @@ export function rowText(row: Element): RowText {
 	return { text, nodes };
 }
 
-/** The ranges of every occurrence of `pattern` in `row`, in order. */
-export function rangesIn(row: RowText, pattern: RegExp): Range[] {
+/**
+ * The ranges of the first `limit` occurrences of `pattern` in `row`, in order. A live Range is registered with its document and
+ * every DOM mutation walks all of them, so a query with thousands of matches must not be turned into thousands of Ranges per paint.
+ */
+export function rangesIn(row: RowText, pattern: RegExp, limit = Infinity): Range[] {
 	const ranges: Range[] = [];
 	const nodeAt = (offset: number): number => {
 		let low = 0, high = row.nodes.length - 1;
@@ -56,7 +59,7 @@ export function rangesIn(row: RowText, pattern: RegExp): Range[] {
 		return low;
 	};
 	pattern.lastIndex = 0;
-	for (let match = pattern.exec(row.text); match !== null; match = pattern.exec(row.text)) {
+	for (let match = pattern.exec(row.text); match !== null && ranges.length < limit; match = pattern.exec(row.text)) {
 		if (row.nodes.length === 0) break;
 		const first = row.nodes[nodeAt(match.index)]!, last = row.nodes[nodeAt(match.index + match[0].length - 1)]!;
 		const range = document.createRange();
@@ -64,6 +67,38 @@ export function rangesIn(row: RowText, pattern: RegExp): Range[] {
 		range.setEnd(last.node, match.index + match[0].length - last.start);
 		ranges.push(range);
 	}
+	return ranges;
+}
+
+/** The most occurrences painted at once; the status line and the navigation still count and visit every one. */
+export const MAX_PAINTED = 2_000;
+
+interface Kept {
+	readonly row: RowText;
+	readonly key: string;
+	readonly limit: number;
+	readonly ranges: readonly Range[];
+}
+const kept = new WeakMap<Element, Kept>();
+
+function sameText(a: RowText, b: RowText): boolean {
+	if (a.text !== b.text || a.nodes.length !== b.nodes.length) return false;
+	for (let index = 0; index < a.nodes.length; index++) if (a.nodes[index]!.node !== b.nodes[index]!.node || a.nodes[index]!.start !== b.nodes[index]!.start) return false;
+	return true;
+}
+
+/**
+ * {@link rangesIn} for a mounted row, repaint after repaint: while the row shows the same text in the same text nodes the Ranges it was
+ * given stay (a live Range follows its nodes), so a transcript that only ticks (a clock, a job's progress) creates none.
+ */
+export function rangesOf(element: Element, row: RowText, pattern: RegExp, limit = Infinity): readonly Range[] {
+	const key = `${pattern.flags}:${pattern.source}`;
+	const held = kept.get(element);
+	if (held !== undefined && held.key === key && sameText(held.row, row) && (held.limit >= limit || held.ranges.length < held.limit)) {
+		return held.ranges.length > limit ? held.ranges.slice(0, limit) : held.ranges;
+	}
+	const ranges = rangesIn(row, pattern, limit);
+	kept.set(element, { row, key, limit, ranges });
 	return ranges;
 }
 

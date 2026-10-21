@@ -11,7 +11,7 @@ import type { ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { TranscriptCard } from "../../chat/transcript";
 import type { OverviewProjection } from "../../chat/tool-overview";
-import { canHighlight, paintFind, rangesIn, rowText } from "../lib/find-dom";
+import { canHighlight, MAX_PAINTED, paintFind, rangesIn, rangesOf, rowText } from "../lib/find-dom";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { provideFindAction, requestPanelAction } from "../lib/panel-actions";
 import { clearFindCache, findIdOf, findPattern, findUnitsOf, isLetterKey, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch, type FindSegment, type FindUnit } from "../lib/transcript-find";
@@ -155,9 +155,12 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		let currentRange: Range | null = null, currentRow: Element | null = null;
 		for (const row of root.querySelectorAll<HTMLElement>("[data-find-id]")) {
 			if (row.parentElement?.closest("[data-find-id]") !== null) continue;
-			const ranges = rangesIn(rowText(row), now.pattern);
-			all.push(...ranges);
-			if (match !== null && row.dataset.findId === match.id) { currentRow = row; currentRange = ranges[match.occurrence] ?? null; }
+			const holdsCurrent = match !== null && row.dataset.findId === match.id;
+			const room = MAX_PAINTED - all.length;
+			// The current match's own range is made even past the cap; the others are painted until it is spent.
+			const ranges = rangesOf(row, rowText(row), now.pattern, holdsCurrent ? Math.max(room, match.occurrence + 1) : Math.max(room, 0));
+			if (room > 0) for (let index = 0; index < ranges.length && index < room; index++) all.push(ranges[index]!);
+			if (holdsCurrent) { currentRow = row; currentRange = ranges[match.occurrence] ?? null; }
 		}
 		paintFind(all, currentRange);
 		// A match whose text is not drawn (deep in a long output), or a page that cannot paint, still shows which row holds it.
@@ -206,7 +209,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 				const closed = hasThinking && !userClosed.current ? thinkingBlocks(row, unit, segment).filter(details => !details.open) : [];
 				if (closed.length > 0) for (const details of closed) details.open = true;
 				else {
-					const target = rangesIn(rowText(row), needle)[match.occurrence] ?? null;
+					const target = rangesIn(rowText(row), needle, match.occurrence + 1)[match.occurrence] ?? null;
 					if (target !== null || seen >= SETTLE_FRAMES) {
 						// The row's top went a third of the way down; a match deep inside a tall row goes there instead, and never under the bar.
 						const root = latest.current.rootRef.current, controller = latest.current.controllerRef.current, anchor = row.closest<HTMLElement>("[data-anchor-key]"), bar = barRef.current;
