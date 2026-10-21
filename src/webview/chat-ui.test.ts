@@ -125,11 +125,13 @@ import { attachInsertedText } from "./lib/insert-text";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
+import { installSelectionFocusHold } from "./lib/selection-focus";
 import { installComposerDriver } from "./test-support/composer-driver";
 import { requestQuote } from "./lib/quote-sink";
 import { captureSelection } from "./lib/quote-selection";
 installFocusTrace(window, element => element.classList.contains("omp-composer-input"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 installTypeToFocus(window);
+installSelectionFocusHold(window);
 installComposerDriver(window);
 window.requestQuote = requestQuote;
 window.captureQuote = () => captureSelection(window.getSelection(), document.querySelector(".omp-transcript"));
@@ -3581,6 +3583,105 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", clickCount: 1 });
 		};
 		const centerOf = (selector: string): Promise<{ x: number; y: number }> => ui.evaluate(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
+
+		// VS Code runs a webview's Copy (Ctrl+C, Ctrl+Insert, Edit > Copy, the context menu) as a message to its host frame, which
+		// focuses the last element the page focused when `document.activeElement` is the body, and then runs `execCommand`. This is that
+		// code (`webview/browser/pre/index.html`, handler `execCommand`), so a selection that leaves the body active is found out here.
+		const vscodeCopy = `(()=>{
+		 window.lastFocused=null;window.copied=[];
+		 window.addEventListener('focusin',()=>{const f=document.activeElement;if(f&&f!==document.body&&f!==document.documentElement)window.lastFocused=f});
+		 document.addEventListener('copy',()=>window.copied.push({text:getSelection().toString(),active:document.activeElement?.className||document.activeElement?.tagName}),true);
+		 window.vscodeCopy=()=>{const active=document.activeElement;
+		  if((active===document.body||active===document.documentElement)&&window.lastFocused?.isConnected)window.lastFocused.focus({preventScroll:true});
+		  return document.execCommand('copy')};
+		})()`;
+		await t.test("text selected by mouse after the composer was used is what VS Code's Copy copies: the selection holds the page's focus and the composer is left alone", async () => {
+			await reset("copy-selection");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1000,content:'hello'}),row('a1',{role:'assistant',model:'m',timestamp:1001,stopReason:'stop',content:[{type:'text',text:'Alpha beta gamma delta epsilon'}]})],working:false,settled:true});
+			})()`);
+			await ui.wait("document.body.textContent.includes('Alpha beta')");
+			await ui.evaluate(vscodeCopy);
+			const reply = await ui.evaluate<{ left: number; right: number; y: number }>(`(()=>{const p=[...document.querySelectorAll('.omp-transcript p')].find(n=>n.textContent.includes('Alpha'));const r=document.createRange();r.selectNodeContents(p);const b=r.getBoundingClientRect();return{left:b.left+1,right:b.right-1,y:b.top+b.height/2}})()`);
+			const mouse = async (steps: readonly (readonly ["mousePressed" | "mouseMoved" | "mouseReleased", number, number])[]): Promise<void> => {
+				for (const [type, x, buttons] of steps) await ui.call("Input.dispatchMouseEvent", { type, x, y: reply.y, button: "left", buttons, clickCount: 1 });
+			};
+			const where = () => ui.evaluate<{ active: string; selected: string }>("({active:document.activeElement===document.body?'body':document.activeElement.id||document.activeElement.className,selected:getSelection().toString()})");
+			await ui.evaluate("window.composer.focus()");
+			// The user's drag: the press takes the focus out of the composer; the selection that follows is held by the page's root.
+			await mouse([["mousePressed", reply.left, 1], ["mouseMoved", (reply.left + reply.right) / 2, 1], ["mouseMoved", reply.right, 1], ["mouseReleased", reply.right, 0]]);
+			assert.deepEqual(await where(), { active: "root", selected: "Alpha beta gamma delta epsilon" }, "a mouse selection is not left with the body active");
+			assert.equal(await ui.evaluate("window.lastFocused.id"), "root", "VS Code remembers the root, which stays focusable while the selection stands");
+			await ui.evaluate("window.vscodeCopy()");
+			assert.deepEqual(await ui.evaluate("window.copied"), [{ text: "Alpha beta gamma delta epsilon", active: "root" }], "the page copied the selection, from the root");
+			assert.deepEqual(await where(), { active: "root", selected: "Alpha beta gamma delta epsilon" }, "the copy kept the focus and the selection where they were");
+			assert.equal(await ui.evaluate("document.activeElement.matches('.omp-composer-input')"), false);
+			// Ctrl+C and Ctrl+Insert on either layout leave the page as it is (the browser's own copy runs; VS Code's message is the line above).
+			for (const [key, code, vk, modifiers] of [["c", "KeyC", 67, 2], ["\u0441", "KeyC", 67, 2], ["Insert", "Insert", 45, 2]] as const) {
+				await press(key, code, vk, { modifiers });
+				await settleFrames();
+				assert.deepEqual(await where(), { active: "root", selected: "Alpha beta gamma delta epsilon" }, `${key} with ${modifiers} changed nothing`);
+			}
+			// The context menu empties the page's focus (the window blurs and regains it) while the selection stands: VS Code then refocuses what it remembers.
+			await ui.evaluate("document.activeElement.blur()");
+			assert.equal(await ui.evaluate("document.activeElement===document.body"), true);
+			await ui.evaluate("window.copied.length=0;window.vscodeCopy()");
+			assert.deepEqual(await ui.evaluate("window.copied"), [{ text: "Alpha beta gamma delta epsilon", active: "root" }], "VS Code's refocus lands on the root and the copy finds the selection");
+			assert.deepEqual(await where(), { active: "root", selected: "Alpha beta gamma delta epsilon" });
+			// A click that selects nothing lets the root go.
+			await mouse([["mousePressed", reply.left, 1], ["mouseReleased", reply.left, 0]]);
+			await settleFrames();
+			assert.deepEqual(await where(), { active: "body", selected: "" }, "nothing selected, nothing held");
+			assert.equal(await ui.evaluate("document.querySelector('#root').hasAttribute('tabindex')"), false);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		// Every Desk shortcut the page itself reads is a place on the keyboard: the character the layout types (Cyrillic here) changes nothing,
+		// and neither does a Latin character on that key. The terminal's Ctrl+C and Ctrl+Insert are pressed on both layouts in their own test
+		// (above), and the chords the terminal leaves to VS Code are unit-tested in `terminal-keys.test.ts`.
+		const LAYOUTS = { f: ["f", "\u0430", "KeyF", 70], c: ["c", "\u0441", "KeyC", 67], z: ["z", "\u044f", "KeyZ", 90], y: ["y", "\u043d", "KeyY", 89], v: ["v", "\u043c", "KeyV", 86] } as const;
+		for (const layout of ["Latin", "Russian"] as const) await t.test(`the page's shortcuts follow the physical key: ${layout} layout`, async () => {
+			const CTRL = 2, ALT = 1, SHIFT = 8;
+			const chord = (letter: keyof typeof LAYOUTS, modifiers: number): Promise<void> => {
+				const [latin, cyrillic, code, vk] = LAYOUTS[letter];
+				return press(layout === "Latin" ? latin : cyrillic, code, vk, { modifiers });
+			};
+			await reset(`physical-keys-${layout}`);
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1000,content:'hello'}),row('a1',{role:'assistant',model:'m',timestamp:1001,stopReason:'stop',content:[{type:'text',text:'Reply text'}]})],working:false,settled:true});
+			})()`);
+			await ui.wait("document.body.textContent.includes('Reply text')");
+			// Ctrl+F opens the find bar from anywhere, Alt+C in it is Match Case, Esc closes it.
+			await ui.evaluate("document.activeElement.blur()");
+			await chord("f", CTRL);
+			await ui.wait("document.querySelector('.omp-find-input')");
+			await chord("c", ALT);
+			await ui.wait("document.querySelector('[aria-label=\"Match case\"]').getAttribute('aria-pressed')==='true'");
+			await chord("c", ALT);
+			await ui.wait("document.querySelector('[aria-label=\"Match case\"]').getAttribute('aria-pressed')==='false'");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+			// Ctrl+Z undoes, Ctrl+Y and Ctrl+Shift+Z redo, in the composer's own undo stack.
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "abc" });
+			await ui.wait("window.composer.value()==='abc'");
+			await chord("z", CTRL);
+			await ui.wait("window.composer.value()===''");
+			await chord("y", CTRL);
+			await ui.wait("window.composer.value()==='abc'");
+			await chord("z", CTRL);
+			await ui.wait("window.composer.value()===''");
+			await chord("z", CTRL | SHIFT);
+			await ui.wait("window.composer.value()==='abc'");
+			// Ctrl+V with nothing editable focused takes the page's focus into the composer, where the paste then lands.
+			await ui.evaluate("document.activeElement.blur()");
+			assert.equal(await ui.evaluate("document.activeElement===document.body"), true);
+			await chord("v", CTRL);
+			await ui.wait("document.activeElement.matches('.omp-composer-input')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 
 		await t.test("the context popover and the slash picker follow the same outside-press rule, and Escape closes only the newest layer", async () => {
 			await reset("layers-dismiss");

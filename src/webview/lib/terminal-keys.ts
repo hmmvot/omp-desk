@@ -9,12 +9,16 @@
  * - **A native OMP session** never sends Ctrl+C to the program. Ctrl+C is not an
  *   interrupt while OMP runs, and a forwarded ^C clears the TUI's input
  *   editor, so the key is claimed whether or not text is selected: it copies a selection
- *   and otherwise does nothing. The match follows the physical C key as well as the
- *   letter, so no keyboard layout slips it through.
+ *   and otherwise does nothing.
+ *
+ * Every letter chord here is the physical key (`src/webview/lib/physical-keys.ts`), so Ctrl+С
+ * on a Russian layout is Ctrl+C.
  *
  * Ctrl+V, Ctrl+Shift+V and Shift+Insert are not classified here: they stay with the
  * browser's paste event.
  */
+
+import { isPhysicalKey } from "./physical-keys.ts";
 
 /** The parts of a `KeyboardEvent` the classification reads. */
 export interface TerminalKeyEventLike {
@@ -35,17 +39,12 @@ export interface TerminalKeyEventLike {
  */
 export type TerminalCopyChord = "selection" | "always";
 
-/** A Latin letter wins over the physical key so other layouts keep their own letters. */
-function isKey(event: TerminalKeyEventLike, letter: string, code: string): boolean {
-	return /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() === letter : event.code === code;
-}
-
 export function terminalCopyChord(event: TerminalKeyEventLike, hasSelection: boolean, ctrlCInterrupts: boolean): TerminalCopyChord | null {
 	if (!event.ctrlKey || event.altKey || event.metaKey) return null;
-	if (event.shiftKey) return isKey(event, "c", "KeyC") ? "always" : null;
-	if (isKey(event, "c", "KeyC")) return hasSelection ? "selection" : ctrlCInterrupts ? null : "always";
+	if (event.shiftKey) return isPhysicalKey(event, "KeyC") ? "always" : null;
+	if (isPhysicalKey(event, "KeyC")) return hasSelection ? "selection" : ctrlCInterrupts ? null : "always";
 	if (!hasSelection) return null;
-	return event.key === "Insert" || event.code === "Insert" ? "selection" : null;
+	return event.key === "Insert" ? "selection" : null;
 }
 
 /**
@@ -64,8 +63,8 @@ export function terminalCopyChord(event: TerminalKeyEventLike, hasSelection: boo
  */
 export function isTerminalWorkbenchChord(event: TerminalKeyEventLike): boolean {
 	if (!(event.ctrlKey || event.metaKey)) return false;
-	if (!event.shiftKey) return event.altKey && (isKey(event, "q", "KeyQ") || isKey(event, "n", "KeyN") || isKey(event, "r", "KeyR"));
-	return event.altKey ? isKey(event, "r", "KeyR") : isKey(event, "l", "KeyL") || isKey(event, "m", "KeyM");
+	if (!event.shiftKey) return event.altKey && (isPhysicalKey(event, "KeyQ") || isPhysicalKey(event, "KeyN") || isPhysicalKey(event, "KeyR"));
+	return event.altKey ? isPhysicalKey(event, "KeyR") : isPhysicalKey(event, "KeyL") || isPhysicalKey(event, "KeyM");
 }
 
 /**

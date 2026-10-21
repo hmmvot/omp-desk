@@ -21,6 +21,7 @@ import { attachInsertedText } from "./lib/insert-text";
 import { restoreFocusTakenByHost } from "./lib/frame-focus";
 import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
+import { installSelectionFocusHold } from "./lib/selection-focus";
 
 function boot(): void {
 	// A composer that loses focus without the user moving it is reported to the OMP Desk output, with what the page saw.
@@ -29,6 +30,8 @@ function boot(): void {
 	restoreFocusTakenByHost(window);
 	// Typing while the page has the keyboard focus but nothing editable does goes into the composer.
 	installTypeToFocus(window);
+	// A text selection holds the focus, so VS Code's Copy does not refocus the composer over it.
+	installSelectionFocusHold(window);
 	const nonce = readCspNonce();
 	adoptNonceForCreatedStyles(nonce);
 	injectGuestStyles(nonce);

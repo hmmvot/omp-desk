@@ -28,6 +28,14 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 
 Inside the Chat page, `Enter` steers a running turn, `Alt+Enter` queues a follow-up, `Alt+↑` takes the newest queued message back into the draft and `Esc` `Esc` starts a Rewind; see [Chat](chat.md). `Enter` sends and `Shift+Enter` is a newline unless you set [`ompDesk.chatSendWith`](settings.md) to `shiftEnter`: then `Shift+Enter` sends and steers, `Alt+Shift+Enter` queues a follow-up and `Enter` is a newline, in every message box that sends on `Enter`. In the composer `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes (the composer keeps its own undo stack, so VS Code's **Edit > Undo** menu item does nothing there).
 
+## Shortcuts follow the physical key
+
+Every shortcut is a place on the keyboard, not a character, so none depends on the keyboard layout. `Ctrl+С` on a Russian layout is `Ctrl+C`, `Ctrl+А` is `Ctrl+F`, `Alt+Й` is `Alt+Q`, and the same holds for every other layout that types another script. This covers VS Code's keybindings of OMP Desk (all of the table above: VS Code reads a chord by its virtual key, and a Cyrillic layout gives each letter key the virtual key of its Latin letter; the one punctuation key, `Ctrl+/`, is the physical Slash key) and the keys the Chat, the composer and the terminal read themselves: `Ctrl+F` and `Alt+C` in the find bar, `Ctrl+Z`, `Ctrl+Y` and `Ctrl+Shift+Z` in the composer, `Ctrl+V` and `Shift+Insert` with nothing focused, and `Ctrl+C`, `Ctrl+Insert` and `Ctrl+Shift+C` for the terminal selection. Named keys (`Enter`, `Esc`, `Tab`, the arrows, `F3`, `F5`, `Insert`) are the same on every layout.
+
+On a Latin layout that moves the letters (Dvorak, AZERTY) the Chat page's own keys follow the **physical** key too: they sit where QWERTY has the letter, whatever it types. VS Code's own keybindings on Windows follow the character a Latin layout types, so on such a layout a key can be the VS Code binding of one letter and the page's key of another; rebind the VS Code command in **Preferences: Open Keyboard Shortcuts** if that gets in the way.
+
+Copy works from the text you select in the Chat with the mouse (`Ctrl+C`, `Ctrl+Insert`, **Edit > Copy** and the context menu's **Copy**) after you used the composer: while text is selected the page's root holds the keyboard focus, so VS Code does not move the focus back into the composer before it copies.
+
 ## Keymap notes
 
 The thinking and prompt-history keys are `Ctrl+Alt+T` and `Ctrl+Alt+Y`, not `Alt+T` and `Alt+H`: on Windows `Alt+T` and `Alt+H` are the mnemonics of the Terminal and Help menus of VS Code's own menu bar, and they opened the menu even while OMP Desk ran its command (seen in a real window), so a plain Alt letter cannot be a Chat key. A user keybinding that still names `ompDesk.sendSelection` (Add Selection to Session, removed in 0.4.7), or its old `omp.sendSelection`, does nothing.

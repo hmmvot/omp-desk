@@ -89,10 +89,10 @@ describe("terminal copy chords in a native OMP session (Ctrl+C never interrupts)
 		assert.equal(terminalCopyChord(russianC({ shiftKey: true }), false, false), "always");
 	});
 
-	it("follows the letter on a layout whose physical C key is another letter", () => {
-		// Dvorak: the key labelled C is physically KeyI, and the physical KeyC types J.
-		assert.equal(terminalCopyChord({ ...key("c", { ctrlKey: true }), code: "KeyI" }, false, false), "always");
-		assert.equal(terminalCopyChord({ ...key("j", { ctrlKey: true }), code: "KeyC" }, false, false), null);
+	it("follows the physical key on a layout whose C key types another Latin letter", () => {
+		// Dvorak: the key labelled C is physically KeyI, and the physical KeyC types J. The physical key wins on every layout.
+		assert.equal(terminalCopyChord({ ...key("c", { ctrlKey: true }), code: "KeyI" }, false, false), null);
+		assert.equal(terminalCopyChord({ ...key("j", { ctrlKey: true }), code: "KeyC" }, false, false), "always");
 	});
 
 	it("still leaves other chords to the terminal", () => {

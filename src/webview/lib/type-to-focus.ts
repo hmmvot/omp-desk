@@ -19,6 +19,8 @@
  * - A composer that is absent (an ask is open), disabled or read-only: there is nowhere to type.
  */
 
+import { isPhysicalKey } from "./physical-keys.ts";
+
 /** The facts of a `keydown` the decision needs; a `KeyboardEvent` satisfies it. */
 export interface TypingKey {
 	readonly key: string;
@@ -36,7 +38,7 @@ export interface TypingKey {
 /** `"text"` for a key that inserts one character, `"paste"` for a paste chord, `null` for everything else. */
 export function typingIntent(event: TypingKey): "text" | "paste" | null {
 	if (event.isComposing || event.keyCode === 229 || event.key === "Process" || event.key === "Dead") return null;
-	const paste = event.key.toLowerCase() === "v" || event.code === "KeyV";
+	const paste = isPhysicalKey(event, "KeyV");
 	if ((event.ctrlKey || event.metaKey) && !event.altKey && paste) return "paste";
 	if (event.key === "Insert" && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) return "paste";
 	if (event.metaKey) return null;

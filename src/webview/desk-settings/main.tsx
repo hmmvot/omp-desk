@@ -7,6 +7,7 @@ import type { DeskSettingsAction, DeskSettingsMessage, JsonValue, SettingView, T
 import { initialPageState, leaveDecision, needsWrite, readyToSave, reducePage } from "./page-state.ts";
 import type { PageEvent, PageState } from "./page-state.ts";
 import { DESK_SETTINGS_CSS } from "./styles";
+import { installSelectionFocusHold } from "../lib/selection-focus";
 
 interface PersistedState { query: string; targets: Record<string, Target> }
 declare function acquireVsCodeApi(): {
@@ -338,3 +339,5 @@ document.head.appendChild(style);
 const root = document.getElementById("root");
 if (!root) throw new Error("The settings page container is missing.");
 createRoot(root).render(<App />);
+// A text selection holds the focus, so VS Code's Copy does not refocus a field over it.
+installSelectionFocusHold(window);

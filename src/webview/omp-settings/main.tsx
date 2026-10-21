@@ -8,6 +8,7 @@ import { Footer, Header, LayerBar, SearchBar, Toc } from "./components/Chrome";
 import { Icon } from "./components/Icon";
 import { SettingRow } from "./components/SettingRow";
 import { OMP_SETTINGS_CSS } from "./styles";
+import { installSelectionFocusHold } from "../lib/selection-focus";
 
 declare function acquireVsCodeApi(): { postMessage(message: ConfigAction): void; setState(state: { key: string }): void };
 const vscode = acquireVsCodeApi();
@@ -125,3 +126,5 @@ document.head.appendChild(style);
 const root = document.getElementById("root");
 if (!root) throw new Error("The settings page container is missing.");
 createRoot(root).render(<App />);
+// A text selection holds the focus, so VS Code's Copy does not refocus a field over it.
+installSelectionFocusHold(window);
