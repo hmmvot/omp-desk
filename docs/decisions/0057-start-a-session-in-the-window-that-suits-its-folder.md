@@ -45,6 +45,10 @@ First option.
 - Positive: a session starts where its folder (and Unity tooling) is; one code path per launch; no duplicate sessions from this routing; no change to claims.
 - Negative: a hand-over to a window that does not answer says so and starts nothing (the user retries); the requester's command stays pending up to 10 s (60 s for a new window); a few milliseconds of race can start a session while the requester says it did not respond; Unity projects deeper than two levels are not found; Add Selection / Add File to Session started for a Unity project run in the window the user used.
 
+### Amendment note (2026-10-21)
+
+This record places a **launch**; it is unchanged. Where a *running* session returns at the next VS Code start is decided by the session's home window, recorded on its row ([ADR-0080](0080-hand-over-a-live-session-through-a-taken-up-request-that-detaches-the-holder-without-stopping-it.md) amendment of 2026-10-21), not by the folder.
+
 ## Related Documents
 
 - [Start a session in the window that suits its folder](../designs/2026-10-10-launch-in-folder-window.md)

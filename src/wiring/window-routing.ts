@@ -18,6 +18,7 @@ import * as vscode from "vscode";
 import { EDITOR_GROUP_FOCUS_COMMANDS, chatGroupColumn, filesGroupColumn } from "../host/chat-layout.ts";
 import { appearedGroup, FILE_WINDOW_SIZE, FileWindowTracker } from "../host/file-window.ts";
 import { holderSeemsAlive } from "../host/holder-liveness.ts";
+import { homeAllows } from "../host/session-index.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { ObservedClaim } from "../host/session-claim.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
@@ -158,6 +159,8 @@ export interface RoutingEditorPort {
 	isSessionTabInput(input: unknown): boolean;
 	/** The election of the editor that holds a tab that is already connected here. */
 	electLocalController(index: SessionIndex, tabId: string): Promise<void>;
+	/** Show a restored editor of a session another window is home for: its saved history, read-only, with no claim and no start (ADR-0080). */
+	showRestoredOutsideHome(index: SessionIndex, tabId: string): Promise<void>;
 }
 
 /** The ordinary launch and open paths a request another window sent is performed through. */
@@ -1345,10 +1348,12 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 	 * This is what makes the narrowed activation cohort safe: a row that is in the shared
 	 * index but not among this window's restored editors and live hosts is restored by its
 	 * own editor — exactly one open per tab, serialized with every other open of that tab
-	 * by `openingTabs`.
+	 * by `openingTabs`. A `running` row whose home is another window is not opened here: the
+	 * editor shows its saved history only (ADR-0080, amendment of 2026-10-21).
 	 */
 	async function openRestoredTabIfUncovered(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
-		if (index.get(tabId) === null) return;
+		const entry = index.get(tabId);
+		if (entry === null) return;
 		// The revival a request triggered reaches this point once; it consumes the mark.
 		const requested = consumeRequestedSelection(tabId);
 		if (index.hasLiveHost(tabId)) {
@@ -1359,6 +1364,11 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		// Another window's request is only showing this editor: it never starts a session (ADR-0056).
 		if (requested) return;
 		if (deps.startupRestoreCovers(tabId)) return;
+		// A running session returns to the window that last drove it; the editor it left behind here only shows its history (ADR-0080).
+		if (!homeAllows(entry, owningWindowUri()?.toString() ?? null)) {
+			await deps.showRestoredOutsideHome(index, tabId);
+			return;
+		}
 		await deps.openTab(context, index, tabId, "opened", "restored");
 	}
 

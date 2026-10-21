@@ -353,7 +353,7 @@ export interface KillCommandPorts extends TreeKillPorts {
 	/**
 	 * Record the stopped intent of exactly the captured incarnation before it is ended: a Kill is the user's decision
 	 * to stop, and the window that drives the session cannot tell it from a crash (its exit handler leaves the run
-	 * intent of any abnormal end as recorded, so that the next startup relaunches it). Does nothing when the row
+	 * intent of any abnormal end as recorded, so that the next startup relaunches it in its home window). Does nothing when the row
 	 * records another process than the captured one. Resolves to a function that puts the earlier intent back, for
 	 * a Kill that then failed to end the process. Throws when the intent could not be recorded; nothing is killed then.
 	 */

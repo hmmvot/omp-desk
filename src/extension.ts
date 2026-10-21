@@ -57,6 +57,7 @@ import {
   SESSION_INDEX_STORAGE_KEY,
   mergeSessionIndexRecords,
   SessionIndex,
+  homeAllows,
 } from "./host/session-index";
 import { isManagedHost } from "./host/session-model";
 import { normalizeSessionIdentityKey, readSessionFileHeader } from "./host/session-files";
@@ -1075,6 +1076,7 @@ function windowRoutingDeps(): WindowRoutingDeps {
     isSessionTabInput: input => windowState().editorPanels.isSessionTabInput(input),
     electLocalController,
     handOverSession,
+    showRestoredOutsideHome,
     openSession,
     openSessionInMode,
     startNewSession,
@@ -1739,8 +1741,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // user already had are still being imported.
   void vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, true);
   const claimHolder = { ...createClaimHolder(), windowUri: owningWindowUri()?.toString() ?? null };
+  // The window's own URI is read when a row is written: it becomes the home of a session this window starts or attaches (ADR-0080).
   const index = new SessionIndex({
     store: catalog,
+    windowUri: () => owningWindowUri()?.toString() ?? null,
     // This window's own observations — its availability reads, the reply its panels
     // displayed, the tab it selected — stay in this window's own store. They are not shared
     // facts: a rival window's failed attach must never publish a status over a session
@@ -4832,10 +4836,11 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
 /**
  * The rows this window is responsible for restoring at activation.
  *
- * Two things qualify a row: VS Code handed this window an editor for its
- * conversation (`editorMembership`/the serializer path bound a panel for it), or this
- * window already runs a host for it. Everything else in the profile-wide index is
- * another workspace's row: visible, and deliberately inert until the user opens it.
+ * A row qualifies when this window already runs a host for it, or when VS Code handed this window an editor for its
+ * conversation (`editorMembership`/the serializer path bound a panel for it) and the window is home for the row: a `running`
+ * row returns to the window that last drove it, so a session moved to another window is not brought back here by the editor
+ * the move left behind (ADR-0080, amendment of 2026-10-21). Everything else in the profile-wide index is another window's
+ * or another workspace's row: visible, and deliberately inert until the user opens it.
  */
 function localRecoveryCohort(index: SessionIndex): ReadonlySet<string> {
   const cohort = new Set<string>();
@@ -4845,9 +4850,32 @@ function localRecoveryCohort(index: SessionIndex): ReadonlySet<string> {
   return cohort;
 }
 
-/** Whether one row is this window's responsibility at activation (see {@link localRecoveryCohort}). */
+/**
+ * Whether one row is this window's responsibility at activation (see {@link localRecoveryCohort}). The cohort, the
+ * `restoring` fact of the launcher rows while the pass is pending and the gone-record sweep's `ownedHere` all use it, so a
+ * row restored elsewhere is neither shown as restoring here nor swept as owned here.
+ */
 function inLocalRecoveryCohort(index: SessionIndex, tabId: string): boolean {
-  return index.hasLiveHost(tabId) || hasLocalEditorFor(tabId);
+  if (index.hasLiveHost(tabId)) return true;
+  if (!hasLocalEditorFor(tabId)) return false;
+  const entry = index.get(tabId);
+  return entry === null || homeAllows(entry, owningWindowUri()?.toString() ?? null);
+}
+
+/**
+ * Show the saved history of a restored editor of a session another window is home for, read-only, taking no claim and
+ * starting nothing (ADR-0080, amendment of 2026-10-21).
+ */
+async function showRestoredOutsideHome(index: SessionIndex, tabId: string): Promise<void> {
+  const entry = index.get(tabId);
+  if (entry === null) return;
+  const s = windowState();
+  await s.sessionRuntime.conversations.showViewOnly(tabId, {
+    file: entry.sessionFile, cwd: entry.cwd, title: entry.title,
+    reason: "This session belongs to another window. Use Sessions to switch to it, or Move to This Window.",
+    phase: "blocked",
+  });
+  if (s.sessionRuntime.conversations.kindOf(tabId) === "view-only") attachChatRoutes(tabId, true);
 }
 
 /** How long display-only reads wait for the startup restore before they run anyway. */

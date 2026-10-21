@@ -84,6 +84,7 @@ import { isCatalogBusy } from "./profile-catalog.ts";
 import type { CatalogRecordChange } from "./profile-catalog.ts";
 import { PersistRetry } from "./persist-retry.ts";
 import type { PersistRetryOptions } from "./persist-retry.ts";
+import { windowUriIdentity } from "./window-requests.ts";
 
 /** Contention for the catalog lock this long is not another window's write: a lock nobody releases. */
 export const PERSIST_BUSY_ESCALATE_MS = 120_000;
@@ -161,6 +162,8 @@ interface MutableEntry {
 	title: string | null;
 	lastCompletedReplyId: string | null;
 	lastSeenReplyId: string | null;
+	/** Window URI of the window that last became this row's driver, `null` for none (ADR-0080, amendment of 2026-10-21). */
+	home: string | null;
 	importConflict?: SessionImportConflict | null;
 }
 
@@ -519,6 +522,12 @@ export interface SessionIndexOptions {
 	 * that only compares holder ids — the Sessions rows, the commands, the views — goes ahead at once.
 	 */
 	readonly claimHolderCreationTime?: Promise<string | null>;
+	/**
+	 * The URI of this window (`file:` folder or saved workspace), read when a row is written: it becomes the row's
+	 * {@link SessionIndexEntry.home} wherever this window becomes the driver. `null` for a window with no URI;
+	 * defaults to a window with none.
+	 */
+	readonly windowUri?: () => string | null;
 	/** Clock injection for tests; defaults to the system clock. */
 	readonly now?: () => Date;
 	/** Technical failure details for the extension's Output channel, separate from user-facing status. */
@@ -556,7 +565,7 @@ export interface CloseSessionOptions {
 	 * the row stays stopped until an explicit Resume. `"unchanged"` ends the runtime and releases the claim
 	 * and host exactly the same way but leaves the intent as it was recorded, for a process that ended
 	 * without the user asking (a crash, the operating system ending the session): the next startup
-	 * relaunches such a row. Either way the intent, the cleared host and the release are one persist.
+	 * relaunches such a row in its home window. Either way the intent, the cleared host and the release are one persist.
 	 */
 	readonly runIntent?: "stopped" | "unchanged";
 }
@@ -744,6 +753,8 @@ export class SessionIndex {
 	 * from both holding one session (see `session-claim.ts`).
 	 */
 	#claimHolder: ClaimHolder;
+	/** The window's own URI, read when a row is written (see {@link SessionIndexOptions.windowUri}). */
+	readonly #windowUri: () => string | null;
 	/** The holder with its start time, once that has been read; the same lease either way. */
 	readonly #claimHolderReady: Promise<ClaimHolder>;
 	/**
@@ -811,6 +822,7 @@ export class SessionIndex {
 		this.#onPersistStuck = options.onPersistStuck;
 		this.#persistRetry = new PersistRetry(() => this.#persistNow(), options.persistRetry);
 		this.#claimHolder = options.claimHolder ?? createClaimHolder();
+		this.#windowUri = options.windowUri ?? (() => null);
 		this.#claimHolderReady = options.claimHolderCreationTime === undefined
 			? Promise.resolve(this.#claimHolder)
 			: options.claimHolderCreationTime.then(processCreationTime => {
@@ -1036,6 +1048,7 @@ export class SessionIndex {
 			title: null,
 			lastCompletedReplyId: null,
 			lastSeenReplyId: null,
+			home: null,
 		};
 		this.#entries.set(entry.tabId, entry);
 		await this.#persist();
@@ -1132,6 +1145,7 @@ export class SessionIndex {
 			title: header.title ?? header.promptTitle ?? null,
 			lastCompletedReplyId: null,
 			lastSeenReplyId: null,
+			home: null,
 		};
 		this.#entries.set(entry.tabId, entry);
 		await this.#persist();
@@ -1526,6 +1540,7 @@ export class SessionIndex {
 			from.detail = "Native OMP now serves another observed conversation.";
 			from.lastActiveAt = this.#timestamp();
 			to.host = { ...host, sessionId: input.sessionId };
+			to.home = this.#windowUri();
 			to.sessionId = input.sessionId;
 			if (input.name !== null) to.title = input.name;
 			to.runIntent = "running";
@@ -1979,6 +1994,7 @@ export class SessionIndex {
 							// A live host is attached, so an earlier release is no
 							// longer proof of anything.
 							this.#dropReleaseProof(entry);
+							entry.home = this.#windowUri();
 							if (entry.sessionFile === null) entry.sessionId = handle.sessionId ?? attachable.sessionId ?? entry.sessionId;
 							entry.host = {
 								pid: handle.pid ?? attachable.pid,
@@ -2104,6 +2120,7 @@ export class SessionIndex {
 			// A host is now running, so the previous release stops being an
 			// authorization for this row.
 			this.#dropReleaseProof(entry);
+			entry.home = this.#windowUri();
 			entry.host = {
 				pid: step.handle.pid,
 				instanceId: null,
@@ -2303,6 +2320,7 @@ export class SessionIndex {
 		this.#live.set(tabId, { claim, host: handle, sessionFile: null, driven: true });
 		// A live host is attached, so an earlier release is no longer proof of anything.
 		this.#dropReleaseProof(entry);
+		entry.home = this.#windowUri();
 		if (entry.sessionFile === null) entry.sessionId = handle.sessionId ?? attachable.sessionId ?? entry.sessionId;
 		entry.host = {
 			pid: handle.pid ?? attachable.pid,
@@ -2606,7 +2624,7 @@ export class SessionIndex {
 	 * Record the stopped intent of exactly the incarnation a Kill is about to end, before it is ended.
 	 *
 	 * The window that drives the session reads the end of its process as a crash and leaves a crash's run
-	 * intent as recorded (the next startup relaunches it), so the user's decision to kill must already be on
+	 * intent as recorded (the next startup relaunches it in its home window), so the user's decision to kill must already be on
 	 * record when the process dies. `null` when the row records another process than the captured one (a newer
 	 * launch is not what is being killed); otherwise the intent the row had, for {@link SessionIndex.setRunIntent}
 	 * to put back if the kill then fails. Nothing else of the row changes: the host, the claim and the release
@@ -3851,6 +3869,20 @@ function toEntry(entry: MutableEntry): SessionIndexEntry {
 }
 
 /**
+ * Whether a window with the URI `windowUri` may restore this row at the next VS Code start (ADR-0080, amendment of
+ * 2026-10-21).
+ *
+ * Only a `running` row has a window it returns to: a row with no recorded home (written before the field, or driven by a
+ * window with no URI, or recorded with a URI this build cannot compare) is restored by any window that has an editor for it,
+ * and so is a row that is not `running`. A window with no URI is never a recorded home.
+ */
+export function homeAllows(entry: Pick<SessionIndexEntry, "home" | "runIntent">, windowUri: string | null): boolean {
+	if (entry.runIntent !== "running" || entry.home === undefined || entry.home === null) return true;
+	const home = windowUriIdentity(entry.home);
+	return home === null || (windowUri !== null && windowUriIdentity(windowUri) === home);
+}
+
+/**
  * Signature of the row facts a deferred adoption is authorized by.
  *
  * A deferred pass adopts a file for a host it has proven gone, and that proof was
@@ -3942,6 +3974,7 @@ function cloneSharedEntry(entry: SharedEntry): SharedEntry {
 		title: entry.title ?? null,
 		lastCompletedReplyId: entry.lastCompletedReplyId ?? null,
 		lastSeenReplyId: typeof entry.lastSeenReplyId === "string" && entry.lastSeenReplyId.length > 0 ? entry.lastSeenReplyId : null,
+		home: typeof entry.home === "string" && entry.home.length > 0 ? entry.home : null,
 		importConflict: persistedImportConflict(entry.importConflict),
 	};
 }
@@ -4241,9 +4274,9 @@ export type SharedRecordConflict = RecordConflictDraft;
  *   window changed the same row too, both versions are recorded as a conflict and
  *   this window's facts are the ones applied — a user's own action is never
  *   silently replaced by another window's — **except the run state** (`runIntent`, `host`,
- *   `ownership`), which {@link settleRunState} settles field by field: a field this window did
+ *   `ownership`, `home`), which {@link settleRunState} settles field by field: a field this window did
  *   not change takes the committed value, so a window that only ends its own process can never
- *   take back another window's Stop or Kill (ADR-0034, amendment of 2026-10-21);
+ *   take back another window's Stop or Kill (ADR-0034, amendments of 2026-10-21);
  * - a row this window did not touch takes the committed value, so another window's
  *   new or updated row survives here;
  * - a row this window removed is removed, unless the other window changed it after
@@ -4339,29 +4372,31 @@ export function mergeSessionIndexRecords(input: {
 /**
  * The run state of a row both windows changed, field by field (ADR-0034, amendment of 2026-10-21).
  *
- * `runIntent`, `host` and `ownership` (the release stamp) are what a window's end-of-process write touches. Each
- * keeps the committed value unless this window changed it relative to the value it last saw (`before`), so an exit that
- * clears the host and records the release cannot revert the stopped intent another window recorded meanwhile, and an
- * ordinary edit (a title, a reply identity) never carries a stale host or intent back. Two more rules, for a write that
- * replaces the *attempt* of the row (a different `startedAt`): one that clears the host of a run (`before.host` set,
- * `mine.host` null) says nothing about a newer attempt another window committed meanwhile, so the committed run state
- * stands whole; one that records a new attempt (a launch or an attach) carries its own intent and ownership, so a stop or
- * a release another window committed for the older attempt does not stay glued to the new one.
+ * `runIntent`, `host`, `ownership` (the release stamp) and `home` (the window that last became the driver) are what a
+ * window's launch, attach and end-of-process writes touch. Each keeps the committed value unless this window changed it
+ * relative to the value it last saw (`before`), so an exit that clears the host and records the release cannot revert the
+ * stopped intent another window recorded meanwhile, and an ordinary edit (a title, a reply identity) never carries a stale
+ * host, intent or home back. Two more rules, for a write that replaces the *attempt* of the row (a different `startedAt`):
+ * one that clears the host of a run (`before.host` set, `mine.host` null) says nothing about a newer attempt another window
+ * committed meanwhile, so the committed run state, home included, stands whole; one that records a new attempt (a launch
+ * or an attach) carries its own intent, ownership and home, so a stop or a release another window committed for the older
+ * attempt does not stay glued to the new one.
  */
 function settleRunState(merged: SharedEntry, mine: SharedEntry, theirs: SharedEntry, before: SharedEntry): SharedEntry {
 	if (mine.host === null && before.host !== null && theirs.host !== null && theirs.host.startedAt !== before.host.startedAt) {
-		return { ...merged, runIntent: theirs.runIntent, host: theirs.host, ownership: theirs.ownership };
+		return { ...merged, runIntent: theirs.runIntent, host: theirs.host, ownership: theirs.ownership, home: theirs.home };
 	}
 	if (mine.host !== null && (before.host === null || mine.host.startedAt !== before.host.startedAt)) {
 		// The mirror case: a launch or an attach records the attempt, its intent and its (unreleased) ownership in one write, so
 		// a stop or a release another window committed for an *older* attempt of the row must not stay glued to the new one.
-		return { ...merged, runIntent: mine.runIntent, host: mine.host, ownership: mine.ownership };
+		return { ...merged, runIntent: mine.runIntent, host: mine.host, ownership: mine.ownership, home: mine.home };
 	}
 	return {
 		...merged,
 		runIntent: sameRecord(mine.runIntent, before.runIntent) ? theirs.runIntent : mine.runIntent,
 		host: sameRecord(mine.host, before.host) ? theirs.host : mine.host,
 		ownership: sameRecord(mine.ownership, before.ownership) ? theirs.ownership : mine.ownership,
+		home: mine.home === before.home ? theirs.home : mine.home,
 	};
 }
 

@@ -7,8 +7,8 @@
  * system's own view of the process), release control material and the claim, and record the end. A normal
  * exit (code 0, OMP's own `/exit`) records the stopped intent, and so does an end of a row that already
  * records it (the user's Kill or Stop wrote it first, so the end is that stop and not a crash); any other end
- * (a crash, the operating system ending the session) leaves the run intent as it was, so the next startup
- * relaunches the session. A close, reload or relaunch that reached the tab's gate first replaced or
+ * (a crash, the operating system ending the session) leaves the run intent as it was, so the session is relaunched when its
+ * home window is restored at the next startup (ADR-0080). A close, reload or relaunch that reached the tab's gate first replaced or
  * cleared the runtime, and the notification then describes a process this window no longer drives, so it
  * does nothing. The handlers take the tab's gate themselves, so they are called outside it; what the
  * window shows (notices, the terminal pane, the session view, the launcher) is its hooks, run after the
@@ -134,7 +134,7 @@ export interface ExitOutcome {
  * once its stdin closes or an extension asks for shutdown. Everything else is not the user's decision to stop:
  * a non-zero code (the broker logs show `4` when Windows ends the session, `-1` with signal 15 for a forced
  * termination, `1` for a startup failure), a signal, no code, and no answer from the broker at all (it was killed
- * with the process). Those leave the run intent as recorded, so the next startup relaunches the row.
+ * with the process). Those leave the run intent as recorded, so the row is relaunched when its home window is restored at the next startup.
  *
  * `recorded` is the intent the row holds: this window's copy, else the newest committed record. A Kill or Stop another
  * window recorded reaches this window's copy only when the window adopts that row, which it does not while it drives the
@@ -160,8 +160,8 @@ export function exitOutcome(stop: Pick<NativeStopVerdict, "exit" | "detail">, re
 	}
 	return {
 		intent: "unchanged",
-		detail: `The OMP process ended unexpectedly (${how}). The session restarts the next time VS Code starts; Resume starts it now.`,
-		log: `OMP ended abnormally (${how}); the run intent stays as recorded, so the next startup relaunches the row`,
+		detail: `The OMP process ended unexpectedly (${how}). The session restarts when its window's editor is restored at the next VS Code start; Resume starts it now.`,
+		log: `OMP ended abnormally (${how}); the run intent stays as recorded, so the row is relaunched when its home window is restored at the next startup`,
 	};
 }
 

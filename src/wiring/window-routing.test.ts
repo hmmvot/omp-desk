@@ -88,6 +88,8 @@ interface HeldEntry {
 	cwd: string;
 	ownership: { ownerGeneration: string } | null;
 	host: { startedAt: string; pid: number | null } | null;
+	runIntent?: string;
+	home?: string | null;
 }
 
 /**
@@ -174,6 +176,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	const revealed: string[] = [];
 	const elected: string[] = [];
 	const openedTabs: unknown[][] = [];
+	const outsideHome: string[] = [];
 	const warnings: string[] = [];
 	const informed: string[] = [];
 	const errors: string[] = [];
@@ -225,6 +228,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		revealExistingTab: async (_index, tabId) => { revealed.push(tabId); },
 		isSessionTabInput: input => input !== null && typeof input === "object" && "session" in input,
 		electLocalController: async (_index, tabId) => { elected.push(tabId); },
+		showRestoredOutsideHome: async (_index, tabId) => { outsideHome.push(tabId); },
 		openSession: async (...args) => { opened.push(["open-session", ...args.slice(2)]); return true; },
 		openSessionInMode: async (...args) => { opened.push(["open-session-in-mode", ...args.slice(2)]); },
 		startNewSession: async (_context, _index, folder) => { drafts.push({ cwd: folder.path }); },
@@ -242,7 +246,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	stub.commands.handler = null;
 	stub.window.state.focused = true;
 	return {
-		storageDir, served, state, deps, routing, registry, registryHandle, fake, index: fake as never, calls: stub.commands.calls, drafts, resumed, opened, selected, revealed, elected, openedTabs,
+		storageDir, served, state, deps, routing, registry, registryHandle, fake, index: fake as never, calls: stub.commands.calls, drafts, resumed, opened, selected, revealed, elected, openedTabs, outsideHome,
 		warnings, informed, errors, handOvers, get logged(): string[] { return lines.map(line => line.message); }, lines, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
 	};
 }
@@ -1511,6 +1515,34 @@ describe("opening an editor VS Code restored", () => {
 		w.state.startupCovers = false;
 		await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, TAB);
 		assert.deepEqual(w.openedTabs, [[TAB, "opened", "restored"]]);
+	});
+
+	it("shows only the history of a running session whose home is another window, and opens the rest as before (ADR-0080)", async () => {
+		const ours = URI.file("C:/omp-vscode/proj");
+		const w = await world();
+		w.state.liveHost = false;
+		stub.workspace.workspaceFile = undefined;
+		stub.workspace.workspaceFolders = [{ uri: ours }];
+		try {
+			w.state.entries.set(TAB, { ...entry, runIntent: "running", home: URI.file("C:/omp-vscode/elsewhere").toString() });
+			await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, TAB);
+			assert.deepEqual([w.outsideHome, w.openedTabs, w.elected], [[TAB], [], []], "nothing is opened, restored or claimed here");
+
+			w.state.entries.set(TAB, { ...entry, runIntent: "running", home: ours.toString() });
+			await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, TAB);
+			assert.deepEqual([w.outsideHome.length, w.openedTabs], [1, [[TAB, "opened", "restored"]]], "the home window opens it");
+
+			w.state.entries.set(TAB, { ...entry, runIntent: "stopped", home: URI.file("C:/omp-vscode/elsewhere").toString() });
+			await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, TAB);
+			assert.deepEqual([w.outsideHome.length, w.openedTabs.length], [1, 2], "a stopped row has no window it returns to");
+
+			w.state.liveHost = true;
+			w.state.entries.set(TAB, { ...entry, runIntent: "running", home: URI.file("C:/omp-vscode/elsewhere").toString() });
+			await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, TAB);
+			assert.deepEqual([w.outsideHome.length, w.elected], [1, [TAB]], "a session this window already runs is its own whatever the home says");
+		} finally {
+			stub.workspace.workspaceFolders = [];
+		}
 	});
 
 	it("does nothing for a tab the index does not list", async () => {

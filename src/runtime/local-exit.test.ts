@@ -124,7 +124,7 @@ describe("exitOutcome", () => {
 	});
 
 	it("says what happened in the row's detail and the log", () => {
-		assert.match(exitOutcome(verdict({ code: 4, signal: 0 })).detail, /exit code 4.*restarts the next time VS Code starts/);
+		assert.match(exitOutcome(verdict({ code: 4, signal: 0 })).detail, /exit code 4.*restarts when its window's editor is restored at the next VS Code start/);
 		assert.match(exitOutcome(verdict({ code: -1, signal: 15 })).detail, /exit code -1, signal 15/);
 		assert.match(exitOutcome(verdict({ code: null, signal: 0 })).detail, /no exit code/);
 		assert.match(exitOutcome(verdict(undefined)).log, /did not report how it ended/);
@@ -146,7 +146,7 @@ describe("exitOutcome", () => {
 		for (const recorded of ["running", null] as const) {
 			const outcome = exitOutcome(verdict({ code: 4, signal: 0 }), recorded);
 			assert.equal(outcome.intent, "unchanged");
-			assert.match(outcome.detail, /ended unexpectedly.*restarts the next time VS Code starts/);
+			assert.match(outcome.detail, /ended unexpectedly.*restarts when its window's editor is restored at the next VS Code start/);
 			assert.match(outcome.log, /ended abnormally/);
 		}
 	});
@@ -233,7 +233,7 @@ describe("rpcExited", () => {
 		const f = fixture("chat", undefined, { brokerProves: false, rootGone: true });
 		await f.ops.rpcExited(TAB, f.runtime);
 		assert.equal(f.closes[0]?.runIntent, "unchanged");
-		assert.match(f.closes[0]?.detail ?? "", /ended unexpectedly.*restarts the next time VS Code starts/);
+		assert.match(f.closes[0]?.detail ?? "", /ended unexpectedly.*restarts when its window's editor is restored at the next VS Code start/);
 		assert.equal(infoLines(f.lines, "ended abnormally").length, 1);
 		assert.deepEqual(infoLines(f.lines, "user stop"), []);
 	});

@@ -413,8 +413,8 @@ interface WindowFixture {
   sessionRuntime: { detach: (request: unknown) => Promise<unknown> };
   readonly outcomes: Map<string, unknown>;
   readonly routing: {
-    serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
-    selectHeldTab(index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
+    serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean>; progress(done: number): Promise<void> }): Promise<{ ok: boolean; focused: boolean }>;
+    selectHeldTab(index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean>; progress(done: number): Promise<void> }): Promise<{ ok: boolean; focused: boolean }>;
     openRestoredTabIfUncovered(context: unknown, index: unknown, tabId: string): Promise<void>;
     routeLaunch(index: unknown, folder: { path: string }, launch: unknown, answerTimeoutMs?: number): Promise<boolean>;
     announceCredentialsChanged(): Promise<void>;
@@ -3165,7 +3165,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				const notices: unknown[] = [];
 				harness.warning(async (...args) => { notices.push(args); });
 				const request = { kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: "2026-10-10T09:00:00.000Z", workspace: { path: cwd, match: "folder" }, launch: launch(f.row.tabId) };
-				assert.equal((await harness.window().routing.serveLaunchRequest(f.saved.context, f.index, request, { stillWanted: async () => true })).ok, true);
+				assert.equal((await harness.window().routing.serveLaunchRequest(f.saved.context, f.index, request, { stillWanted: async () => true, progress: async () => {} })).ok, true);
 				await new Promise(resolve => setTimeout(resolve, 100));
 				assert.deepEqual(notices, [], "no view switch was attempted");
 				assert.equal(f.state.mode, "terminal");
@@ -5546,14 +5546,14 @@ describe("starting a session in the window that has its folder open", () => {
       let verdict: { kind: "same" } | { kind: "changed"; files: string[] } = { kind: "changed", files: ["out/extension.js"] };
       harness.window().packageDrift = { check: () => verdict };
       try {
-        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
+        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true, progress: async () => {} });
         assert.equal(published.at(-1)?.stale, true);
         assert.ok(flushed >= 1, "written at once, not at the next heartbeat");
         const before = published.length;
-        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
+        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true, progress: async () => {} });
         assert.equal(published.length, before, "an unchanged verdict republishes nothing");
         verdict = { kind: "same" };
-        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }).catch(() => undefined);
+        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true, progress: async () => {} }).catch(() => undefined);
         assert.equal(published.at(-1)?.stale, false);
       } finally { harness.window().packageDrift = null; }
     });
@@ -5564,7 +5564,7 @@ describe("starting a session in the window that has its folder open", () => {
       harness.window().packageDrift = { check: () => ({ kind: "changed", files: ["out/extension.js"] }) };
       try {
         const request = { kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: STAMP, workspace: workspaceFolder, launch: { kind: "new-session", folderId: "folder:proj-1" } };
-        assert.deepEqual(await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }), { ok: false, focused: false, refusal: "stale-build" });
+        assert.deepEqual(await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true, progress: async () => {} }), { ok: false, focused: false, refusal: "stale-build" });
         await nextTurn(); await nextTurn();
         assert.deepEqual(w.drafts, [], "nothing began here");
       } finally { harness.window().packageDrift = null; }
@@ -5670,7 +5670,7 @@ describe("starting a session in the window that has its folder open", () => {
   });
 
   describe("serving a launch another window asked for", () => {
-    const wanted = { stillWanted: async () => true };
+    const wanted = { stillWanted: async () => true, progress: async () => {} };
     const request = (launch: unknown, workspace: unknown = workspaceFolder) => ({ kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: STAMP, workspace, launch });
 
     it("starts the launch here through the ordinary path, and answers on admission", async () => {
@@ -5692,7 +5692,7 @@ describe("starting a session in the window that has its folder open", () => {
       state.panel = { webview: { postMessage: async () => true }, reveal: () => {}, dispose: () => {} };
       const live = { kind: "terminal", stopping: false, handle: { state: "running" } };
       const before = state.lastOpenRequest;
-      const outcome = await harness.window().routing.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }), { stillWanted: async () => { harness.record(state).runtime = live; return true; } });
+      const outcome = await harness.window().routing.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }), { stillWanted: async () => { harness.record(state).runtime = live; return true; }, progress: async () => {} });
       assert.equal(outcome.ok, true);
       await nextTurn(); await nextTurn();
       assert.equal(state.lastOpenRequest, before, "no view change was begun for the live session");
@@ -5841,7 +5841,7 @@ describe("starting a session in the window that has its folder open", () => {
 describe("serving another window's request to select a session's tab", () => {
   const tabFor = (n: number) => `tab:88888888-2222-4333-8444-55555555555${n}`;
   const ours = { ok: true, claim: { verifiable: true, holderId: "fixture-window", pid: process.pid, ownerGeneration: OWNER, windowUri: null } };
-  const wanted = { stillWanted: async () => true };
+  const wanted = { stillWanted: async () => true, progress: async () => {} };
   const refused = { ok: false, focused: false };
   /** The request was made at this time; a binding committed before it is the one the requester saw. */
   const MADE = "2026-10-10T10:00:00.000Z";
@@ -5897,7 +5897,7 @@ describe("serving another window's request to select a session's tab", () => {
     const { index, loose, calls, request } = setup(1);
     // Another selection wins: the command is issued, VS Code schedules the revival, the tab is not active afterwards.
     harness.commandHandler(() => undefined);
-    assert.deepEqual(await harness.window().routing.selectHeldTab(index, request, wanted), refused);
+    assert.deepEqual(await harness.window().routing.selectHeldTab(index, request, wanted), { ...refused, refusal: "busy" });
     assert.ok(harness.window().requestSelections.has(request.tabId), "a command may already have triggered the revival");
     void calls;
     loose.hasLiveHost = () => false;

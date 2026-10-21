@@ -244,6 +244,14 @@ export interface SessionIndexEntry {
 	/** Stable identity of the last reply that was actually displayed, or `null`. */
 	readonly lastSeenReplyId: string | null;
 	/**
+	 * The URI of the window that last became this row's driver (`file:` folder or saved workspace), or `null` for none.
+	 *
+	 * It is where the next VS Code start returns a running session (ADR-0080, amendment of 2026-10-21): a stop, a close
+	 * and a crash do not clear it, and a row without one is read as `null`, which any window is home for. A window with
+	 * no URI writes `null`. Absent on a row built outside the index (a test fixture); it reads as `null`.
+	 */
+	readonly home?: string | null;
+	/**
 	 * Set when importing older per-workspace state found a row with this tab
 	 * identity that disagreed with the row already held, or when the row's own
 	 * source was internally inconsistent.

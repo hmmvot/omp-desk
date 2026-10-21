@@ -27,6 +27,7 @@ import {
 	SESSION_INDEX_STORAGE_KEY,
 	SessionIndex,
 	SessionIndexError,
+	homeAllows,
 } from "./session-index.ts";
 import { CatalogError } from "./profile-catalog.ts";
 import type { CatalogStore } from "./profile-catalog.ts";
@@ -1730,6 +1731,112 @@ describe("the run state of a row two windows changed", () => {
 		assert.equal(result.conflicts.length, 1);
 		const [entry] = rowsOf(result.value);
 		assert.deepEqual([entry?.runIntent, entry?.host], ["stopped", null], "this window changed both fields: they are its decision");
+	});
+});
+
+/** The window a session returns to after a restart (ADR-0080 and ADR-0034, amendments of 2026-10-21). */
+describe("the home window of a session row", () => {
+	const WINDOW_A = "file:///d%3A/work/alpha";
+	const WINDOW_B = "file:///d%3A/work/beta";
+	const host = (startedAt: string) => ({ pid: 7, instanceId: null, generation: null, sessionId: "S", startedAt, transport: "rpc", rpc: null });
+	const unreleased = { ownerGeneration: "g", draftIdentity: null, releasedAt: null };
+	const row = (over: Record<string, unknown>) => ({
+		tabId: "tab:one", origin: "extension", sessionFile: "S.jsonl", sessionId: "S", cwd: process.cwd(), scope: { profile: null, sessionDir: null },
+		sessionDir: null, ownership: unreleased, host: host("2026-10-21T10:00:00.000Z"),
+		createdAt: "2026-10-21T09:00:00.000Z", lastActiveAt: "2026-10-21T10:00:00.000Z", ordinal: 1, runIntent: "running", title: null,
+		lastCompletedReplyId: null, lastSeenReplyId: null, home: WINDOW_A, ...over,
+	});
+	const snapshot = (...entries: unknown[]) => ({ version: 1, nextOrdinal: 2, entries, bindings: [] });
+	const homeOf = (base: unknown, mine: unknown, theirs: unknown): string | null | undefined => {
+		const merged = mergeSessionIndexRecords({ base: snapshot(base), desired: snapshot(mine), latest: snapshot(theirs) });
+		return (rowsOf(merged.value)[0] as unknown as { home?: string | null }).home;
+	};
+
+	it("is written with the host a launch records, and kept across a close that leaves the intent", async () => {
+		const store = new TestStore();
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, windowUri: () => WINDOW_B });
+		const file = await makeSessionFile(sessionDir, "S-HOME", cwd);
+		const tab = await managedSession(index, file, cwd);
+		assert.equal(index.get(tab.tabId)?.home, null, "a row nobody drove has no home");
+		const started = recordingLauncher({ state: "running", host: runningHandle("S-HOME") });
+		assert.equal((await index.restoreAll({ reconciler: noRecordedHost, launcher: started.launcher })).restored.length, 1);
+		try {
+			assert.equal(index.get(tab.tabId)?.home, WINDOW_B);
+			assert.equal((rowsOf(store.get(SESSION_INDEX_STORAGE_KEY))[0] as unknown as { home: string | null }).home, WINDOW_B, "committed with the host");
+			await index.closeSession(tab.tabId, { confirmedStopped: true, runIntent: "unchanged" });
+			assert.equal((rowsOf(store.get(SESSION_INDEX_STORAGE_KEY))[0] as unknown as { home: string | null }).home, WINDOW_B, "a crash does not clear it");
+			await index.setRunIntent(tab.tabId, "stopped");
+			assert.equal((rowsOf(store.get(SESSION_INDEX_STORAGE_KEY))[0] as unknown as { home: string | null }).home, WINDOW_B, "a stop does not clear it");
+		} finally {
+			await index.closeSession(tab.tabId, { confirmedStopped: true });
+		}
+	});
+
+	it("is null for a window with no URI, and a later launch there replaces an earlier home", async () => {
+		const store = new TestStore();
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		let uri: string | null = WINDOW_A;
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, windowUri: () => uri });
+		const file = await makeSessionFile(sessionDir, "S-HOME-2", cwd);
+		const tab = await managedSession(index, file, cwd);
+		const first = recordingLauncher({ state: "running", host: runningHandle("S-HOME-2") });
+		await index.restoreAll({ reconciler: noRecordedHost, launcher: first.launcher });
+		assert.equal(index.get(tab.tabId)?.home, WINDOW_A);
+		await index.closeSession(tab.tabId, { confirmedStopped: true, runIntent: "unchanged" });
+		uri = null;
+		const second = recordingLauncher({ state: "running", host: runningHandle("S-HOME-2") });
+		await index.restoreAll({ reconciler: noRecordedHost, launcher: second.launcher });
+		try {
+			assert.equal(index.get(tab.tabId)?.home, null, "the window that drove it last has no URI: no preference");
+		} finally {
+			await index.closeSession(tab.tabId, { confirmedStopped: true });
+		}
+	});
+
+	it("is read leniently: a row without it, or with a value that is not a string, has none", () => {
+		const merged = mergeSessionIndexRecords({ base: undefined, desired: snapshot(row({ home: 7 })), latest: snapshot(row({ home: undefined, title: "t" })) });
+		assert.equal((rowsOf(merged.value)[0] as unknown as { home?: string | null }).home, null);
+	});
+
+	it("keeps the committed home when this window changes something else", () => {
+		const before = row({ home: WINDOW_A });
+		assert.equal(homeOf(before, row({ home: WINDOW_A, title: "named here" }), row({ home: WINDOW_B })), WINDOW_B, "a stale copy does not carry an older home back");
+	});
+
+	it("applies this window's own change of the home, whatever the committed row says", () => {
+		const before = row({ home: WINDOW_A });
+		assert.equal(homeOf(before, row({ home: WINDOW_B }), row({ home: WINDOW_A, title: "renamed elsewhere" })), WINDOW_B, "a Move re-homes the session");
+	});
+
+	it("lets a close that only clears the host of a run take the home of a newer attempt", () => {
+		const before = row({ home: WINDOW_A });
+		const released = { ownerGeneration: "g", draftIdentity: null, releasedAt: "2026-10-21T10:00:05.000Z" };
+		const newer = row({ home: WINDOW_B, host: host("2026-10-21T10:30:00.000Z") });
+		assert.equal(homeOf(before, row({ home: WINDOW_A, host: null, ownership: released }), newer), WINDOW_B, "the dying window's close does not take its own home back");
+	});
+
+	it("carries its own home with a new attempt it records", () => {
+		const before = row({ home: WINDOW_A, host: null, runIntent: "stopped" });
+		const launched = row({ home: WINDOW_B, host: host("2026-10-21T10:30:00.000Z") });
+		const other = row({ home: WINDOW_A, host: null, runIntent: "stopped", title: "renamed elsewhere" });
+		assert.equal(homeOf(before, launched, other), WINDOW_B);
+	});
+
+	describe("homeAllows", () => {
+		it("lets any window restore a row with no home, a row that is not running, and a home it cannot compare", () => {
+			assert.equal(homeAllows({ runIntent: "running", home: null }, WINDOW_A), true);
+			assert.equal(homeAllows({ runIntent: "running" }, null), true);
+			assert.equal(homeAllows({ runIntent: "stopped", home: WINDOW_A }, WINDOW_B), true);
+			assert.equal(homeAllows({ runIntent: "running", home: "vscode-remote://host/folder" }, WINDOW_B), true);
+		});
+
+		it("lets only the home window restore a running row, by identity and not by spelling", () => {
+			assert.equal(homeAllows({ runIntent: "running", home: WINDOW_A }, WINDOW_A), true);
+			assert.equal(homeAllows({ runIntent: "running", home: "file:///d%3A/Work/Alpha/" }, WINDOW_A), true, "case and a trailing slash do not tell windows apart");
+			assert.equal(homeAllows({ runIntent: "running", home: WINDOW_A }, WINDOW_B), false);
+			assert.equal(homeAllows({ runIntent: "running", home: WINDOW_A }, null), false, "a window with no URI is never a recorded home");
+		});
 	});
 });
 
