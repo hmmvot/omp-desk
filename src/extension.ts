@@ -316,6 +316,8 @@ import { awaitEndedRuntimeCleanup } from "./host/runtime-settle";
 // user's sessions and folders nor forks them.
 import { catalogPaths, createCatalogStore, startCatalogWatch } from "./host/profile-catalog";
 import type { CatalogStore } from "./host/profile-catalog";
+import { openProfileCatalog } from "./wiring/catalog-recovery";
+import type { CatalogRecoveryHandle, OpenedCatalog } from "./wiring/catalog-recovery";
 import { importPredecessorFolders } from "./wiring/predecessor-import";
 import { migrateLegacySettings } from "./wiring/legacy-settings";
 import { migrateSessionFolderSettings } from "./wiring/session-folder-settings";
@@ -608,6 +610,8 @@ interface WindowState {
   indexForBridge: SessionIndex | null;
   /** This window's view of the profile catalog, built once at activation (ADR-0034). */
   catalogStore: CatalogStore | undefined;
+  /** The private backup and loss report of the catalog (ADR-0081); set with the catalog. */
+  catalogRecovery: CatalogRecoveryHandle | undefined;
   /**
    * Runs this window's catalog adoptions one at a time, folding every trigger that arrives meanwhile (a commit of this window,
    * a peer's change, focus, visibility, an explicit refresh) into one follow-up: a reload of several windows fires dozens of
@@ -1277,6 +1281,7 @@ function editorPanelsDeps(): EditorPanelsDeps<TabState> {
     log,
     info: showInfo,
     warn: showWarning,
+    restoredEditorLost: () => windowState().catalogRecovery?.addEvidence({ restoredEditors: 1 }),
   };
 }
 
@@ -1321,6 +1326,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     sessionRuntime: undefined as never, // assigned by `activate` before anything reads it
     indexForBridge: null,
     catalogStore: undefined,
+    catalogRecovery: undefined,
     catalogAdoption: undefined,
     catalogReady: Promise.resolve(),
     externalLeases: null,
@@ -1623,9 +1629,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const catalogRead = synchronousFileCalls.then(synchronous => {
     fileCalls = synchronous ? "synchronous" : "asynchronous";
     return createProfileCatalog(context);
-  }).then(store => {
+  }).then(opened => {
     catalogReadMs = performance.now() - catalogReadStartedAt;
-    return store;
+    return opened;
   });
   // Every command and serializer below can build a chat document, whose policy names the frame server's port.
   await htmlPageServerBound;
@@ -1732,9 +1738,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push({ dispose: () => clearInterval(poll) });
   }
   activation.mark("broker client, updater notice, drift capture");
-  const catalog = await catalogRead;
+  const opened = await catalogRead;
   activation.mark("profile catalog (waited after the setup above)");
+  const catalog = opened.store;
   s.catalogStore = catalog;
+  s.catalogRecovery = opened.recovery;
+  context.subscriptions.push({ dispose: () => opened.recovery.dispose() });
   // The launcher reports that it is still reading the profile's stored sessions until
   // the one-time import of the predecessor build's folder list has settled, so an empty
   // catalog never presents itself as "no folder is registered" while the folders the
@@ -4937,15 +4946,18 @@ const CATALOG_PENDING_CONTEXT = "ompDesk.catalogPending";
  * a delta against the newest committed revision instead of overwriting another
  * window's work.
  */
-function createProfileCatalog(context: vscode.ExtensionContext): Promise<CatalogStore> {
-  return createCatalogStore({
-    paths: catalogPaths(context.globalStorageUri.fsPath),
+function createProfileCatalog(context: vscode.ExtensionContext): Promise<OpenedCatalog> {
+  return openProfileCatalog({
+    context,
+    log,
     mergers: {
       [SESSION_INDEX_STORAGE_KEY]: mergeSessionIndexRecords,
       [WORKSPACE_FOLDERS_STORAGE_KEY]: mergeWorkspaceFolderRecords,
       [BROKER_SLOTS_KEY]: mergeBrokerSlotRecords,
       [SHELL_SLOTS_KEY]: mergeShellSlotRecords,
     },
+    keys: { sessions: SESSION_INDEX_STORAGE_KEY, folders: WORKSPACE_FOLDERS_STORAGE_KEY },
+    showLog: () => windowState().output?.show(),
     onUnavailable: reason => {
       log.warn(`the OMP profile catalog is unusable, so nothing will be saved this session: ${reason}`);
       showWarning(
@@ -4989,6 +5001,8 @@ function startCatalogActivation(context: vscode.ExtensionContext, index: Session
     // is responsible for, and a click on any other row is an explicit open.
     s.catalogAdoptedAt = Date.now();
     startStartupRestore(context, index);
+    // The private backup of the catalog starts with the restore: its first copy is seeded a few seconds later, after the restore.
+    s.catalogRecovery?.startBackup();
     watchCatalogForWindow(index, folders);
   })();
   s.catalogReady = settled.then(

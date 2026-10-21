@@ -323,7 +323,7 @@ export async function readCatalogDocument(paths: CatalogPaths): Promise<CatalogD
  *
  * Throws {@link CatalogError} `unavailable` for anything that is not a document this build may write over.
  */
-function parseCatalogDocument(text: string): CatalogDocument {
+export function parseCatalogDocument(text: string): CatalogDocument {
   let parsed: unknown;
   try {
     parsed = trackOperation("catalog parse", () => JSON.parse(text));
@@ -576,6 +576,19 @@ export interface CatalogTransaction {
   addImport(record: CatalogImportRecord): void;
 }
 
+/**
+ * A base document a transaction may start from when the committed one is missing or an empty shell
+ * ([ADR-0081](../../docs/decisions/0081-keep-a-private-backup-of-the-catalog-and-broker-records-outside-vs-codes-storage-and-restore-it-over-a-missing-catalog.md)).
+ */
+export interface CatalogRecovery {
+  /** The document to continue from. */
+  readonly document: CatalogDocument;
+  /** Names the source for the conflict ledger and the log (`backup catalog-r…json`, `this window's last read`). */
+  readonly label: string;
+  /** Whatever the recoverer wants its caller to report after the commit; opaque here. */
+  readonly info: unknown;
+}
+
 /** What one committed transaction produced: nothing changed, or a new revision together with the document as it was written. */
 export type CatalogCommitResult =
   | { readonly revision: number; readonly changed: false }
@@ -584,6 +597,8 @@ export type CatalogCommitResult =
       readonly changed: true;
       /** The committed document, parsed from the text that was renamed into place. */
       readonly document: CatalogDocument;
+      /** Set when this transaction first committed a recovered base document (its revision is that commit's, or a later one). */
+      readonly recovery?: CatalogRecovery;
     };
 
 export interface CatalogTransactionOptions {
@@ -591,6 +606,59 @@ export interface CatalogTransactionOptions {
   readonly lockStaleMs?: number;
   readonly now?: () => number;
   readonly clock?: () => Date;
+  /**
+   * Called **under the lock**, with the document just read, when that document is missing (`null`) or `isReset` holds. A
+   * document it returns is committed first, as revision `max(its revision, the read one, knownRevision) + 1`, and the
+   * operation then runs against it. It must not throw; a throw is read as "nothing to recover from".
+   */
+  readonly recover?: (current: CatalogDocument | null) => Promise<CatalogRecovery | null>;
+  /** Whether a document that exists is an empty shell of a lost catalog, so that `recover` is asked about it too. */
+  readonly isReset?: (document: CatalogDocument) => boolean;
+  /**
+   * How the records of an empty shell are carried onto the recovered ones; the default keeps the recovered value of every key
+   * and adds the keys only the shell has.
+   */
+  readonly mergeShell?: (shell: Readonly<Record<string, unknown>>, recovered: Readonly<Record<string, unknown>>) => Record<string, unknown>;
+  /** The highest revision the caller has seen, so a recovered document never moves its observers backwards. */
+  readonly knownRevision?: number;
+}
+
+/** The recovered base, joined with an empty shell's ledgers and records, as the document to commit. */
+function composeRecovered(
+  recovery: CatalogRecovery,
+  shell: CatalogDocument | null,
+  options: CatalogTransactionOptions,
+  clock: () => Date,
+): CatalogDocument {
+  const base = recovery.document;
+  const records: Record<string, unknown> = shell === null
+    ? { ...base.records }
+    : options.mergeShell !== undefined
+      ? options.mergeShell(shell.records, base.records)
+      : { ...shell.records, ...base.records };
+  const imports = [...base.imports.filter(entry => shell?.imports.some(own => own.source === entry.source) !== true), ...(shell?.imports ?? [])];
+  const conflicts: CatalogConflictRecord[] = [
+    ...base.conflicts,
+    ...(shell?.conflicts ?? []),
+    {
+      key: "catalog.recovery",
+      identity: recovery.label,
+      source: null,
+      at: clock().toISOString(),
+      reason: shell === null
+        ? "the catalog was missing, so this document was recovered as its base"
+        : `the catalog held no sessions and no folders (revision ${shell.revision}), so this document was recovered as its base`,
+      retained: null,
+      rejected: null,
+    },
+  ];
+  return {
+    version: CATALOG_VERSION,
+    revision: Math.max(base.revision, shell?.revision ?? 0, options.knownRevision ?? 0) + 1,
+    records,
+    imports,
+    conflicts: compactConflicts(conflicts),
+  };
 }
 
 /**
@@ -600,6 +668,9 @@ export interface CatalogTransactionOptions {
  * advanced and no file is written. Everything the operation does happens under the
  * lock, so two windows' operations are totally ordered and neither can compute its
  * change from a stale snapshot.
+ *
+ * With `options.recover`, a missing or empty-shell document is replaced by the recovered base *first* (see
+ * {@link CatalogTransactionOptions.recover}); the recovery is committed even when `operation` then changes nothing.
  */
 export async function transactCatalog(
   paths: CatalogPaths,
@@ -616,8 +687,18 @@ export async function transactCatalog(
   });
   let written: string;
   let revisionWritten: number;
+  let recovered: CatalogRecovery | null = null;
   try {
-    const current = (await readCatalogDocument(paths)) ?? emptyCatalogDocument();
+    const read = await readCatalogDocument(paths);
+    let current = read ?? emptyCatalogDocument();
+    let recoveredText: string | null = null;
+    if (options.recover !== undefined && (read === null || options.isReset?.(read) === true)) {
+      recovered = await options.recover(read).catch(() => null);
+      if (recovered !== null) {
+        recoveredText = await commitDocument(paths, composeRecovered(recovered, read, options, clock));
+        current = parseCatalogDocument(recoveredText);
+      }
+    }
     const records: Record<string, unknown> = { ...current.records };
     const imports: CatalogImportRecord[] = [...current.imports];
     const conflicts: CatalogConflictRecord[] = [...current.conflicts];
@@ -656,25 +737,31 @@ export async function transactCatalog(
       });
     }
     const decided = operation(tx);
-    if (decided === false) return { revision: current.revision, changed: false };
-    const next: CatalogDocument = {
-      version: CATALOG_VERSION,
-      revision: current.revision + 1,
-      records,
-      // The import ledger is *non-evicting*: a tombstone that could be evicted would make its source eligible
-      // again and let it resurrect a row the user removed afterwards. The conflict ledger keeps every kind of
-      // disagreement and bounds only its repeats (ADR-0034, 2026-10-12), on the newest committed ledger under
-      // the lock, so a ledger an earlier build let grow shrinks with the next commit.
-      imports,
-      conflicts: compactConflicts(conflicts),
-    };
-    written = await commitDocument(paths, next);
-    revisionWritten = next.revision;
+    if (decided === false) {
+      if (recoveredText === null) return { revision: current.revision, changed: false };
+      // The recovery itself was committed: report it even though the operation changed nothing more.
+      written = recoveredText;
+      revisionWritten = current.revision;
+    } else {
+      const next: CatalogDocument = {
+        version: CATALOG_VERSION,
+        revision: current.revision + 1,
+        records,
+        // The import ledger is *non-evicting*: a tombstone that could be evicted would make its source eligible
+        // again and let it resurrect a row the user removed afterwards. The conflict ledger keeps every kind of
+        // disagreement and bounds only its repeats (ADR-0034, 2026-10-12), on the newest committed ledger under
+        // the lock, so a ledger an earlier build let grow shrinks with the next commit.
+        imports,
+        conflicts: compactConflicts(conflicts),
+      };
+      written = await commitDocument(paths, next);
+      revisionWritten = next.revision;
+    }
   } finally {
     await releaseLock(paths.lock, held.token);
   }
   // After the lock is released: the validation is the one a read applies, on the exact text that was committed.
-  return { revision: revisionWritten, changed: true, document: parseCatalogDocument(written) };
+  return { revision: revisionWritten, changed: true, document: parseCatalogDocument(written), ...(recovered === null ? {} : { recovery: recovered }) };
 }
 
 // Window-side store
@@ -770,6 +857,17 @@ export interface CatalogStore {
   onChange(listener: CatalogListener): () => void;
   /** Forget every listener; the store keeps working for direct reads. */
   close(): void;
+  /**
+   * Whether the document did not exist when this window opened the catalog (a fresh install, or a wiped storage folder).
+   * Only a fact about the open: it does not change when a later commit creates the document.
+   */
+  openedWithoutDocument(): boolean;
+  /**
+   * Run the recovery the options name once, now, when the document was missing at open or has gone missing since, or is an
+   * empty shell (ADR-0081). `true` when a recovered base document was committed. With no `recover` option, or nothing wrong,
+   * it does nothing and takes no lock.
+   */
+  recoverIfNeeded(): Promise<boolean>;
 }
 
 export interface CatalogStoreOptions {
@@ -781,6 +879,18 @@ export interface CatalogStoreOptions {
   readonly clock?: () => Date;
   /** Called once when the catalog is found unusable, for one visible report. */
   readonly onUnavailable?: (reason: string) => void;
+  /** See {@link CatalogTransactionOptions.recover}. When given, a window whose document vanished also recovers from its own last read. */
+  readonly recover?: (current: CatalogDocument | null) => Promise<CatalogRecovery | null>;
+  /** See {@link CatalogTransactionOptions.isReset}. */
+  readonly isReset?: (document: CatalogDocument) => boolean;
+  /** Called, after the lock is released, with the recovery a transaction of this window committed. A throw is ignored. */
+  readonly onRecovered?: (recovery: CatalogRecovery, committed: CatalogDocument) => void;
+  /**
+   * Called **outside the lock**, before a transaction that may recover (the document is missing, or a recovery is wanted), so
+   * that slow verification the recovery needs (an access check of a folder) is done before the lock's short bound starts.
+   * A throw is ignored.
+   */
+  readonly prepareRecovery?: () => Promise<void>;
 }
 
 function sameValue(left: unknown, right: unknown): boolean {
@@ -820,8 +930,13 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
    */
   const handedOut = new Map<string, unknown>();
   let imports: readonly CatalogImportRecord[] = [];
+  let recovering = false;
   let conflicts: readonly CatalogConflictRecord[] = [];
   let unavailable: string | null = null;
+  /** The newest document this window read or committed: what a catalog that vanished under it is recovered from. */
+  let lastDocument: CatalogDocument | null = null;
+  let openedWithoutDocument = false;
+  let recoveryWanted = false;
   const listeners = new Set<CatalogListener>();
   let chain: Promise<unknown> = Promise.resolve();
 
@@ -833,7 +948,11 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
       imports = document.imports;
       conflicts = document.conflicts;
       revision = document.revision;
+      lastDocument = document;
+    } else {
+      openedWithoutDocument = true;
     }
+    recoveryWanted = options.recover !== undefined && (document === null || options.isReset?.(document) === true);
   } catch (error) {
     unavailable = messageOf(error);
     options.onUnavailable?.(unavailable);
@@ -855,6 +974,7 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
     imports = document.imports;
     conflicts = document.conflicts;
     revision = Math.max(revision, document.revision);
+    if (lastDocument === null || document.revision >= lastDocument.revision) lastDocument = document;
     return { revision, keys: changed };
   };
 
@@ -878,21 +998,65 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
     return next;
   };
 
+  /** The recovery of this window's transactions: the caller's source, or this window's own last read when the file vanished. */
+  const recoverFor = options.recover === undefined
+    ? undefined
+    : async (current: CatalogDocument | null): Promise<CatalogRecovery | null> => {
+        const stored = await options.recover?.(current).catch(() => null) ?? null;
+        const memory = current === null ? lastDocument : null;
+        if (memory !== null && memory.revision > 0 && (stored === null || memory.revision >= stored.document.revision)) {
+          return { document: memory, label: "this window's last read of the catalog", info: { source: "memory", revision: memory.revision } };
+        }
+        return stored;
+      };
+
+  /** An empty shell's records carried onto the recovered ones by each key's own merge rule; the recovered value wins where a key has none. */
+  const mergeShell = (shell: Readonly<Record<string, unknown>>, recovered: Readonly<Record<string, unknown>>): Record<string, unknown> => {
+    const merged: Record<string, unknown> = { ...recovered };
+    for (const [key, value] of Object.entries(shell)) {
+      if (!Object.prototype.hasOwnProperty.call(recovered, key)) {
+        merged[key] = value;
+        continue;
+      }
+      const merger = mergers[key];
+      if (merger === undefined) continue;
+      try {
+        merged[key] = merger({ base: undefined, desired: value, latest: recovered[key] }).value;
+      } catch {
+        /* the recovered value stays */
+      }
+    }
+    return merged;
+  };
+
   const transact = async (
     operation: (tx: CatalogTransaction) => boolean | void,
   ): Promise<CatalogCommitResult> => {
     if (unavailable !== null) {
       throw new CatalogError("unavailable", `The OMP Desk profile catalog is unusable: ${unavailable}`);
     }
+    if (options.recover !== undefined && options.prepareRecovery !== undefined && (recoveryWanted || !fs.existsSync(paths.document))) {
+      await options.prepareRecovery().catch(() => undefined);
+    }
     const result = await transactCatalog(paths, operation, {
       lockTimeoutMs: options.lockTimeoutMs,
       lockStaleMs: options.lockStaleMs,
       now,
       clock,
+      ...(recoverFor === undefined ? {} : { recover: recoverFor, mergeShell, knownRevision: revision }),
+      ...(options.isReset === undefined ? {} : { isReset: options.isReset }),
     });
     if (result.changed) {
       const document = result.document;
+      recoveryWanted = false;
       notify(trackOperation("catalog apply", () => applyDocument(document)));
+      if (result.recovery !== undefined) {
+        try {
+          options.onRecovered?.(result.recovery, document);
+        } catch {
+          /* a report that fails must not fail the commit that was recovered */
+        }
+      }
     } else {
       revision = Math.max(revision, result.revision);
     }
@@ -1005,6 +1169,21 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
       return { result, changed: outcome.changed };
     },
     revision: () => revision,
+    openedWithoutDocument: () => openedWithoutDocument,
+    async recoverIfNeeded(): Promise<boolean> {
+      if (options.recover === undefined || unavailable !== null || !recoveryWanted || recovering) return false;
+      recovering = true;
+      try {
+        const outcome = await enqueue(() => transact(() => false));
+        recoveryWanted = false;
+        // Another window may have restored first: this transaction then changed nothing and carries no document, so read what it
+        // committed instead of keeping an empty projection.
+        if (!outcome.changed) await store.refresh().catch(() => null);
+        return outcome.changed;
+      } finally {
+        recovering = false;
+      }
+    },
     unavailableReason: () => unavailable,
     async refresh(): Promise<CatalogRefresh | null> {
       let document: CatalogDocument | null;
@@ -1017,13 +1196,35 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
       // A document that reads cleanly again (an operator fixed it, or another
       // window replaced it) makes mutations usable once more.
       unavailable = null;
-      if (document === null) return null;
-      if (document.revision <= revision) {
-        // Same revision: adopt the ledger without publishing a change, so a
-        // conflict or import record written by a re-read is still visible.
+      if (document === null) {
+        // The file vanished under a window that had read it (a cleanup, an antivirus, a person): put it back from what this
+        // window knows or from the backup, instead of letting its next write start an empty catalog (ADR-0081).
+        if (options.recover !== undefined && lastDocument !== null && lastDocument.revision > 0) {
+          recoveryWanted = true;
+          void store.recoverIfNeeded().catch(() => undefined);
+        }
+        return null;
+      }
+      if (options.recover !== undefined && options.isReset?.(document) === true) {
+        // An empty shell committed by a writer that does not know the backup (a window not yet reloaded after an update).
+        recoveryWanted = true;
+        void store.recoverIfNeeded().catch(() => undefined);
+      }
+      if (document.revision < revision) return null;
+      if (document.revision === revision && lastDocument !== null && lastDocument.revision === revision) {
+        // Same revision: adopt the ledger without publishing a change, so a conflict or import record written by a re-read is
+        // still visible. A restore can reuse a revision another window had committed with different content; that document is
+        // foreign state and is adopted like any other (this window's own change is merged again by its next write's delta).
         imports = document.imports;
         conflicts = document.conflicts;
-        return null;
+        if (lastDocument === null || sameValue(lastDocument.records, document.records)) return null;
+        lastDocument = document;
+        const changedKeys = [...new Set([...Object.keys(records), ...Object.keys(document.records)])].filter(key => !sameValue(records[key], document.records[key]));
+        records = document.records;
+        if (changedKeys.length === 0) return null;
+        const adopted = { revision, keys: changedKeys };
+        notify(adopted);
+        return adopted;
       }
       const refresh = trackOperation("catalog apply", () => applyDocument(document));
       notify(refresh);

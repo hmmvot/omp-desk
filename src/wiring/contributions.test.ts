@@ -164,7 +164,8 @@ before(async () => {
 	await writeFile(path.join(root, "node_modules", "vscode", "index.js"), "module.exports = globalThis.__ompContributionVscode;");
 	const home = path.join(root, "home");
 	await mkdir(home, { recursive: true });
-	for (const [name, value] of [["USERPROFILE", home], ["HOME", home], ["PI_CODING_AGENT_DIR", path.join(home, "agent")]] as const) {
+	// The private catalog backup (ADR-0081) lives under the profile's local data unless told otherwise: keep this run's copies in its own folder.
+	for (const [name, value] of [["USERPROFILE", home], ["HOME", home], ["PI_CODING_AGENT_DIR", path.join(home, "agent")], ["OMP_DESK_RECOVERY_ROOT", path.join(root, "recovery")]] as const) {
 		savedEnvironment.set(name, process.env[name]);
 		process.env[name] = value;
 	}

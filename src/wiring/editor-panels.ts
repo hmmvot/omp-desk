@@ -182,6 +182,8 @@ export interface EditorNotices {
 	log: Logger;
 	info(message: string): void;
 	warn(message: string): void;
+	/** A restored editor named a tab the catalog does not have: evidence for the loss report (ADR-0081). */
+	restoredEditorLost?(): void;
 }
 
 export interface EditorPanelsDeps<Tab extends EditorPanelsTab = EditorPanelsTab>
@@ -670,6 +672,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				if (index.get(conversation) === null) {
 					panel.webview.html = createUnavailableGuestHtml(STALE_PANEL_DETAIL);
 					deps.log.warn("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
+					deps.restoredEditorLost?.();
 					return;
 				}
 				const reservation = deps.reserveSlot(index, conversation, slot, "saved");
@@ -758,6 +761,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				if (entry === null) {
 					panel.webview.html = createUnavailableGuestHtml(STALE_PANEL_DETAIL);
 					deps.log.warn("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
+					deps.restoredEditorLost?.();
 					return;
 				}
 				// This panel is this tab's editor until its successor replaces it — and it stays

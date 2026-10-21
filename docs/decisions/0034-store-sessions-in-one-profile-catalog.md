@@ -2,6 +2,7 @@
 status: proposed
 date: 2026-09-28
 ---
+> **Narrowly amended by [ADR-0081](0081-keep-a-private-backup-of-the-catalog-and-broker-records-outside-vs-codes-storage-and-restore-it-over-a-missing-catalog.md):** a missing document is a fresh install only when no backup and no other evidence of lost data exists; a missing or empty-shell catalog is restored from a private backup outside VS Code's storage under the lock, and a loss that cannot be repaired is announced. The refusal for an unreadable document, the lock, the commit and the merge rules are unchanged.
 
 # ADR-0034: Store Sessions in one transactional profile catalog
 

@@ -36,6 +36,9 @@ import { identifyPeerExecutor, proveExecutorGone } from "../host/peer-executor.t
 import type { PeerExecutorProbe } from "../host/peer-executor.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
 import type { Logger } from "../shared/logger.ts";
+import { createUnmanagedBrokerScanner } from "../host/unmanaged-brokers.ts";
+import { win32Native } from "../host/win32-native.ts";
+import type { Win32Native } from "../host/win32-native.ts";
 import type { ShellSlotStore } from "../host/shell-slots.ts";
 import { ProcessTreeItem } from "../views/process-rows";
 import type { SessionsGrouping } from "../views/session-order";
@@ -191,6 +194,18 @@ async function readChildState(client: PtyBrokerClient, facts: BrokerRecordFacts)
 
 export function createBrokerProcessReaderFor(deps: ProcessWiringDeps): BrokerProcessReader {
 	const list = createBrokerRecordLister({ storageDir: deps.storageDir, predecessorStorageDir: deps.predecessorStorageDir });
+	// One scanner for the life of the window: a command line is read once per process (`unmanaged-brokers.ts`).
+	let native: Win32Native | null = null;
+	const unreadable = { kind: "unknown", detail: "the native module is not available, so processes cannot be read" } as const;
+	const scanner = createUnmanagedBrokerScanner({
+		processTable: () => native?.processTable() ?? unreadable,
+		processCommandLine: pid => native?.processCommandLine(pid) ?? unreadable,
+		creationTime: pid => {
+			const reading = native?.processCreation(pid);
+			return reading === undefined ? unreadable : reading.kind === "found" ? { kind: "found", creationTime: reading.filetime } : reading;
+		},
+		now: Date.now,
+	});
 	return createBrokerProcessReader({
 		listRecords: list,
 		async catalog(fresh) {
@@ -208,6 +223,10 @@ export function createBrokerProcessReaderFor(deps: ProcessWiringDeps): BrokerPro
 			return client === null ? null : (await client.attachIdentity()).treeDigest;
 		},
 		now: Date.now,
+		async listUnmanaged(known) {
+			native = await win32Native();
+			return native === null ? null : scanner.scan(deps.storageDir, known);
+		},
 	});
 }
 

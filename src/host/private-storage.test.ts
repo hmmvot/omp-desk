@@ -194,6 +194,8 @@ function fakeNative(read: Win32SecurityRead, names: ReadonlyMap<string, string> 
 		mutexState: unused,
 		processCreation: unused,
 		processDescendants: unused,
+		processTable: unused,
+		processCommandLine: unused,
 		openPipeClient: unused,
 		volumeOf: unused,
 		readSecuritySync: unused,

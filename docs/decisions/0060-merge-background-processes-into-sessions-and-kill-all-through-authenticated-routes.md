@@ -73,6 +73,9 @@ The user decided that the Sessions context menu gets **Kill**: it ends the sessi
 ### Amendment note (2026-10-21)
 
 The statement above that the window driving a session "cannot tell a Kill from a crash" is superseded by [ADR-0034](0034-store-sessions-in-one-profile-catalog.md) (amendment of 2026-10-21): the driving window now reads the committed run intent (`SessionIndex.committedRunIntent`) when its process ends, so a Kill or Stop another window recorded is reported as stopped. The Kill still records the stopped intent first: it is what survives when no window sees the process end.
+### Amendment note (2026-10-21, ADR-0081)
+
+The Terminals group may also hold rows Desk has no record for: a broker of this storage found by its command line (`status: "unmanaged"`). They have no authenticated route, so Stop is unavailable; **Kill** ends the tree using a creation time read from the kernel when the row was derived and proved again, with the command line, immediately before the kill, and reconciles nothing in the catalog. Kill All and Stop Orphaned and Idle ignore them. See [ADR-0081](0081-keep-a-private-backup-of-the-catalog-and-broker-records-outside-vs-codes-storage-and-restore-it-over-a-missing-catalog.md).
 
 ## Related Documents
 

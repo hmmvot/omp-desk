@@ -22,8 +22,8 @@ import { hostname, tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
-import { CATALOG_CONFLICT_GROUP_KEEP, CatalogError, catalogPaths, compactConflicts, createCatalogStore, readCatalogDocument, startCatalogWatch, transactCatalog } from "./profile-catalog.ts";
-import type { CatalogConflictRecord, CatalogPaths, CatalogStore } from "./profile-catalog.ts";
+import { CATALOG_CONFLICT_GROUP_KEEP, CatalogError, catalogPaths, compactConflicts, createCatalogStore, parseCatalogDocument, readCatalogDocument, startCatalogWatch, transactCatalog } from "./profile-catalog.ts";
+import type { CatalogConflictRecord, CatalogDocument, CatalogPaths, CatalogRecovery, CatalogStore } from "./profile-catalog.ts";
 
 const roots: string[] = [];
 
@@ -507,6 +507,157 @@ describe("conflict ledger bound (ADR-0034)", () => {
 		const older = await window(paths);
 		assert.equal(older.conflicts().length, CATALOG_CONFLICT_GROUP_KEEP + 1);
 		assert.equal(older.conflicts()[0]?.earlier, 40 - CATALOG_CONFLICT_GROUP_KEEP, "a reader keeps the count");
+	});
+});
+describe("catalog recovery (ADR-0081)", () => {
+	/** A committed catalog with `rows` at `revisions` revisions, as a parsed document taken from another directory. */
+	async function backupWith(rows: readonly Row[], revisions = 1): Promise<CatalogDocument> {
+		const { paths } = await tempCatalog();
+		const source = await window(paths);
+		await source.update("test.rows.v1", [...rows]);
+		for (let index = 1; index < revisions; index += 1) await source.transact([{ key: "test.tick", apply: () => index }]);
+		return parseCatalogDocument(await readFile(paths.document, "utf8"));
+	}
+	const recoverFrom = (document: CatalogDocument | null, calls: { count: number } = { count: 0 }) => async (): Promise<CatalogRecovery | null> => {
+		calls.count += 1;
+		return document === null ? null : { document, label: "test backup", info: { calls: calls.count } };
+	};
+	const noRowsReset = (document: CatalogDocument): boolean => !Array.isArray(document.records["test.rows.v1"]) || (document.records["test.rows.v1"] as Row[]).length === 0;
+
+	it("commits the recovered base over a missing document, even when the operation changes nothing, and reports it once", async () => {
+		const backup = await backupWith([{ id: "a", value: "1" }], 5);
+		const { paths } = await tempCatalog();
+		const reported: unknown[] = [];
+		const store = await createCatalogStore({
+			paths,
+			mergers: { "test.rows.v1": rowsMerger },
+			recover: recoverFrom(backup),
+			onRecovered: (recovery, committed) => reported.push([recovery.label, committed.revision]),
+		});
+		assert.equal(store.openedWithoutDocument(), true);
+		assert.equal(await store.recoverIfNeeded(), true);
+		const document = await readDocument(paths);
+		assert.equal(document.revision, backup.revision + 1, "above the recovered revision");
+		assert.deepEqual(document.records["test.rows.v1"], [{ id: "a", value: "1" }]);
+		assert.equal((document.conflicts as CatalogConflictRecord[]).some(entry => entry.key === "catalog.recovery"), true, "the recovery is on the conflict ledger");
+		assert.deepEqual(store.get("test.rows.v1"), [{ id: "a", value: "1" }]);
+		assert.deepEqual(reported, [["test backup", backup.revision + 1]]);
+		assert.equal(await store.recoverIfNeeded(), false, "asked once");
+	});
+
+	it("takes the lock for nothing when the document exists", async () => {
+		const { paths } = await tempCatalog();
+		const first = await window(paths);
+		await first.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		const calls = { count: 0 };
+		const second = await createCatalogStore({ paths, mergers: { "test.rows.v1": rowsMerger }, recover: recoverFrom(await backupWith([{ id: "z", value: "9" }]), calls) });
+		const before = await readFile(paths.document, "utf8");
+		assert.equal(await second.recoverIfNeeded(), false);
+		assert.equal(calls.count, 0);
+		assert.equal(await readFile(paths.document, "utf8"), before, "no revision committed by a normal start");
+	});
+
+	it("restores once when two windows start together on a missing document, and the second adopts it", async () => {
+		const backup = await backupWith([{ id: "a", value: "1" }, { id: "b", value: "2" }], 3);
+		const { paths } = await tempCatalog();
+		const calls = { count: 0 };
+		const open = (): Promise<CatalogStore> => createCatalogStore({ paths, mergers: { "test.rows.v1": rowsMerger }, recover: recoverFrom(backup, calls) });
+		const [one, two] = await Promise.all([open(), open()]);
+		const results = await Promise.all([one.recoverIfNeeded(), two.recoverIfNeeded()]);
+		assert.equal(results.filter(Boolean).length, 1, "exactly one window committed the restore");
+		assert.equal(calls.count, 1, "the second window found the document already restored");
+		const expected = [{ id: "a", value: "1" }, { id: "b", value: "2" }];
+		assert.deepEqual(one.get("test.rows.v1"), expected);
+		assert.deepEqual(two.get("test.rows.v1"), expected, "the window that restored nothing exposes the restored rows without waiting");
+		assert.equal(one.revision(), two.revision());
+	});
+
+	it("restores over an empty shell that lost to its backup, carrying the shell's own rows by the key's merge rule", async () => {
+		const backup = await backupWith([{ id: "a", value: "1" }], 9);
+		const { paths } = await tempCatalog();
+		const shell = await window(paths);
+		await shell.update("test.rows.v1", [{ id: "shell", value: "s" }]);
+		await shell.update("test.rows.v1", []);
+		await shell.update("test.rows.v1", []);
+		const shellDocument = await readDocument(paths);
+		assert.equal(shellDocument.revision < backup.revision, true, "the shell is below the backup");
+		const reset = (document: CatalogDocument): boolean => noRowsReset(document) && document.revision < backup.revision;
+		const store = await createCatalogStore({ paths, mergers: { "test.rows.v1": rowsMerger }, recover: recoverFrom(backup), isReset: reset });
+		assert.equal(await store.recoverIfNeeded(), true);
+		assert.deepEqual((await readDocument(paths)).records["test.rows.v1"], [{ id: "a", value: "1" }]);
+		assert.equal((await readDocument(paths)).revision, backup.revision + 1);
+	});
+
+	it("does not call an emptied catalog with a revision at or above its backup a reset", async () => {
+		const backup = await backupWith([{ id: "a", value: "1" }], 1);
+		const { paths } = await tempCatalog();
+		const user = await window(paths);
+		await user.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		await user.update("test.rows.v1", []);
+		await user.update("test.rows.v1", []);
+		const calls = { count: 0 };
+		const reset = (document: CatalogDocument): boolean => noRowsReset(document) && document.revision < backup.revision;
+		const store = await createCatalogStore({ paths, mergers: { "test.rows.v1": rowsMerger }, recover: recoverFrom(backup, calls), isReset: reset });
+		assert.equal(await store.recoverIfNeeded(), false);
+		assert.equal(calls.count, 0);
+	});
+
+	it("recovers a document that vanished under a running window from what the window last read", async () => {
+		const { paths } = await tempCatalog();
+		const store = await createCatalogStore({ paths, mergers: { "test.rows.v1": rowsMerger }, recover: recoverFrom(null) });
+		await store.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		await store.update("test.rows.v1", [{ id: "a", value: "1" }, { id: "b", value: "2" }]);
+		const known = store.revision();
+		await rm(paths.document, { force: true });
+		await store.refresh();
+		// The refresh started the recovery in the background.
+		for (let waited = 0; waited < 4000 && !existsSync(paths.document); waited += 20) await sleep(20);
+		const document = await readDocument(paths);
+		assert.equal(document.revision > known, true, "never backwards");
+		assert.deepEqual(document.records["test.rows.v1"], [{ id: "a", value: "1" }, { id: "b", value: "2" }]);
+	});
+
+	it("prefers a newer backup to this window's own last read, and runs the preparation outside the lock", async () => {
+		const backup = await backupWith([{ id: "a", value: "1" }, { id: "b", value: "2" }, { id: "c", value: "3" }], 40);
+		const { paths } = await tempCatalog();
+		const events: string[] = [];
+		const store = await createCatalogStore({
+			paths,
+			mergers: { "test.rows.v1": rowsMerger },
+			recover: async () => {
+				events.push(`recover lock=${existsSync(paths.lock)}`);
+				return { document: backup, label: "test backup", info: null };
+			},
+			prepareRecovery: async () => {
+				events.push(`prepare lock=${existsSync(paths.lock)}`);
+			},
+		});
+		await store.recoverIfNeeded();
+		assert.deepEqual(events, ["prepare lock=false", "recover lock=true"]);
+	});
+
+	it("adopts a document that reuses its revision with different content", async () => {
+		const { paths } = await tempCatalog();
+		const one = await window(paths);
+		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		const seen: string[][] = [];
+		one.onChange(refresh => seen.push([...refresh.keys]));
+		const text = await readFile(paths.document, "utf8");
+		const replaced = JSON.parse(text) as { records: Record<string, unknown> };
+		replaced.records["test.rows.v1"] = [{ id: "other", value: "2" }];
+		await writeFile(paths.document, JSON.stringify(replaced), "utf8");
+		await one.refresh();
+		assert.deepEqual(one.get("test.rows.v1"), [{ id: "other", value: "2" }]);
+		assert.deepEqual(seen, [["test.rows.v1"]]);
+	});
+
+	it("behaves exactly as before without a recovery hook", async () => {
+		const { paths } = await tempCatalog();
+		const store = await window(paths);
+		assert.equal(store.openedWithoutDocument(), true);
+		assert.equal(await store.recoverIfNeeded(), false);
+		await store.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		assert.equal((await readDocument(paths)).revision, 1);
 	});
 });
 

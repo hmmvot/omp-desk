@@ -272,6 +272,7 @@ function rootsOf(pid: number, creationTime: string | null, role: KillRoot["role"
 }
 
 function labelOfRow(row: BrokerProcessRow): string {
+	if (row.source === "unmanaged") return row.title === null || row.title === "" ? "an unmanaged OMP process" : `the unmanaged OMP process "${row.title}"`;
 	if (row.kind === "stats") return "the Stats dashboard";
 	if (row.host?.kind === "session") return `the OMP session "${row.host.title}"`;
 	if (row.host?.kind === "terminal") return `the terminal "${row.host.label}"`;
@@ -296,6 +297,8 @@ function sessionReconcile(tabId: string, recorded: RecordedProcess | null): Kill
 
 /** What Desk's records still hold for a killed row, by what the row is. The same rule a broker-route stop uses to retire a slot. */
 function reconcileOfRow(row: BrokerProcessRow, recorded: RecordedProcess | null): KillReconcile {
+	// Desk's records say nothing about a process it has no record for: there is nothing to retire.
+	if (row.source === "unmanaged") return { kind: "none" };
 	if (row.kind === "terminal") return { kind: "slot", slot: row.slot };
 	if (row.kind !== "session") return { kind: "none" };
 	if (row.host?.kind === "session" && row.host.recorded && row.host.tabId !== null) {
@@ -347,6 +350,8 @@ export function planSessionKill(tabId: string, title: string, recorded: Recorded
 export interface KillCommandPorts extends TreeKillPorts {
 	/** The live broker rows, read only when the session recorded no host. */
 	readRows(): Promise<readonly BrokerProcessRow[]>;
+	/** Whether an unmanaged row's process still is the broker it described: creation time and command line, read again just now. */
+	verifyUnmanaged?(row: BrokerProcessRow): Promise<boolean>;
 	recordedProcess(tabId: string): RecordedProcess | null;
 	/** Retire a shell recovery record and a broker slot mapping the killed process left. */
 	forgetStoppedSlot(slot: string): Promise<void>;
@@ -379,6 +384,11 @@ export async function killSelection(selection: KillSelection, ports: KillCommand
 	try {
 		if (selection.kind === "process") {
 			const host = selection.row.host;
+			if (selection.row.source === "unmanaged" && ports.verifyUnmanaged !== undefined && !(await ports.verifyUnmanaged(selection.row))) {
+				ports.log.warn(`kill: requested by ${ports.requester}: ${selection.row.id}: the process is not the unmanaged broker the row described any more (creation time or command line differ), so nothing was killed`);
+				ports.warn("That process is no longer the one this row described, so nothing was killed. Refresh Sessions and try again.");
+				return;
+			}
 			const recorded = host?.kind === "session" && host.tabId !== null ? ports.recordedProcess(host.tabId) : null;
 			targets = [targetOfRow(selection.row, recorded)];
 		} else {

@@ -15,6 +15,8 @@ import type { BrokerProcessRow } from "../host/broker-processes.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity.ts";
 import { killSelection, runTaskkillTree } from "../host/session-kill.ts";
+import { nativeScanPorts, verifyUnmanagedBroker } from "../host/unmanaged-brokers.ts";
+import { win32Native } from "../host/win32-native.ts";
 import type { CapturedHost, KillSelection, RecordedProcess } from "../host/session-kill.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import { isManagedHost } from "../host/session-model.ts";
@@ -66,6 +68,12 @@ export class LocalKill {
 			killTree: pid => runTaskkillTree(pid),
 			waitGone: waitForPtyProcessGone,
 			readRows: () => window.readRows(),
+			verifyUnmanaged: async row => {
+				const native = await win32Native();
+				const facts = row.unmanaged;
+				if (native === null || facts === undefined) return false;
+				return verifyUnmanagedBroker(nativeScanPorts(native), { pid: row.brokerPid, creationTime: row.brokerCreationTime, facts });
+			},
 			recordedProcess: tabId => this.#recordedProcessOf(tabId),
 			forgetStoppedSlot: async slot => {
 				await index.lifecycle.run(slot, async () => {

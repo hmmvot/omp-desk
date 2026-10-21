@@ -196,6 +196,34 @@ describe("process readings against real processes", { skip: process.platform !==
 		assert.equal(own.kind, "found");
 		assert.ok(!(own.kind === "found" && own.pids.includes(process.pid)), "a process is not its own descendant");
 	});
+
+	it("reads the command line of a real process, with its arguments and a long one whole", async () => {
+		const native = await loadWin32Native(await installedAddonAsset());
+		const child = idle();
+		assert.ok(child.pid !== undefined);
+		const reading = native.processCommandLine(child.pid);
+		assert.equal(reading.kind, "found");
+		assert.match(reading.kind === "found" ? reading.commandLine : "", /-e\s+"?process\.stdin\.resume\(\)"?/);
+		const long = "x".repeat(9000);
+		const spawned = spawn(process.execPath, ["-e", "process.stdin.resume()", "--marker", long], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+		children.push(spawned);
+		assert.ok(spawned.pid !== undefined);
+		const second = native.processCommandLine(spawned.pid);
+		assert.equal(second.kind, "found");
+		assert.ok(second.kind === "found" && second.commandLine.endsWith(long), "a command line larger than the first buffer is read whole");
+		assert.deepEqual(native.processCommandLine(2147483000), { kind: "gone" });
+		for (const pid of [0, -1, 1.5, 2 ** 32]) assert.equal(native.processCommandLine(pid).kind, "unknown", String(pid));
+	});
+
+	it("lists the process table with the executable names, this process among them", async () => {
+		const native = await loadWin32Native(await installedAddonAsset());
+		const table = native.processTable();
+		assert.equal(table.kind, "found");
+		const own = table.kind === "found" ? table.entries.find(entry => entry.pid === process.pid) : undefined;
+		assert.ok(own !== undefined, "this process is in the table");
+		assert.equal(own.exe.toLowerCase(), path.basename(process.execPath).toLowerCase());
+		assert.ok(own.parentPid > 0, "the snapshot carries the parent id");
+	});
 });
 
 describe("readSecurity against real paths", { skip: process.platform !== "win32" }, () => {

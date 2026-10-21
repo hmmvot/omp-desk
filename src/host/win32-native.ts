@@ -50,6 +50,25 @@ export type ProcessTreeReading =
 	| { readonly kind: "found"; readonly pids: readonly number[] }
 	| { readonly kind: "unknown"; readonly detail: string };
 
+/** One row of the process table. */
+export interface ProcessTableEntry {
+	readonly pid: number;
+	readonly parentPid: number;
+	/** The image's file name as the snapshot spells it (`bun.exe`). */
+	readonly exe: string;
+}
+
+/** What a process-table reading found. */
+export type ProcessTableReading =
+	| { readonly kind: "found"; readonly entries: readonly ProcessTableEntry[] }
+	| { readonly kind: "unknown"; readonly detail: string };
+
+/** What a command-line reading found. */
+export type ProcessCommandLineReading =
+	| { readonly kind: "found"; readonly commandLine: string }
+	| { readonly kind: "gone" }
+	| { readonly kind: "unknown"; readonly detail: string };
+
 /** What opening a named pipe as a client found. */
 export type PipeClientOpening =
 	| { readonly kind: "opened"; readonly fd: number; readonly serverPid: number }
@@ -89,6 +108,14 @@ export interface Win32Native {
 	 * A process without children, or one that is gone, has none (`found` with no pids); a failed snapshot is `unknown`.
 	 */
 	processDescendants(pid: number): ProcessTreeReading;
+	/** Every live process, from one `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` read in memory; a failed snapshot is `unknown`. */
+	processTable(): ProcessTableReading;
+	/**
+	 * The command line the operating system holds for one process: `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` and
+	 * `NtQueryInformationProcess(ProcessCommandLineInformation)`, which returns the text in one call without reading another
+	 * process's memory. `gone` is `ERROR_INVALID_PARAMETER`; a process this account may not open, and any other failure, is `unknown`.
+	 */
+	processCommandLine(pid: number): ProcessCommandLineReading;
 	/**
 	 * Open a named pipe as a client and read the server's process id from that same handle
 	 * (`CreateFileW`, `GetNamedPipeServerProcessId`; ADR-0006 peer proof, ADR-0076 decision 8). `opened` hands over a
@@ -200,9 +227,21 @@ function bindMutex(koffi: Koffi): Pick<Win32Native, "mutexState"> {
 interface ProcessRow {
 	th32ProcessID: number;
 	th32ParentProcessID: number;
+	szExeFile: string;
 }
 
-function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "processDescendants"> {
+/** `ProcessCommandLineInformation`, available from Windows 8.1. */
+const PROCESS_COMMAND_LINE_INFORMATION = 60;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+const STATUS_BUFFER_OVERFLOW = 0x80000005;
+const STATUS_BUFFER_TOO_SMALL = 0xc0000023;
+/** Where the text starts in the answer: the `UNICODE_STRING` header (length, maximum length, padding, pointer) is two machine words on a 64-bit image. */
+const UNICODE_STRING_HEADER_BYTES = 16;
+const COMMAND_LINE_FIRST_BYTES = 4096;
+/** A command line is bounded by `CreateProcess` at 32767 characters; the answer is that and its header. */
+const COMMAND_LINE_MAX_BYTES = 32768 * 2 + 64;
+
+function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "processDescendants" | "processTable" | "processCommandLine"> {
 	const kernel32 = koffi.load("kernel32.dll");
 	const openProcess = kernel32.func("void* __stdcall OpenProcess(uint32 access, bool inherit, uint32 pid)") as (
 		access: number,
@@ -231,6 +270,9 @@ function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "proce
 	const createSnapshot = kernel32.func("void* __stdcall CreateToolhelp32Snapshot(uint32 flags, uint32 pid)") as (flags: number, pid: number) => unknown;
 	const firstRow = kernel32.func("bool __stdcall Process32FirstW(void* snapshot, _Inout_ PROCESSENTRY32W* row)") as (snapshot: unknown, row: unknown) => boolean;
 	const nextRow = kernel32.func("bool __stdcall Process32NextW(void* snapshot, _Inout_ PROCESSENTRY32W* row)") as (snapshot: unknown, row: unknown) => boolean;
+	const queryInformation = koffi.load("ntdll.dll").func(
+		"int32 __stdcall NtQueryInformationProcess(void* process, uint32 informationClass, _Out_ uint8_t* information, uint32 length, _Out_ uint32* returned)",
+	) as (process: unknown, informationClass: number, information: Buffer, length: number, returned: number[]) => number;
 
 	/** The process table as one snapshot, or the Win32 error that stopped it. */
 	function snapshotRows(): { readonly rows: ProcessRow[] } | { readonly error: number } {
@@ -238,13 +280,13 @@ function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "proce
 		for (let attempt = 0; attempt < SNAPSHOT_ATTEMPTS; attempt++) {
 			const snapshot = createSnapshot(TH32CS_SNAPPROCESS, 0);
 			try {
-				const row: ProcessRow & { dwSize: number } = { dwSize: entrySize, th32ProcessID: 0, th32ParentProcessID: 0 };
+				const row: ProcessRow & { dwSize: number } = { dwSize: entrySize, th32ProcessID: 0, th32ParentProcessID: 0, szExeFile: "" };
 				if (snapshot === null || snapshot === undefined || !firstRow(snapshot, row)) {
 					error = lastError();
 					continue;
 				}
 				const rows: ProcessRow[] = [];
-				do rows.push({ th32ProcessID: row.th32ProcessID, th32ParentProcessID: row.th32ParentProcessID });
+				do rows.push({ th32ProcessID: row.th32ProcessID, th32ParentProcessID: row.th32ParentProcessID, szExeFile: row.szExeFile });
 				while (nextRow(snapshot, row));
 				return { rows };
 			} finally {
@@ -300,6 +342,44 @@ function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "proce
 				}
 			}
 			return { kind: "found", pids: found };
+		},
+		processTable() {
+			const table = snapshotRows();
+			if ("error" in table) return { kind: "unknown", detail: `the process snapshot failed with Win32 error ${table.error}` };
+			return { kind: "found", entries: table.rows.map(row => ({ pid: row.th32ProcessID, parentPid: row.th32ParentProcessID, exe: row.szExeFile })) };
+		},
+		processCommandLine(pid) {
+			if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 0xffffffff) return { kind: "unknown", detail: "no process id to read" };
+			const handle = openProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+			if (handle === null || handle === undefined) {
+				const code = lastError();
+				return code === ERROR_INVALID_PARAMETER ? { kind: "gone" } : { kind: "unknown", detail: `OpenProcess failed with Win32 error ${code}` };
+			}
+			try {
+				let size = COMMAND_LINE_FIRST_BYTES;
+				for (let attempt = 0; attempt < 3; attempt++) {
+					const buffer = Buffer.alloc(size);
+					const returned = [0];
+					const status = queryInformation(handle, PROCESS_COMMAND_LINE_INFORMATION, buffer, size, returned) >>> 0;
+					if (status === STATUS_INFO_LENGTH_MISMATCH || status === STATUS_BUFFER_OVERFLOW || status === STATUS_BUFFER_TOO_SMALL) {
+						const needed = returned[0] ?? 0;
+						if (needed <= size || needed > COMMAND_LINE_MAX_BYTES) return { kind: "unknown", detail: `the command line needs ${needed} bytes, which is not a plausible size` };
+						size = needed;
+						continue;
+					}
+					if (status !== 0) return { kind: "unknown", detail: `NtQueryInformationProcess failed with status 0x${status.toString(16)}` };
+					// The answer is a UNICODE_STRING whose text follows its header in the same buffer; the pointer inside it is an address in
+					// the buffer koffi marshalled, which is not this one, so it is never followed.
+					const length = buffer.readUInt16LE(0);
+					if (length === 0 || (length & 1) !== 0 || UNICODE_STRING_HEADER_BYTES + length > buffer.length) {
+						return { kind: "unknown", detail: "the process has no readable command line" };
+					}
+					return { kind: "found", commandLine: buffer.toString("utf16le", UNICODE_STRING_HEADER_BYTES, UNICODE_STRING_HEADER_BYTES + length) };
+				}
+				return { kind: "unknown", detail: "the command line changed size while it was read" };
+			} finally {
+				closeHandle(handle);
+			}
 		},
 	};
 }

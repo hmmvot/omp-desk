@@ -309,6 +309,21 @@ describe("the Kill command", () => {
 		assert.ok(unidentified.events.some(event => event.startsWith("warn ") && /recorded no process identity/.test(event)));
 	});
 
+	it("kills an unmanaged broker only after its identity is proven again, and touches none of Desk's records", async () => {
+		const unmanaged = row({ source: "unmanaged", status: "unmanaged", slot: "tab:lost", title: "Lost session", host: null, stop: { available: false, reason: "no record" } });
+		const proven = commandPorts(fakeKernel({ 4100: BROKER_CREATED }), { verifyUnmanaged: async () => true });
+		await killSelection({ kind: "process", row: unmanaged }, proven.ports);
+		assert.equal(proven.events.some(event => event.startsWith("log info ") && /the unmanaged OMP process "Lost session" \(slot tab:lost\): killed/.test(event)), true);
+		assert.deepEqual(proven.events.filter(event => event.startsWith("reconcile") || event.startsWith("forget") || event.startsWith("intend")), []);
+
+		const kernel = fakeKernel({ 4100: BROKER_CREATED });
+		const refused = commandPorts(kernel, { verifyUnmanaged: async () => false });
+		await killSelection({ kind: "process", row: unmanaged }, refused.ports);
+		assert.equal(kernel.alive.size, 1, "a process that is not the described broker is never killed");
+		assert.ok(refused.events.some(event => event.startsWith("warn ") && /no longer the one this row described/.test(event)));
+		assert.ok(refused.events.some(event => event.startsWith("log warn ") && /nothing was killed/.test(event)));
+	});
+
 	it("survives a records update that throws: the kill stands, the user and the log are told", async () => {
 		const kernel = fakeKernel({ 4100: BROKER_CREATED });
 		const { ports, events } = commandPorts(kernel, { reconcileSession: async () => { throw new Error("catalog locked"); } });

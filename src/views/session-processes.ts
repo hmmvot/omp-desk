@@ -7,14 +7,16 @@
  * process is, whether it is orphaned or idle and whether it can be stopped here. This module
  * only chooses words and decides, per layout, which rows are listed where.
  */
+import path from "node:path";
 import type { BrokerProcessRow } from "../host/broker-processes.ts";
 import { fmtDuration } from "../shared/format.ts";
 import type { SessionsGrouping } from "./session-order.ts";
 
-export type ProcessState = "orphaned" | "idle" | "inuse" | "unknown";
+export type ProcessState = "orphaned" | "idle" | "inuse" | "unknown" | "unmanaged";
 
 /** Orphaned beats idle beats unchecked, the order the model sorts by; a live, referenced process is in use. */
 export function processState(row: BrokerProcessRow): ProcessState {
+	if (row.status === "unmanaged") return "unmanaged";
 	if (row.status === "orphaned") return "orphaned";
 	if (row.child === "exited") return "idle";
 	return row.status === "in-use" ? "inuse" : "unknown";
@@ -25,6 +27,7 @@ const STATE_WORD: Record<ProcessState, string> = {
 	idle: "Idle",
 	inuse: "Running",
 	unknown: "Unchecked",
+	unmanaged: "Unmanaged",
 };
 
 export const PROCESS_STATE_EXPLANATION: Record<ProcessState, string> = {
@@ -32,6 +35,7 @@ export const PROCESS_STATE_EXPLANATION: Record<ProcessState, string> = {
 	idle: "Its session or terminal has ended.",
 	inuse: "Its session or terminal is still running.",
 	unknown: "Refresh to check whether a session or terminal uses it.",
+	unmanaged: "Desk has no record for this process, so it cannot reconnect to it. Kill ends it and the OMP session it runs.",
 };
 
 /** The status word of a process row: where it is open when that is known, else its state. */
@@ -65,6 +69,7 @@ export function processTitle(row: BrokerProcessRow): string {
 	if (host?.kind === "session") return host.title;
 	if (host?.kind === "terminal") return "Terminal";
 	if (row.title !== null && row.title !== "") return row.title;
+	if (row.unmanaged?.sessionFile != null) return path.win32.basename(row.unmanaged.sessionFile);
 	return row.kind === "session" ? "Session process" : "Terminal process";
 }
 
@@ -73,7 +78,7 @@ export function processFolder(row: BrokerProcessRow): string | null {
 	const { host } = row;
 	if (host?.kind === "session") return host.folder;
 	if (host?.kind === "terminal") return host.folder;
-	return null;
+	return row.unmanaged?.cwd ?? null;
 }
 
 /** `folder · what` as the flat session list labels its rows; a row with no folder has the plain title. */

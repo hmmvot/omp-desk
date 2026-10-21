@@ -9,6 +9,10 @@
  * existing authenticated broker paths; **no process id is ever signalled** (ADR-0029,
  * ADR-0037, ADR-0039).
  *
+ * A row whose process has **no record** is also listed (`source: "unmanaged"`, ADR-0081): a broker of this storage found by its
+ * command line. Desk has no token for it, so it cannot be stopped through the broker; Kill (`session-kill.ts`) ends it after the
+ * kernel's creation time and the command line prove it is the process the row names.
+ *
  * ## What a listing may claim
  *
  * A row is a *record* the broker published (`pty-registry.ts`) whose broker process is
@@ -31,6 +35,8 @@
 import { PTY_PROTOCOL_VERSION, PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
 import type { PtyBrokerRecord, PtyKind } from "./pty-protocol.ts";
 import type { PtyIdentityReading } from "./pty-identity.ts";
+import { processKey } from "./unmanaged-brokers.ts";
+import type { UnmanagedBroker, UnmanagedBrokerFacts } from "./unmanaged-brokers.ts";
 
 /** A broker record without its authentication token. */
 export type BrokerRecordFacts = Omit<PtyBrokerRecord, "token">;
@@ -44,6 +50,9 @@ export function brokerRecordFacts(record: PtyBrokerRecord): BrokerRecordFacts {
 /** Where a record was read: this extension's storage, or the predecessor id's (read-only). */
 export type BrokerProcessSource = "current" | "predecessor";
 
+/** Where a process row came from: a record, or (`unmanaged`) a command line with no record behind it (ADR-0081). */
+export type BrokerProcessRowSource = BrokerProcessSource | "unmanaged";
+
 export interface SourcedBrokerRecord {
 	readonly source: BrokerProcessSource;
 	readonly record: BrokerRecordFacts;
@@ -56,9 +65,10 @@ export type BrokerProcessKind = "session" | "terminal" | "stats";
  * - `in-use`: a durable source references the slot;
  * - `orphaned`: no source references it and every source was read in full;
  * - `unknown`: no source references it, but the catalog is still loading or a source
- *   could not be read in full.
+ *   could not be read in full;
+ * - `unmanaged`: the process has no record at all, so Desk has no token for it and the catalog's references say nothing it can act on.
  */
-export type BrokerProcessStatus = "in-use" | "orphaned" | "unknown";
+export type BrokerProcessStatus = "in-use" | "orphaned" | "unknown" | "unmanaged";
 
 /**
  * Which window shows or drives the process, as far as this window can tell.
@@ -141,7 +151,7 @@ export interface RowIdentity extends BrokerIdentity {
 export interface BrokerProcessRow {
 	/** Stable across refreshes while the same broker runs. */
 	readonly id: string;
-	readonly source: BrokerProcessSource;
+	readonly source: BrokerProcessRowSource;
 	readonly kind: BrokerProcessKind;
 	readonly ptyKind: PtyKind;
 	readonly slot: string;
@@ -163,6 +173,8 @@ export interface BrokerProcessRow {
 	/** The broker runs another build's staged runtime than this extension's package. */
 	readonly olderBuild: boolean;
 	readonly stop: BrokerProcessStopAvailability;
+	/** Present on an `unmanaged` row: what the process's command line says about it. */
+	readonly unmanaged?: UnmanagedBrokerFacts;
 }
 
 export interface BrokerProcessSnapshot {
@@ -194,6 +206,11 @@ export interface BrokerProcessReadPorts {
 	/** Digest of this build's packaged broker tree, or `null` when it cannot be computed. */
 	buildDigest(): Promise<string | null>;
 	now(): number;
+	/**
+	 * Brokers of this storage that no record names, given the process keys the listed records name; `null` when the process table
+	 * could not be read. Optional: a reader without it lists records only.
+	 */
+	listUnmanaged?(known: ReadonlySet<string>): Promise<readonly UnmanagedBroker[] | null>;
 }
 
 export interface BrokerProcessReadOptions {
@@ -303,9 +320,49 @@ export function createBrokerProcessReader(ports: BrokerProcessReadPorts): Broker
 			const rows = live.map(entry =>
 				deriveBrokerProcessRow(entry, catalog, digest, now, children.get(identityKey(entry.record)) ?? "unknown"),
 			);
+			// Brokers no record names: a process this storage's broker records say nothing about (ADR-0081).
+			if (ports.listUnmanaged !== undefined) {
+				const known = new Set<string>();
+				for (const entry of listing.records) {
+					if (entry.record.brokerCreationTime !== null) known.add(processKey(entry.record.brokerPid, entry.record.brokerCreationTime));
+				}
+				for (const broker of (await ports.listUnmanaged(known)) ?? []) rows.push(deriveUnmanagedRow(broker, now));
+			}
 			rows.sort(compareRows);
 			return { rows, hidden, unreadable: listing.unreadable, takenAt: now };
 		},
+	};
+}
+
+const UNMANAGED_STOP_REASON =
+	"Desk has no record for this process, so it cannot ask it to stop. Kill ends it and the OMP session it runs; Copy Diagnostics has its command line facts.";
+
+/** The row of a broker no record names. Pure. */
+export function deriveUnmanagedRow(broker: UnmanagedBroker, now: number): BrokerProcessRow {
+	const { facts } = broker;
+	const kind: BrokerProcessKind = facts.kind === "stats-dashboard" ? "stats" : facts.kind === "folder-shell" ? "terminal" : "session";
+	const startedMs = Date.parse(broker.startedAt);
+	return {
+		id: `unmanaged|${facts.slot}|${broker.pid}-${broker.creationTime}`,
+		source: "unmanaged",
+		kind,
+		ptyKind: facts.kind,
+		slot: facts.slot,
+		brokerId: `pid-${broker.pid}`,
+		generation: "",
+		brokerPid: broker.pid,
+		brokerCreationTime: broker.creationTime,
+		startedAt: broker.startedAt,
+		uptimeMs: Number.isNaN(startedMs) ? null : Math.max(0, now - startedMs),
+		title: facts.title,
+		status: "unmanaged",
+		host: null,
+		window: "none",
+		drivenHere: false,
+		child: "unknown",
+		olderBuild: false,
+		stop: { available: false, reason: UNMANAGED_STOP_REASON, diagnosticReason: `Broker pid ${broker.pid} was found by its command line (slot ${facts.slot}); no record in this storage names it.` },
+		unmanaged: facts,
 	};
 }
 
@@ -375,7 +432,7 @@ export function deriveBrokerProcessRow(
 
 function compareRows(left: BrokerProcessRow, right: BrokerProcessRow): number {
 	const rank = (row: BrokerProcessRow): number =>
-		row.source === "predecessor" ? 4 : row.status === "orphaned" ? 0 : row.child === "exited" ? 1 : row.status === "unknown" ? 2 : 3;
+		row.source === "predecessor" ? 4 : row.status === "orphaned" || row.status === "unmanaged" ? 0 : row.child === "exited" ? 1 : row.status === "unknown" ? 2 : 3;
 	if (rank(left) !== rank(right)) return rank(left) - rank(right);
 	const leftStart = Date.parse(left.startedAt);
 	const rightStart = Date.parse(right.startedAt);
@@ -427,7 +484,8 @@ export function planKillAll(rows: readonly BrokerProcessRow[]): KillAllPlan {
 		here: stoppable.filter(isHere),
 		otherWindows: stoppable.filter(row => !isHere(row) && row.window === "other-window"),
 		notRun: stoppable.filter(row => !isHere(row) && row.window !== "other-window"),
-		blocked: rows.filter(row => !row.stop.available),
+		// An unmanaged row has no authenticated route at all (not "another version"): only its own Kill ends it, so no tier names it.
+		blocked: rows.filter(row => !row.stop.available && row.source !== "unmanaged"),
 	};
 }
 

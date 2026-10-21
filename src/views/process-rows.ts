@@ -26,6 +26,7 @@ import {
 import type { ProcessOpenTarget, ProcessState } from "./session-processes";
 
 function processIcon(row: BrokerProcessRow, state: ProcessState): vscode.ThemeIcon {
+	if (state === "unmanaged") return new vscode.ThemeIcon("debug-disconnect", new vscode.ThemeColor("list.warningForeground"));
 	if (state === "orphaned") return new vscode.ThemeIcon("warning", new vscode.ThemeColor("list.warningForeground"));
 	if (state === "idle") return new vscode.ThemeIcon("circle-slash");
 	if (row.source === "predecessor") return new vscode.ThemeIcon("history");
@@ -44,8 +45,9 @@ function processTooltip(row: BrokerProcessRow, state: ProcessState, label: strin
 		`Started: ${startedText}`,
 		`Uptime: ${row.uptimeMs === null ? "unknown" : fmtDuration(row.uptimeMs)}`,
 		`${processStateWord(row, state)}. ${row.kind === "stats" ? (row.child === "exited" ? "The dashboard has exited." : row.child === "unknown" ? "Refresh to check whether the dashboard still runs." : "The dashboard keeps running when its editor closes.") : row.child === "unknown" && state === "inuse" ? "Its session or terminal status has not been checked." : PROCESS_STATE_EXPLANATION[state]}`,
+		...(row.unmanaged === undefined ? [] : [`Slot: ${row.unmanaged.slot}`, ...(row.unmanaged.sessionFile === null ? [] : [`Session file: ${row.unmanaged.sessionFile}`]), `Process id: ${row.brokerPid}`]),
 	];
-	if (!row.stop.available) lines.push("Cannot stop here. Copy Diagnostics for details.");
+	if (!row.stop.available) lines.push(row.source === "unmanaged" ? "Cannot be stopped from here; use Kill." : "Cannot stop here. Copy Diagnostics for details.");
 	return lines.join("\n");
 }
 
