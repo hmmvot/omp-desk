@@ -45,6 +45,8 @@ export interface LocalKillDeps {
 	readonly window: KillWindow;
 	readonly brokerSlots: () => BrokerSlotStore | undefined;
 	readonly log: Logger;
+	/** End this window's own runtime of a session whose process Kill proved gone, as the process's exit would; `false` when there is none or it could not be ended. */
+	readonly endDriven: (tabId: string) => Promise<boolean>;
 }
 
 export class LocalKill {
@@ -126,8 +128,13 @@ export class LocalKill {
 			return recorded;
 		});
 		if (result.kind === "recorded") log.info(`tab ${tabId}: after Kill: the row is recorded as stopped`);
-		else if (result.kind === "skipped") log.info(`tab ${tabId}: after Kill: ${result.detail}`);
-		else {
+		else if (result.kind === "skipped") {
+			log.info(`tab ${tabId}: after Kill: ${result.detail}`);
+			// A runtime this window still holds for a process that is now proven gone is no longer ended by anything else:
+			// its exit handling already ran (and could not finish), or the process died before it was watched. Close it as its exit would.
+			if (result.why === "driven" && await this.#deps.endDriven(tabId)) log.info(`tab ${tabId}: after Kill: this window's runtime of the killed session was ended`);
+			else if (result.why === "rival") window.notice("warning", "The process is ended, but another window still holds this session and has not recorded that. Run Kill on the row in that window, or refresh Sessions.");
+		} else {
 			log.error(`tab ${tabId}: after Kill: ${result.detail}`);
 			throw new Error(result.detail);
 		}

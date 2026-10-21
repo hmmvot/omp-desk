@@ -121,6 +121,8 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		fences: [] as boolean[],
 		/** Runs inside a dialog, before its answer: what must already hold when the user is asked. */
 		beforeAnswer: undefined as (() => Promise<void>) | undefined,
+		/** Whether this window's own runtime of a killed session could be ended. */
+		drivenEnds: true,
 	};
 	const dialogs: Dialog[] = [];
 	const warnings: string[] = [];
@@ -143,6 +145,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	const tabsAsked: string[] = [];
 	const provenanceAsked: string[] = [];
 	const released: unknown[][] = [];
+	const drivenEnded: string[] = [];
 	const control = { release: async (tabId: string, owner: string | null) => { released.push([tabId, owner]); } } as never;
 	const writer = new LocalWriterVerifier({
 		index: index as never, reconciler: () => state.reconciler,
@@ -203,6 +206,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			},
 			brokerSlots: () => state.brokerSlots,
 			log: recordingLogger(lines),
+			endDriven: async tabId => { drivenEnded.push(tabId); return state.drivenEnds; },
 		}),
 		launcher: () => ({
 			launch: async () => ({ state: "not-started", reason: "fixture" }),
@@ -277,7 +281,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	stub.commands.handler = null;
 	stub.window.notices.length = 0;
 	return {
-		actions, deps, state, index: index as never, dialogs, warnings, infos, errors, get logged(): string[] { return lines.map(line => line.message); }, lines, opened, refreshes, released, forgotten, editorsReleased, slotsRemoved,
+		actions, deps, state, index: index as never, dialogs, warnings, infos, errors, get logged(): string[] { return lines.map(line => line.message); }, lines, opened, refreshes, released, forgotten, editorsReleased, slotsRemoved, drivenEnded,
 		conversationsClosed, stopPortRequests, confirmedStops, catalogAdoptions, order, reattached, shellsAttached, tabsAsked, provenanceAsked, commands: stub.commands.calls, notices: stub.window.notices,
 	};
 }
@@ -768,6 +772,18 @@ describe("killing a session or a process", () => {
 			assert.ok(w.logged.includes(`tab ${TAB}: after Kill: The row records another process than the one that was killed.`));
 			assert.deepEqual([slotsForgotten, w.released, w.state.outcomes.size], [[], [], 1]);
 			assert.deepEqual(w.warnings, [], "a benign skip is not an error");
+		});
+
+		it("ends this window's own runtime of a session it drives when the kill proved its process gone, so the row stops saying Running", async () => {
+			const { w } = await killed(async () => ({ kind: "skipped", why: "driven", detail: "This window drives the session; its own broker watch ends it." }));
+			assert.deepEqual(w.drivenEnded, [TAB]);
+			assert.ok(w.logged.includes(`tab ${TAB}: after Kill: this window's runtime of the killed session was ended`), JSON.stringify(w.logged));
+		});
+
+		it("says so when another live window holds the session and has not recorded the end", async () => {
+			const { w } = await killed(async () => ({ kind: "skipped", why: "rival", detail: "Another live window holds the session; its own watch ends it." }));
+			assert.deepEqual(w.drivenEnded, []);
+			assert.match(w.notices.at(-1) ?? "", /another window still holds this session/);
 		});
 
 		it("tells the user when the row could not be recorded stopped, and keeps what it holds", async () => {

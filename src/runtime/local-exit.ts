@@ -146,7 +146,7 @@ export class LocalExitOperations {
 			log.info(`tab ${tabId}: the OMP process exited`);
 			const broker = await this.#deps.attachBrokerClient();
 			if (broker === null) { window.fence(current, true); return; }
-			const stop = await this.#deps.proveExit(runtime, broker, 1_000);
+			const stop = await this.#proveEnded(runtime, broker);
 			log.info(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
 			if (!stop.writerGone) {
 				current.controlFailure = stop.detail;
@@ -197,6 +197,17 @@ export class LocalExitOperations {
 		});
 	}
 
+	/**
+	 * The broker's proof that the OMP root exited, else the kernel's. A broker that dies together with its
+	 * child (Kill, a closing machine, Task Manager) closes the connection before it can answer, and that is
+	 * no reason to leave the row Running when the recorded root's pid and creation time show it gone.
+	 */
+	async #proveEnded(runtime: SessionHostRuntime, client: PtyBrokerClient): Promise<NativeStopVerdict> {
+		const proven = await this.#deps.proveExit(runtime, client, 1_000);
+		if (proven.writerGone) return proven;
+		return await this.#deps.stop.confirmEnded(runtime) ?? proven;
+	}
+
 	/** The native process of a record ended without this window asking for it. */
 	async nativeExited(state: RuntimeRecord, runtime: NativeHostRuntime): Promise<void> {
 		const { index, window, control, log } = this.#deps;
@@ -211,7 +222,7 @@ export class LocalExitOperations {
 			}
 			const client = await this.#deps.attachBrokerClient();
 			if (client === null) return;
-			const stop = await this.#deps.proveExit(runtime, client, 1_000);
+			const stop = await this.#proveEnded(runtime, client);
 			log.info(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
 			if (!stop.writerGone) { state.controlFailure = stop.detail; return; }
 			const owner = controlOwnerFor(runtime, index.get(tabId)?.ownership?.ownerGeneration ?? "");

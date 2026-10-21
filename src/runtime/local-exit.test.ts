@@ -44,7 +44,7 @@ function verdict(exit: Exit): NativeStopVerdict {
 	return { writerGone: true, treeEmpty: false, detail: "The session is stopped.", ...(exit === undefined ? {} : { exit }) };
 }
 
-function fixture(kind: "chat" | "terminal", exit: Exit) {
+function fixture(kind: "chat" | "terminal", exit: Exit, options: { brokerProves?: boolean; rootGone?: boolean } = {}) {
 	const events: string[] = [];
 	const closes: CloseSessionOptions[] = [];
 	const runtime = {
@@ -68,9 +68,9 @@ function fixture(kind: "chat" | "terminal", exit: Exit) {
 		} as never,
 		records: { get: () => record } as never,
 		control: { release: async () => { events.push("release"); }, dispose: () => undefined },
-		stop: { confirmEnded: async () => null },
+		stop: { confirmEnded: async () => options.rootGone === true ? { writerGone: true, treeEmpty: false, detail: "The OMP process had already ended." } : null },
 		attachBrokerClient: async () => ({}) as never,
-		proveExit: async () => verdict(exit),
+		proveExit: async () => options.brokerProves === false ? { writerGone: false, treeEmpty: false, detail: "the broker connection closed" } : verdict(exit),
 		brokerSlots: () => undefined,
 		log: silentLogger,
 	});
@@ -130,6 +130,21 @@ describe("rpcExited", () => {
 		f.record.runtime = {} as never;
 		await f.ops.rpcExited(TAB, f.runtime);
 		assert.deepEqual(f.closes, []);
+	});
+
+	it("closes the row from the kernel's proof when the broker died with the process and could not answer", async () => {
+		const f = fixture("chat", undefined, { brokerProves: false, rootGone: true });
+		await f.ops.rpcExited(TAB, f.runtime);
+		assert.equal(f.closes.length, 1, f.events.join(" | "));
+		assert.equal(f.closes[0]?.confirmedStopped, true);
+		assert.equal(f.record.runtime, null, "the row no longer shows a running process");
+	});
+
+	it("keeps the row as it is while neither the broker nor the kernel shows the root gone", async () => {
+		const f = fixture("chat", undefined, { brokerProves: false });
+		await f.ops.rpcExited(TAB, f.runtime);
+		assert.deepEqual(f.closes, []);
+		assert.ok(f.events.includes("fence"));
 	});
 });
 

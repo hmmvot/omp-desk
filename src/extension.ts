@@ -3911,7 +3911,14 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
     reconciler: () => windowState().reconciler,
     launcher,
     chat, stop, control, identity, nativeWatch, exit, writer, recorded, brokerProvenance, transitions,
-    kill: new LocalKill({ index, control, window: killWindow(index), brokerSlots: () => windowState().brokerSlots, log }),
+    kill: new LocalKill({
+      index, control, window: killWindow(index), brokerSlots: () => windowState().brokerSlots, log,
+      endDriven: async tabId => {
+        const state = records.get(tabId);
+        const runtime = state?.runtime ?? null;
+        return state !== undefined && runtime !== null && await exit.endEnded(state, runtime);
+      },
+    }),
   };
 }
 
