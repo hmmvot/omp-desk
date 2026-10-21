@@ -7,8 +7,9 @@
  * chat page reads it with the bundle, and the explanation document's nonce-gated
  * inline script persists it directly:
  *
- * - {@link createGuestHtml} is the chat page: exactly one script (the esbuild
- *   bundle at `media/guest.js`), one CSP nonce, and a `connect-src` naming this
+ * - {@link createGuestHtml} is the chat page: the esbuild bundle at `media/guest.js` plus the
+ *   inline start guard that explains a bundle that did not load (see {@link pageStartGuardSource}),
+ *   one CSP nonce, and a `connect-src` naming this
  *   document's own bridge listener and nothing else — or `'none'` when the
  *   document has no bridge. The chat's data arrives over the VS Code message
  *   channel (and, after an extension-host restart, that bridge), never over a
@@ -115,6 +116,70 @@ export function createSettingsHtml(webview: vscode.Webview, extensionUri: vscode
 <body><div id="root"></div><script nonce="${nonce}" src="${script}"></script></body></html>`;
 }
 
+/** What a page posts, once, when its bundle did not load or did not mount; the host logs it and the page shows the failure itself. */
+export const PAGE_START_FAILED_MESSAGE = "omp:page-start-failed";
+/** The bounded set of reasons a page reports: the bundle's script failed to load, or it loaded and nothing ever mounted. */
+export const PAGE_START_FAILURE_REASONS = ["script-error", "not-started"] as const;
+export type PageStartFailureReason = (typeof PAGE_START_FAILURE_REASONS)[number];
+
+/** The id of the bundle's `<script>` element, which the guard listens for. */
+const PAGE_SCRIPT_ID = "omp-page-script";
+/** How long a loaded bundle may leave `#root` empty before the page calls it a failed start. */
+const PAGE_START_GRACE_MS = 5000;
+
+/**
+ * The inline script that makes a blank page impossible: it runs before the bundle, so it sees the bundle's
+ * `error` and `load` events (resource events do not bubble, hence the capture listeners; they sit on `document`
+ * because a `load` event never propagates to `window`).
+ *
+ * A bundle that cannot be fetched — the install folder was replaced or removed under a restored page —
+ * or that loads and never mounts anything leaves nothing on screen, because the page is only what the
+ * bundle draws. The guard replaces `#root` with a plain explanation, and with a Reload Window button when
+ * the host answers that message (`reloadButton`; the chat page does). `acquireVsCodeApi` may be called once
+ * per document, so on that page the guard takes the one object lazily and hands it to the bundle's own
+ * call: a bundle that took the API and then failed to mount still leaves the guard a way to post.
+ */
+function pageStartGuardSource(reloadButton: boolean): string {
+	return (
+		"(function(){" +
+		"var failed=false,cache=null,factory=typeof acquireVsCodeApi===\"function\"?acquireVsCodeApi:null;" +
+		// `acquireVsCodeApi` may be called once per document. The bundle and this guard both need it, so the one object is
+		// cached and handed to whichever asks first: a bundle that acquired the API and then failed to mount still leaves
+		// the guard a way to post the Reload Window request.
+		"function api(){if(cache===null&&factory!==null){try{cache=factory.apply(window,[]);}catch(e){cache=null;}}return cache;}" +
+		(reloadButton ? "if(factory!==null){try{window.acquireVsCodeApi=api;}catch(e){}}" : "") +
+		"function show(reason){" +
+		"if(failed)return;failed=true;" +
+		(reloadButton ? "var api0=api();" : "var api0=null;") +
+		"var box=document.createElement(\"div\");" +
+		"box.setAttribute(\"role\",\"alert\");" +
+		"box.style.cssText=\"padding:1.25rem;line-height:1.5;max-width:40rem;font-family:var(--vscode-font-family);color:var(--vscode-foreground)\";" +
+		"var h=document.createElement(\"h1\");h.style.cssText=\"font-size:1rem;margin:0 0 .5rem\";h.textContent=" + JSON.stringify(PAGE_START_FAILED_TITLE) + ";box.appendChild(h);" +
+		"var p=document.createElement(\"p\");p.style.cssText=\"margin:0 0 .75rem\";p.textContent=" + JSON.stringify(PAGE_START_FAILED_DETAIL) + ";box.appendChild(p);" +
+		(reloadButton
+			? "if(api0!==null){" +
+				"var b=document.createElement(\"button\");b.type=\"button\";b.textContent=\"Reload Window\";" +
+				"b.style.cssText=\"font-family:inherit;color:var(--vscode-button-foreground);background:var(--vscode-button-background);border:0;padding:.35rem .9rem;cursor:pointer\";" +
+				`b.addEventListener("click",function(){api0.postMessage({type:${JSON.stringify(UNAVAILABLE_RELOAD_MESSAGE)}});});` +
+				"box.appendChild(b);" +
+				`api0.postMessage({type:${JSON.stringify(PAGE_START_FAILED_MESSAGE)},reason:reason});` +
+				"}else{"
+			: "{") +
+		"var q=document.createElement(\"p\");q.textContent=" + JSON.stringify(PAGE_START_FAILED_MANUAL) + ";box.appendChild(q);}" +
+		"var root=document.getElementById(\"root\")||document.body;" +
+		"while(root.firstChild)root.removeChild(root.firstChild);root.appendChild(box);}" +
+		"document.addEventListener(\"error\",function(e){var t=e.target;if(t&&t.id===" + JSON.stringify(PAGE_SCRIPT_ID) + ")show(\"script-error\");},true);" +
+		"document.addEventListener(\"load\",function(e){var t=e.target;if(!t||t.id!==" + JSON.stringify(PAGE_SCRIPT_ID) + ")return;" +
+		"setTimeout(function(){var r=document.getElementById(\"root\");if(r&&r.childElementCount===0)show(\"not-started\");}," + PAGE_START_GRACE_MS + ");},true);" +
+		"})();"
+	);
+}
+
+const PAGE_START_FAILED_TITLE = "OMP Desk could not start this page";
+const PAGE_START_FAILED_DETAIL =
+	"The page's script did not load or did not start. This usually means the OMP Desk files changed on disk while this window was open (a reinstall). The session itself keeps running.";
+const PAGE_START_FAILED_MANUAL = "Run Developer: Reload Window from the Command Palette to recover.";
+
 /**
  * The diagram tab's document (`ompDesk.mermaidPreview`): the guest policy with no network at all, the renderer `media/mermaid.js`
  * and the tab's own page script `media/mermaid-preview.js`, each with this document's nonce. The mermaid source is not in the
@@ -179,7 +244,8 @@ ${identityMeta(tabId)}${bridgeMeta(bridge)}${frameMeta}\t\t<meta name="omp-sessi
 	</head>
 	<body>
 		<div id="root"></div>
-		<script nonce="${nonce}" src="${scriptUri.toString()}"></script>
+		<script nonce="${nonce}">${pageStartGuardSource(true)}</script>
+		<script nonce="${nonce}" id="${PAGE_SCRIPT_ID}" src="${scriptUri.toString()}"></script>
 	</body>
 </html>
 `;
@@ -210,7 +276,8 @@ export function createDetailHtml(webview: vscode.Webview, extensionUri: vscode.U
 	</head>
 	<body>
 		<div id="root"></div>
-		<script nonce="${nonce}" src="${scriptUri.toString()}"></script>
+		<script nonce="${nonce}">${pageStartGuardSource(false)}</script>
+		<script nonce="${nonce}" id="${PAGE_SCRIPT_ID}" src="${scriptUri.toString()}"></script>
 	</body>
 </html>
 `;
@@ -369,7 +436,8 @@ ${slotMeta}\t\t<title>OMP Desk terminal</title>
 	</head>
 	<body>
 		<div id="root"></div>
-		<script nonce="${nonce}" src="${scriptUri.toString()}"></script>
+		<script nonce="${nonce}">${pageStartGuardSource(false)}</script>
+		<script nonce="${nonce}" id="${PAGE_SCRIPT_ID}" src="${scriptUri.toString()}"></script>
 	</body>
 </html>
 `;

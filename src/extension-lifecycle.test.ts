@@ -5994,6 +5994,56 @@ describe("a command sent while its editor is still being elected", () => {
   });
 });
 
+describe("a chat page that could not start", () => {
+  /** One bound Chat editor on a live fake child; its page is the guest document, so it is the page the start guard runs in. */
+  async function bound() {
+    const saved = storage();
+    const directory = await mkdtemp(path.join(root, "nostart-"));
+    const file = path.join(directory, "session.jsonl");
+    await writeFile(file, sessionFileText({ id: "nostart-session", cwd: directory, entries: [] }));
+    const values = new Map<string, unknown>();
+    const index = new harness.SessionIndex({ claimStorageDir: path.join(directory, "claims"), store: {
+      get<T>(key: string) { return values.get(key) as T | undefined; },
+      async update(key: string, value: unknown) { values.set(key, value); },
+    } });
+    const row = await index.trackSession({ sessionFile: file, cwd: directory });
+    const channel = new FakeRpcChannel({ sessionFile: file, sessionId: "nostart-session" });
+    const chat = new ChatRuntime({ hostNonce: path.basename(directory), onEvent() {} });
+    await chat.startLive(row.tabId, { channel, sessionFile: file, cwd: directory, title: null }).start();
+    harness.reset(index, chat);
+    const restore = harness.editorLifecycle();
+    const panel = harness.createPanel();
+    saved.context.extensionUri = URI.file(root);
+    const slot = "f".repeat(32);
+    harness.window().editorPanels.bindPanel(saved.context, index, slot, row.tabId, panel, "created");
+    const calls = harness.commandHandler(() => undefined);
+    const cleanup = async () => {
+      const exited = harness.footerIdle();
+      harness.forgetTurnActivity(index, row.tabId);
+      await exited;
+      restore(); chat.dispose();
+    };
+    return { panel, calls, cleanup };
+  }
+
+  it("reloads the window when its Reload Window button is clicked, drift or not", async () => {
+    const f = await bound();
+    try {
+      assert.match(f.panel.webview.html, /id="omp-page-script"/, "the editor shows the chat page, whose guard offers the button");
+      f.panel.receive({ type: "omp:reload-window" });
+      assert.equal(f.calls.filter(call => call[0] === "workbench.action.reloadWindow").length, 1);
+    } finally { await f.cleanup(); }
+  });
+
+  it("only logs a failed start: nothing reloads and the report is not treated as a chat message", async () => {
+    const f = await bound();
+    try {
+      for (const reason of ["script-error", "not-started", "anything else"]) f.panel.receive({ type: "omp:page-start-failed", reason });
+      assert.equal(f.calls.filter(call => call[0] === "workbench.action.reloadWindow").length, 0);
+    } finally { await f.cleanup(); }
+  });
+});
+
 describe("Resume from a stopped Chat", () => {
   async function settle<T>(read: () => T | null | false | undefined): Promise<T> {
     for (let turn = 0; turn < 600; turn++) {

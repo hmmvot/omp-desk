@@ -12,7 +12,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { MODULE_EVALUATION_STARTED_AT, MODULE_EVALUATION_STARTED_CPU_MS } from "./host/module-clock";
 import { ActivationTimer } from "./host/activation-timing";
-import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
+import { PAGE_START_FAILED_MESSAGE, PAGE_START_FAILURE_REASONS, UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { createHtmlPageServer, type HtmlPageServer } from "./host/html-page-server";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { installedNerdFonts } from "./host/terminal-fonts";
@@ -10172,8 +10172,15 @@ function registerPanelLifecycle(
     // A disposed panel must not send a late request into a replacement editor.
     const state = s.tabs.get(slot);
     if (state?.panel !== panel || state.tabId === null) return;
-    // The updated-on-disk page's one button: honoured only while the installed package really changed under this host.
-    if (typeof message === "object" && message !== null && "type" in message && message.type === UNAVAILABLE_RELOAD_MESSAGE && state.document?.kind === "unavailable" && packageChangedOnDisk()) {
+    // A page whose bundle did not load or mount says so once; the log is where that is visible afterwards.
+    if (typeof message === "object" && message !== null && "type" in message && message.type === PAGE_START_FAILED_MESSAGE && state.document?.kind === "guest") {
+      const reason = "reason" in message ? PAGE_START_FAILURE_REASONS.find(known => known === message.reason) : undefined;
+      log.warn(`slot ${slot}: the chat page did not start (${reason ?? "unknown reason"}); the installed package ${packageChangedOnDisk() ? "changed" : "did not change"} on disk since this window started`);
+      return;
+    }
+    // The Reload Window button of the updated-on-disk page (honoured only while the installed package really changed under
+    // this host) and of a chat page that could not start (the page shows it only after a failed start, drift or not).
+    if (typeof message === "object" && message !== null && "type" in message && message.type === UNAVAILABLE_RELOAD_MESSAGE && (state.document?.kind === "guest" || (state.document?.kind === "unavailable" && packageChangedOnDisk()))) {
       void vscode.commands.executeCommand("workbench.action.reloadWindow");
       return;
     }

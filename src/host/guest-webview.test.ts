@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type * as vscode from "vscode";
 
-import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./guest-webview.ts";
+import { PAGE_START_FAILED_MESSAGE, UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./guest-webview.ts";
 import { parseDetailMeta } from "../protocol/detail-target.ts";
 import {
 	PANEL_BRIDGE_META,
@@ -62,11 +62,22 @@ describe("createGuestHtml", () => {
 		assert.equal(csp.includes("ws://"), false, "no relay origin may remain in the policy");
 	});
 
-	it("loads exactly the extension's bundle, under a nonce", () => {
+	it("loads exactly the extension's bundle, under a nonce, after the start guard", () => {
 		const scripts = html.match(/<script[^>]*>/g) ?? [];
-		assert.equal(scripts.length, 1);
-		assert.match(scripts[0] ?? "", /nonce="[^"]+"/);
-		assert.match(scripts[0] ?? "", /src="https:\/\/panel\.test\/extension\/media\/guest\.js"/);
+		assert.equal(scripts.length, 2, "the inline start guard and the bundle");
+		assert.match(scripts[0] ?? "", /^<script nonce="[^"]+">$/, "the guard is inline and runs first, to see the bundle's load events");
+		assert.match(scripts[1] ?? "", /nonce="[^"]+"/);
+		assert.match(scripts[1] ?? "", /id="omp-page-script"/);
+		assert.match(scripts[1] ?? "", /src="https:\/\/panel\.test\/extension\/media\/guest\.js"/);
+	});
+
+	it("carries the Reload Window request only on the chat page, whose host answers it", () => {
+		const guard = (document: string): string => /<script nonce="[^"]+">(.*?)<\/script>/s.exec(document)?.[1] ?? "";
+		assert.match(guard(html), new RegExp(`${UNAVAILABLE_RELOAD_MESSAGE}`));
+		assert.match(guard(html), new RegExp(`${PAGE_START_FAILED_MESSAGE}`));
+		const detail = guard(createDetailHtml(webview, extensionUri, { kind: "todo" }));
+		assert.equal(detail.includes(UNAVAILABLE_RELOAD_MESSAGE), false, "a detail tab has no host to honour it, so it names the command instead");
+		assert.match(detail, /Developer: Reload Window/);
 	});
 
 	it("stamps the tab identity the guest bootstrap persists", () => {
@@ -198,9 +209,9 @@ describe("createShellHtml", () => {
 
 	it("loads the shell bundle under a nonce and reaches no origin at all", () => {
 		const scripts = html.match(/<script[^>]*>/g) ?? [];
-		assert.equal(scripts.length, 1);
-		assert.match(scripts[0] ?? "", /nonce="[^"]+"/);
-		assert.match(scripts[0] ?? "", /src="https:\/\/panel\.test\/extension\/media\/shell\.js"/);
+		assert.equal(scripts.length, 2, "the inline start guard and the bundle");
+		assert.match(scripts[1] ?? "", /nonce="[^"]+"/);
+		assert.match(scripts[1] ?? "", /src="https:\/\/panel\.test\/extension\/media\/shell\.js"/);
 		const csp = declaredCsp(html);
 		// The shell pane talks only over the panel message channel, so it must not
 		// be able to open a socket even if its own code tried.
@@ -230,7 +241,7 @@ describe("createDetailHtml", () => {
 		assert.equal(strip(csp), strip(chat), "the same nonce-gated policy, including style attributes");
 		assert.equal(detail.includes(PANEL_IDENTITY_META), false, "no identity: VS Code has nothing to restore");
 		assert.equal(detail.includes(PANEL_BRIDGE_META), false);
-		assert.equal((detail.match(/<script[^>]*>/g) ?? []).length, 1);
+		assert.equal((detail.match(/<script[^>]*>/g) ?? []).length, 2, "the inline start guard and the bundle");
 		assert.match(detail, /<meta name="omp-detail" content="todo" \/>/);
 	});
 
