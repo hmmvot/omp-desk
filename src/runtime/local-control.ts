@@ -462,6 +462,7 @@ export class LocalHostControl {
 								? "Host control lost: the running OMP no longer serves a control endpoint this session can verify, so statuses and notifications are off. Reload the session to restore them."
 								: "Waiting for the native host to publish its control record; statuses and notifications start when it connects.";
 						diagnostics.fail(tabId, "host-control-verified", reason);
+						this.#deps.timeline?.finishWithoutControl(tabId);
 						this.fail(tabId, reason);
 					} else {
 						log.debug(`tab ${tabId}: a control attempt that found no rendezvous no longer owns this tab; nothing was changed`);
@@ -469,6 +470,7 @@ export class LocalHostControl {
 					return;
 				}
 				if (!stillCurrent()) return;
+				this.#deps.timeline?.mark(tabId, "omp control published", rendezvous.startedAt);
 				connected = await (this.#deps.connection ?? HostControlClient).connectVerified({
 					rendezvous,
 					rendezvousDirectory: input.directory,
@@ -509,8 +511,7 @@ export class LocalHostControl {
 				state.controlFailure = null;
 				this.#forgetPaused(tabId);
 				log.info(`tab ${tabId}: host control verified (pid ${input.pid}, instance ${snapshot.host.instanceId})`);
-				const finished = this.#deps.timeline?.finish(tabId) ?? null;
-				if (finished !== null) log.info(`window timing: ${finished.kind} ${tabId} host control verified ${finished.totalMs} ms after the command`);
+				this.#deps.timeline?.finish(tabId);
 				diagnostics.succeed(tabId, "host-control-verified", {
 					detail: `pid ${input.pid} · instance ${snapshot.host.instanceId}`,
 				});
@@ -524,6 +525,7 @@ export class LocalHostControl {
 			const outcome = { runtime: attempt.runtime, pid: attempt.pid, client: connected?.client ?? null };
 			if (mayReportControlFailure(this.#attemptTarget(tabId), outcome)) {
 				diagnostics.fail(tabId, "host-control-verified", describeControlError(error));
+				this.#deps.timeline?.finishWithoutControl(tabId);
 				this.reportFailure(tabId, error);
 			} else {
 				log.debug(`tab ${tabId}: a failed host-control attempt no longer owns this tab; its result was ignored`);

@@ -1307,7 +1307,7 @@ function bridgeHostDeps(): BridgeHostDeps<TabState> {
 /** The initial state of one window: every collection empty, every handle not yet created. */
 function createWindowState(context: vscode.ExtensionContext): WindowState {
   const pending = new PendingOperations({ log: line => log.debug(line), launchReady: launchReadinessOf });
-  const launchTimeline = new LaunchTimeline();
+  const launchTimeline = new LaunchTimeline(Date.now, line => log.info(line));
   launchTimeline.observe(observeLaunchSteps(pending));
   return {
     // Session index and claims
@@ -3553,8 +3553,11 @@ async function timedLaunch<T>(tabId: string, kind: LaunchKind, commandAt: number
   timeline.begin(tabId, kind, commandAt);
   try {
     return await run();
+  } catch (error) {
+    timeline.abandon(tabId, "an error before the launch (logged separately)");
+    throw error;
   } finally {
-    timeline.abandon(tabId);
+    timeline.abandon(tabId, stateOf(tabId)?.openDeclined === true ? "the Cancel of the external-writer question" : undefined);
   }
 }
 
@@ -7058,6 +7061,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       logChatConnectionPhase(tabId, phase, event.payload.code, event.payload.exitReason);
       if (phase !== "live") cancelControlPicker(tabId);
       if (phase === "live") {
+        s.launchTimeline.mark(tabId, "chat live");
         void adoptSessionTitle(sessionTitleDeps(context, index), tabId, event.payload.sessionId, event.payload.title ?? "");
         if (!diagnosticsStageMeasured(tabId, "chat-live")) {
           s.diagnostics.succeed(tabId, "chat-live", { detail: "the conversation reached its live phase" });
@@ -7069,6 +7073,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         refreshSessionCost(index, tabId);
         void refreshSessionModels(index, tabId);
       }
+      if (phase === "failed" || (phase === "stopped" && event.payload.code === "child-exited")) s.launchTimeline.discard(tabId, `chat ${phase}${event.payload.code ? ` (${event.payload.code})` : ""}`);
       if (phase === "stopped" && event.payload.code === "child-exited") {
         const runtime = hostOf(stateOf(tabId)) ?? null;
         if (runtime?.kind === "chat") void s.sessionRuntime.exit.rpcExited(tabId, runtime);

@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import type { LiveConversationInput } from "../host/chat-runtime.ts";
+import { LaunchTimeline } from "../host/launch-timeline.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { OmpHostAttachRequest, OmpHostLaunchRequest, SessionIndex } from "../host/session-index.ts";
@@ -128,6 +129,33 @@ describe("launch", () => {
 			"storeRecipient", "retireDocument", "reserve", "launch", "adopt", "prepareView", "startLive", "attached", "connectControl", "setRunIntent",
 		]);
 		assert.deepEqual(f.recorded.map(entry => (entry as { editor: string | null }).editor), ["editor-1"], "the slot is recorded for the editor the document hook returned");
+	});
+
+	it("puts the start's steps on one timeline line: laps, OMP spawned, OMP ready, host control verified and Chat live", async () => {
+		const lines: string[] = [];
+		const timeline = new LaunchTimeline(Date.now, line => lines.push(line));
+		const f = fixture();
+		const launcher = new LocalLauncher({ ...f.deps, timeline });
+		timeline.begin(TAB, "resume");
+		assert.equal((await launcher.launch(request)).state, "running");
+		f.deps.brokerWatches.get(f.runtime)?.();
+		assert.deepEqual(lines, [], "nothing is reported while host control and the Chat are still to come");
+		f.liveInputs[0]?.onReady?.();
+		timeline.finish(TAB);
+		assert.deepEqual(lines, []);
+		timeline.mark(TAB, "chat live");
+		assert.equal(lines.length, 1);
+		assert.match(lines[0]!, new RegExp(`^window timing: resume ${TAB} start timeline, ms from the command: admission \\d+ · stage \\d+ · host control keys \\d+ · runtime proof \\d+ · editor document \\d+ · broker slot \\d+ · omp spawned \\d+ · conversation \\d+ · run intent \\d+ · omp ready \\d+ · host control verified \\d+ · chat live \\d+$`));
+	});
+
+	it("reports the partial timeline of a launch that did not start, naming the step", async () => {
+		const lines: string[] = [];
+		const timeline = new LaunchTimeline(Date.now, line => lines.push(line));
+		const f = fixture({ launch: "unconfirmed" });
+		timeline.begin(TAB, "new session");
+		assert.equal((await new LocalLauncher({ ...f.deps, timeline }).launch(request)).state, "unconfirmed");
+		assert.equal(lines.length, 1);
+		assert.match(lines[0]!, new RegExp(`^window timing: new session ${TAB} start ended after \\d+ ms, failed or cancelled at unconfirmed at the broker launch; ms from the command: admission \\d+ · stage \\d+ · host control keys \\d+ · runtime proof \\d+ · editor document \\d+ · broker slot \\d+$`));
 	});
 
 	it("withholds host control instead of connecting when the launcher could not carry the recipient (ADR-0075)", async () => {

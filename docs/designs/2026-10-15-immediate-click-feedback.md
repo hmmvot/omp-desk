@@ -43,7 +43,7 @@ The two traces below were read against the source at the baseline of this work.
 
 **What exists to reuse.**
 
-- `LaunchTimeline` (`src/host/launch-timeline.ts`) has a lap at every phase boundary of an explicit launch, logged as `window timing: <kind> <tab> running in N ms · …`. A lap on a tab with no run does nothing.
+- `LaunchTimeline` (`src/host/launch-timeline.ts`) has a lap at every phase boundary of an explicit launch. Since 2026-10-21 it records every step as milliseconds from the command and logs ONE line per start at Info (`window timing: <kind> <tab> start timeline, ms from the command: …`, or `… start ended after N ms, failed or cancelled at <step>; …`); the earlier `running in N ms · …` and `host control verified N ms after the command` lines are gone. A lap on a tab with no run does nothing.
 - `stoppingTabs` is a transitional row state, but a **published** one: `launcherFacts.stopping` makes the row `stopping`, and the row's state is what the window registry publishes to other windows (ADR-0056). It holds confirmed stops only.
 - The tree renders `starting`/`stopping`/`checking` with a spinning icon. `SessionTreeProvider.setProcesses` shows the pattern for feeding it a snapshot that repaints only the rows whose words changed.
 - `ChatRuntime` owns `#pages` and posts epoch-free messages (`omp:chat-code-theme`, re-posted from `resend` on attach); the page keeps such messages in a store separate from the chat model (`code-theme-store.ts`).

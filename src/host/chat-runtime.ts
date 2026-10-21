@@ -147,6 +147,8 @@ export interface LiveConversationInput {
 	readonly initialSeq?: number;
 	/** Adopting a host another window may have just given up: repeat a refused input claim a bounded number of times (never a takeover). */
 	readonly reclaimInput?: InputReclaim;
+	/** Told once when the process reports `ready` (the start timeline's step); never decides anything. */
+	readonly onReady?: () => void;
 }
 
 export interface ChatRuntimeOptions {
@@ -334,6 +336,7 @@ export class ChatRuntime {
 			hostNonce: nonce,
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
 			...(input.reclaimInput === undefined ? {} : { reclaimInput: input.reclaimInput }),
+			...(input.onReady === undefined ? {} : { onReady: input.onReady }),
 			...(this.#options.hostTools === undefined ? {} : { hostTools: this.#options.hostTools }),
 			...(this.#options.log === undefined ? {} : { log: prefixedLogger(this.#options.log, `tab ${tabId}: `) }),
 			...(this.#options.readTodoClearDelay === undefined ? {} : { readTodoClearDelay: () => this.#options.readTodoClearDelay!(tabId, input.cwd) }),

@@ -5,12 +5,14 @@
  * neither, so a launch that took half a minute left a log with nothing between "panel bound" and "running". A run
  * starts when the command is entered ({@link LaunchTimeline.begin}, with the kind of the command: New Session reserves a
  * draft, Resume from the composer, a folder's history or Resume Session, and Open of a row, which launches when the row is
- * stopped); the launch path then adds the duration of every phase it already measures ({@link LaunchTimeline.add}) and the
- * lap from the previous mark to now ({@link LaunchTimeline.lap}); the launcher claims the run when it takes the launch
- * ({@link LaunchTimeline.reached}) and asks for the summary when the host is running, and the host-control step asks how
- * long after the command its channel was verified ({@link LaunchTimeline.finish}). A command whose launch never reaches the
- * launcher (the session is already running, the admission refused it, another window runs it) drops its run with
- * {@link LaunchTimeline.abandon}, so a later launch of the tab is not reported as that command's.
+ * stopped); every step the start reaches is recorded as milliseconds from that command: the laps of the launch path
+ * ({@link LaunchTimeline.lap}), the phases the broker launch timed itself ({@link LaunchTimeline.add}) and the steps OMP and the
+ * Desk reach later ({@link LaunchTimeline.mark}: OMP spawned, its control record published, OMP `ready`, Chat `live`). The launcher
+ * claims the run when it takes the launch ({@link LaunchTimeline.reached}); the host-control step ends it
+ * ({@link LaunchTimeline.finish}) and the run is reported as ONE Info line: at that moment, or, for a Chat, once it is live. A
+ * start that fails or is cancelled reports the steps reached so far with the step that failed ({@link LaunchTimeline.discard}).
+ * A command whose launch never reaches the launcher (the session is already running, the admission refused it, another window
+ * runs it) drops its run with {@link LaunchTimeline.abandon}, so a later launch of the tab is not reported as that command's.
  *
  * Only a launch that began a run is reported, so the startup restore adds no line (a Restart after a failed Chat and a Chat/Terminal
  * view switch begin runs too, so their launch phases are timed, and shown as steps by the pending-operation display through
@@ -50,11 +52,14 @@ export interface LaunchTimelineObserver {
 interface Run {
 	readonly kind: LaunchKind;
 	readonly startedAt: number;
-	/** Where the last lap ended. */
-	lastMark: number;
+	/** Where the last lap or timed phase ended (absolute time): the point the next timed phase continues from. */
+	cursor: number;
 	/** The launcher took the launch this run was begun for. */
 	launched: boolean;
-	readonly phases: [name: string, ms: number][];
+	/** The launcher started a Chat conversation: the run is reported when it is live, not when host control is verified. */
+	awaitsLive: boolean;
+	/** Every step reached so far, in the order it was reached, as milliseconds from the command. */
+	readonly marks: [name: string, ms: number][];
 }
 
 /** A run kept this long without finishing is dropped (a launch that never reached `running`). */
@@ -67,18 +72,24 @@ export interface LaunchSummary {
 	readonly kind: LaunchKind;
 	/** Whole milliseconds from the command to now. */
 	readonly totalMs: number;
-	/** `a 12 · b 340`, in the order recorded; empty when nothing was recorded. */
-	readonly phases: string;
 }
+
+/** The steps the Desk and OMP reach that are not laps of the launch path (see {@link LaunchTimeline.mark}). */
+export type LaunchMilestone = "omp spawned" | "omp control published" | "omp ready" | "host control verified" | "host control unavailable" | "chat live";
 
 export class LaunchTimeline {
 	readonly #now: () => number;
+	readonly #report: (line: string) => void;
 	readonly #runs = new Map<string, Run>();
+	/** Runs whose host control ended but whose Chat is not live yet; the Chat's `live` (or its failure) reports them. */
+	readonly #settling = new Map<string, Run>();
 
 	#observer: LaunchTimelineObserver | null = null;
 
-	constructor(now: () => number = Date.now) {
+	/** `report` receives the one timeline line of each started session (or of the start that failed); omitted: nothing is reported. */
+	constructor(now: () => number = Date.now, report: (line: string) => void = () => {}) {
 		this.#now = now;
+		this.#report = report;
 	}
 
 	/** The one observer of this timeline's laps (the pending-operation display); `null` removes it. */
@@ -93,10 +104,13 @@ export class LaunchTimeline {
 	begin(tabId: string, kind: LaunchKind, startedAt: number = this.#now()): void {
 		const at = this.#now();
 		this.#runs.delete(tabId);
-		this.#runs.set(tabId, { kind, startedAt, lastMark: startedAt, launched: false, phases: [] });
-		for (const [id, run] of this.#runs) {
-			if (this.#runs.size <= RUN_KEEP_MAX && at - run.startedAt < RUN_KEEP_MS) break;
-			this.#runs.delete(id);
+		this.#settling.delete(tabId);
+		this.#runs.set(tabId, { kind, startedAt, cursor: startedAt, launched: false, awaitsLive: false, marks: [] });
+		for (const map of [this.#runs, this.#settling]) {
+			for (const [id, run] of map) {
+				if (map.size <= RUN_KEEP_MAX && at - run.startedAt < RUN_KEEP_MS) break;
+				map.delete(id);
+			}
 		}
 	}
 
@@ -113,52 +127,115 @@ export class LaunchTimeline {
 		return run.kind;
 	}
 
-	/** Record `phase` as the time since the previous lap (or the command). No run: nothing happens. */
+	/** The launch starts a Chat conversation: the run is reported once the Chat is live, after host control has been verified or has given up. */
+	expectLive(tabId: string): void {
+		const run = this.#runs.get(tabId);
+		if (run !== undefined) run.awaitsLive = true;
+	}
+
+	/** Record `phase` as reached now (milliseconds from the command). No run: nothing happens. */
 	lap(tabId: string, phase: LaunchLap): void {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return;
 		const at = this.#now();
-		run.phases.push([phase, Math.max(0, at - run.lastMark)]);
-		run.lastMark = at;
+		run.marks.push([phase, Math.max(0, at - run.startedAt)]);
+		run.cursor = at;
 		this.#observer?.onLap(tabId, phase);
 	}
 
-	/** Record a phase the caller timed itself; the lap pointer moves to now, so a following {@link lap} excludes it. */
+	/** Record a phase the caller timed itself: it ended `ms` after the previous lap or timed phase (never later than now), so the phases the broker launch reports stay in order. */
 	add(tabId: string, phase: string, ms: number): void {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return;
-		run.phases.push([phase, Math.max(0, Math.round(ms))]);
-		run.lastMark = this.#now();
+		run.cursor = Math.min(this.#now(), run.cursor + Math.max(0, Math.round(ms)));
+		run.marks.push([phase, Math.max(0, run.cursor - run.startedAt)]);
 		this.#observer?.onAdd(tabId);
+	}
+
+	/**
+	 * A step happened now, or at `at` (an absolute time another process stamped, clamped between the command and now). Only the first
+	 * time a run reaches a step is kept. A tab with no run, or a run already reported, adds nothing. `chat live` also reports a run
+	 * that was waiting for it.
+	 */
+	mark(tabId: string, step: LaunchMilestone, at?: number): void {
+		const waiting = this.#settling.get(tabId);
+		const run = this.#runs.get(tabId) ?? waiting;
+		if (run === undefined || run.marks.some(([name]) => name === step)) return;
+		const now = this.#now();
+		// A stamp before the command cannot belong to this start (another clock or unit): the moment it was seen stands.
+		const stamped = at !== undefined && at >= run.startedAt ? Math.min(at, now) : now;
+		run.marks.push([step, Math.round(stamped - run.startedAt)]);
+		if (waiting !== undefined && step === "chat live") {
+			this.#settling.delete(tabId);
+			this.#report(this.#line(tabId, run, null));
+		}
 	}
 
 	/** The run so far, without ending it; `null` when the tab has none. */
 	summary(tabId: string): LaunchSummary | null {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return null;
-		return {
-			kind: run.kind,
-			totalMs: Math.round(this.#now() - run.startedAt),
-			phases: run.phases.map(([name, ms]) => `${name} ${Math.round(ms)}`).join(" · "),
-		};
-	}
-
-	/** The run ends and its kind and whole milliseconds since the command are returned: the second report of a launch is its last. */
-	finish(tabId: string): { readonly kind: LaunchKind; readonly totalMs: number } | null {
-		const run = this.#runs.get(tabId);
-		if (run === undefined) return null;
-		this.#runs.delete(tabId);
-		this.#observer?.onEnd(tabId);
 		return { kind: run.kind, totalMs: Math.round(this.#now() - run.startedAt) };
 	}
 
-	/** The command that began the run ended without any launch reaching the launcher (already running, refused, another window's): the run is dropped unreported. A run the launcher took is left to its own end. */
-	abandon(tabId: string): void {
-		if (this.#runs.get(tabId)?.launched === false) this.#runs.delete(tabId);
+	/** Host control was verified: the run ends, its kind and whole milliseconds since the command are returned, and it is reported unless its Chat is still to go live. */
+	finish(tabId: string): { readonly kind: LaunchKind; readonly totalMs: number } | null {
+		const run = this.#runs.get(tabId);
+		if (run === undefined) return null;
+		this.mark(tabId, "host control verified");
+		this.#end(tabId, run);
+		return { kind: run.kind, totalMs: Math.round(this.#now() - run.startedAt) };
 	}
 
-	/** The tab's run ends without a report (the launch failed or the tab closed). */
-	discard(tabId: string): void {
-		if (this.#runs.delete(tabId)) this.#observer?.onEnd(tabId);
+	/** Host control will not report (the launcher did not carry it, or it failed): the run ends the same way, with that said in the line. */
+	finishWithoutControl(tabId: string): void {
+		const run = this.#runs.get(tabId);
+		if (run === undefined) return;
+		this.mark(tabId, "host control unavailable");
+		this.#end(tabId, run);
+	}
+
+	/**
+	 * The command that began the run ended without any launch reaching the launcher (already running, refused, another window's): the
+	 * run is dropped, unreported unless `cancelledAt` says why it ended (an error, a Cancel), which reports the steps reached. A run the
+	 * launcher took is left to its own end.
+	 */
+	abandon(tabId: string, cancelledAt?: string): void {
+		const run = this.#runs.get(tabId);
+		if (run === undefined || run.launched) return;
+		this.#runs.delete(tabId);
+		if (cancelledAt !== undefined) this.#report(this.#line(tabId, run, cancelledAt));
+	}
+
+	/**
+	 * The tab's run ends: without `failure`, unreported (the tab closed, nothing started); with it, the steps reached so far are
+	 * reported, naming the step that failed or was cancelled.
+	 */
+	discard(tabId: string, failure?: string): void {
+		const waiting = this.#settling.get(tabId);
+		if (waiting !== undefined) {
+			this.#settling.delete(tabId);
+			if (failure !== undefined) this.#report(this.#line(tabId, waiting, failure));
+			return;
+		}
+		const run = this.#runs.get(tabId);
+		if (run === undefined) return;
+		this.#runs.delete(tabId);
+		this.#observer?.onEnd(tabId);
+		if (failure !== undefined) this.#report(this.#line(tabId, run, failure));
+	}
+
+	#end(tabId: string, run: Run): void {
+		this.#runs.delete(tabId);
+		this.#observer?.onEnd(tabId);
+		if (run.awaitsLive && !run.marks.some(([name]) => name === "chat live")) this.#settling.set(tabId, run);
+		else this.#report(this.#line(tabId, run, null));
+	}
+
+	/** `window timing: <kind> <tab> start timeline, ms from the command: …`, or the same cut short with the step that failed or was cancelled; one line. */
+	#line(tabId: string, run: Run, failure: string | null): string {
+		const steps = run.marks.map(([name, ms]) => `${name} ${Math.round(ms)}`).join(" · ");
+		if (failure === null) return `window timing: ${run.kind} ${tabId} start timeline, ms from the command: ${steps}`;
+		return `window timing: ${run.kind} ${tabId} start ended after ${Math.round(this.#now() - run.startedAt)} ms, failed or cancelled at ${failure}; ms from the command: ${steps === "" ? "no step reached" : steps}`;
 	}
 }

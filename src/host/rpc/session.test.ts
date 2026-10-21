@@ -294,6 +294,22 @@ describe("resync sequence", () => {
 		assert.equal(rig.session.phase as string, "live");
 	});
 
+	it("tells onReady once when `ready` is first seen, whether it came with the attach or later", async () => {
+		let early = 0;
+		await boot({ session: { onReady: () => { early += 1; } } });
+		assert.equal(early, 1, "a `ready` the attach answered with");
+		let late = 0;
+		const rig = await boot({ noWait: true, session: { onReady: () => { late += 1; } }, setup: ch => { ch.ready = null; ch.rpcProtocol = null; ch.negotiating = true; } });
+		await tick();
+		assert.equal(late, 0, "nothing before the child is ready");
+		rig.channel.ready = JSON.stringify({ type: "ready", protocolVersion: 2, supportedProtocolVersions: [1, 2] });
+		rig.channel.negotiating = false;
+		rig.channel.emitLateReady(2);
+		rig.channel.emitLateReady(2);
+		await waitUntil(() => (rig.session.phase as string) === "live");
+		assert.equal(late, 1);
+	});
+
 	it("goes live when `ready` arrives after the attach answered, whatever the last folded line seq is", async () => {
 		for (const earlier of [0, 3]) {
 			const rig = await boot({

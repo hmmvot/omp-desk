@@ -198,7 +198,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		replayFromStart: boolean,
 		reclaimInput?: InputReclaim,
 	): Promise<void> {
-		const { window, index, chat } = this.#deps;
+		const { window, index, chat, timeline } = this.#deps;
 		window.adopt(tabId, runtime);
 		this.#watchBroker(tabId, runtime);
 		// The selected view can differ from a surviving writer we just reattached: the window
@@ -223,6 +223,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			// has nothing to replay.
 			...(replayFromStart ? { initialSeq: 0 } : {}),
 			...(reclaimInput === undefined ? {} : { reclaimInput }),
+			onReady: () => timeline?.mark(tabId, "omp ready"),
 		});
 		window.attached(tabId, runtime);
 	}
@@ -324,7 +325,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		// Before anything else, and before the run is measured: a window whose installed package changed under it starts nothing.
 		const refusal = this.#deps.launchRefusal();
 		if (refusal !== null) {
-			timeline?.discard(request.tabId);
+			timeline?.discard(request.tabId, "launch refused");
 			return { state: "not-started", reason: refusal };
 		}
 		const launchKind = timeline?.reached(request.tabId) ?? null;
@@ -370,7 +371,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		diagnostics.begin(request.tabId, "chat-live");
 		diagnostics.begin(request.tabId, "host-control-verified");
 		const notStarted = (reason: string): OmpHostLaunchResult => {
-			timeline?.discard(request.tabId);
+			timeline?.discard(request.tabId, "not started");
 			diagnostics.fail(request.tabId, "broker-launch", reason);
 			diagnostics.notObserved(request.tabId, "resolution", "this launch ended before the launcher reported a resolution measurement");
 			diagnostics.notObserved(request.tabId, "first-paint", "no host was started");
@@ -425,7 +426,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		if ("timings" in outcome) for (const [phase, ms] of Object.entries(outcome.timings)) timeline?.add(request.tabId, phase, ms);
 		const runtime = outcome.runtime;
 		if (runtime === null) {
-			timeline?.discard(request.tabId);
+			timeline?.discard(request.tabId, `${outcome.state} at the broker launch`);
 			// Nothing this window recorded can be a writer: release the reservation so the slot is
 			// available again. An unconfirmed launch keeps it, because a broker may exist.
 			if (outcome.state === "not-started") await this.#deps.brokerSlots?.forget(slot).catch(() => undefined);
@@ -438,6 +439,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			diagnostics.notObserved(request.tabId, "host-control-verified", "the launch produced no confirmed host");
 			return { state: "unconfirmed", reason: outcome.reason };
 		}
+		timeline?.mark(request.tabId, "omp spawned");
 		// The launcher's own measurement of its resolution, not a re-measurement here.
 		if (runtime.resolutionMs === undefined || runtime.binary === null) {
 			diagnostics.notObserved(request.tabId, "resolution", "the launcher reported no resolution measurement for this host");
@@ -449,6 +451,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		}
 		diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · slot ${runtime.identity.slot}` });
 		const conversationAt = Date.now();
+		if (runtime.kind === "chat") timeline?.expectLive(request.tabId);
 		await this.startConversation(request.tabId, runtime, request.sessionFile, false);
 		timeline?.lap(request.tabId, "conversation");
 		timings.conversation = Date.now() - conversationAt;
@@ -474,10 +477,8 @@ export class LocalLauncher implements OmpHostLauncher {
 		await index.setRunIntent(request.tabId, "running");
 		timings.intent = Date.now() - intentAt;
 		timeline?.lap(request.tabId, "run intent");
-		const summary = timeline?.summary(request.tabId) ?? null;
-		if (summary !== null) log.info(`window timing: ${summary.kind} ${request.tabId} running in ${summary.totalMs} ms · ${summary.phases}`);
-		// Without host control nothing reports the second line, so the run ends here and cannot be taken by a later launch of the tab.
-		if (runtime.control === null) timeline?.discard(request.tabId);
+		// Without host control nothing verifies it, so the run ends here (a Chat's is reported once it is live) and cannot be taken by a later launch of the tab.
+		if (runtime.control === null) timeline?.finishWithoutControl(request.tabId);
 		const sessionId = runtime.kind === "chat" && request.sessionFile !== null
 			? (await readSessionFileHeader(request.sessionFile))?.sessionId ?? request.sessionId : request.sessionId;
 		return { state: "running", host: hostHandle(runtime, sessionId), timings };

@@ -211,6 +211,8 @@ export interface RpcSessionOptions {
 	 * that shows why it is read-only.
 	 */
 	reclaimInput?: InputReclaim;
+	/** Told once, when the process's `ready` frame is first seen (diagnostic timing only). */
+	onReady?: () => void;
 	/** Diagnostics sink for soft-limit and registration notes. */
 	log?: Logger;
 	/**
@@ -2495,7 +2497,9 @@ export class RpcSession {
 	#onReady(frame: Record<string, unknown>): void {
 		const versions = frame.supportedProtocolVersions;
 		this.#supportsV2 = Array.isArray(versions) && versions.includes(2);
+		const first = !this.#readySeen;
 		this.#readySeen = true;
+		if (first) this.#options.onReady?.();
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(true);
 	}
 
