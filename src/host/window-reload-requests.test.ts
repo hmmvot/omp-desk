@@ -143,10 +143,11 @@ describe("reload requests between windows", () => {
 		await assert.rejects(postReloadRequest(storage, { to: "holder-b", from: "a b" }), TypeError);
 	});
 
-	it("leaves other kinds of request alone", async () => {
+	it("takes a selection up like any other kind, and removes the evidence once it is answered", async () => {
 		const target = window("holder-b");
 		await postSwitchRequest(storage, { to: "holder-b", from: "holder-a", tabId: "tab:x", incarnation: "g_none", binding: null });
 		await until(() => target.served.length === 1);
-		assert.deepEqual([target.served[0]!.kind, files(".accepted")], ["select", []], "a selection is not taken up");
+		assert.equal(target.served[0]!.kind, "select");
+		await until(() => files(".accepted").length === 0);
 	});
 });

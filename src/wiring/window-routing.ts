@@ -31,9 +31,11 @@ import {
 	RELOAD_ACCEPT_TIMEOUT_MS,
 	REQUEST_ANSWER_TIMEOUT_MS,
 	awaitHandoverAnswer,
+	awaitLaunchAnswer,
 	awaitPendingLaunchAnswer,
 	awaitReloadTakenUp,
 	awaitRequestAnswer,
+	awaitSelectAnswer,
 	pendingKeyOf,
 	planFolderLaunch,
 	planWindowFocus,
@@ -125,6 +127,8 @@ export interface RoutingWindowFacts {
 	packageChangedOnDisk(): boolean;
 	/** Wait until the catalog and the predecessor import have settled. */
 	ensureCatalogReady(): Promise<void>;
+	/** Adopt the newest committed catalog revision into `index` (a request names the run the catalog records, so it reads the catalog afresh first). Rejects when the catalog cannot be read. */
+	refreshCatalog(index: SessionIndex): Promise<void>;
 	/** The processes of this window's Sessions view, `null` while the window is still starting. */
 	sessionProcesses(): Pick<SessionProcesses, "serveStopRequest"> | null;
 }
@@ -484,12 +488,35 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		}
 	}
 
+	/**
+	 * The run a request names, and the editor binding of it (ADR-0056, amendment of 2026-10-21). The holder's own published row is its
+	 * view of the run it drives, so a request is addressed by it when the holder published one; otherwise (an older build, or a holder
+	 * that has not published the row yet) by the run this window's catalog records, read afresh first because a commit another window
+	 * made a moment ago is not adopted here until its watch event arrives. A holder that disagrees refuses with a reason either way.
+	 */
+	async function runToRequest(index: SessionIndex, tabId: string, published: PublishedRow | undefined, tag: string): Promise<{ readonly incarnation: string | null; readonly binding: string | null }> {
+		if (published !== undefined) {
+			const cached = index.get(tabId);
+			const catalogued = cached === null ? null : sessionIncarnation(cached);
+			if (catalogued !== published.incarnation) {
+				deps.log.info(`window request: ${tag}: this window's catalog records ${catalogued ?? "no run"}, the holder published ${published.incarnation}; the request names the holder's`);
+			}
+			return { incarnation: published.incarnation, binding: published.binding };
+		}
+		try {
+			await deps.refreshCatalog(index);
+		} catch (error) {
+			deps.log.warn(`window request: ${tag}: the catalog could not be read afresh: ${messageOf(error)}`);
+		}
+		const entry = index.get(tabId);
+		return { incarnation: entry === null ? null : sessionIncarnation(entry), binding: null };
+	}
+
 	async function requestSessionWindowSwitch(index: SessionIndex, tabId: string | null): Promise<void> {
 		if (tabId === null) return;
 		const startedAt = Date.now();
 		const tag = `select for ${tabId.slice(0, 12)}`;
 		deps.timing("requester: switch started", tabId.slice(0, 12));
-		const entry = index.get(tabId);
 		// A holder that closed or a window that moved since the last heartbeat would otherwise be planned against stale records.
 		try {
 			await deps.registry()?.refresh();
@@ -499,14 +526,16 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		const observed = await index.observeOwnership(tabId);
 		deps.timing("requester: claim re-read", `${Date.now() - startedAt} ms`);
 		const claim = observed.ok ? observed.claim : null;
-		const incarnation = entry === null ? null : sessionIncarnation(entry);
+		const windows = deps.registry()?.windows() ?? [];
+		const holderWindow = claim?.holderId == null ? undefined : windows.find(window => window.holderId === claim.holderId);
+		const { incarnation, binding } = await runToRequest(index, tabId, holderWindow?.rows[tabId], tag);
 		const claimHolderAlive = claim !== null && await holderSeemsAlive(claim, deps.registry());
 		const plan = planWindowSwitch({
 			claim,
 			incarnation,
 			claimHolderAlive,
 			ownHolderId: index.claimHolder.id,
-			windows: deps.registry()?.windows() ?? [],
+			windows,
 		});
 		if (plan.kind === "stale") {
 			deps.log.info(`window request: ${tag}: plan stale (${staleWhy(claim, incarnation, claimHolderAlive, index.claimHolder.id)}) after ${Date.now() - startedAt} ms`);
@@ -514,19 +543,13 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 			deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
 			return;
 		}
-		const holderWindow = (deps.registry()?.windows() ?? []).find(window => window.holderId === plan.holderId);
 		const name = windowName(holderWindow?.label);
 		deps.log.info(`window request: ${tag}: plan ${plan.kind === "manual" ? `manual:${plan.reason}` : "switch"} to window ${plan.holderId.slice(0, 8)} "${holderWindow?.label ?? ""}" (asker ${index.claimHolder.id.slice(0, 8)})`);
 		// The wait is counted from the moment the request is posted, whatever the focus change costs.
 		const postedAt = Date.now();
 		let requestId: string;
 		try {
-			// The binding generation the holder published for this very run (the one the row on screen shows), if any.
-			const published = holderWindow?.rows[tabId];
-			requestId = await postSwitchRequest(index.claimStorageDir, {
-				to: plan.holderId, from: index.claimHolder.id, tabId, incarnation: plan.incarnation,
-				binding: published !== undefined && published.incarnation === plan.incarnation ? published.binding : null,
-			});
+			requestId = await postSwitchRequest(index.claimStorageDir, { to: plan.holderId, from: index.claimHolder.id, tabId, incarnation: plan.incarnation, binding });
 			deps.timing("requester: request posted", `${requestId.slice(0, 8)} ${Date.now() - startedAt} ms after the click`);
 		} catch (error) {
 			deps.warn(`The window holding this session could not be asked to show it: ${messageOf(error)}`);
@@ -536,10 +559,10 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		const delivered = await deliverRequest({
 			label: `select ${requestId.slice(0, 8)} for ${tabId.slice(0, 12)} to window ${plan.holderId.slice(0, 8)}`,
 			postedAt,
-			timeoutMs: REQUEST_ANSWER_TIMEOUT_MS,
+			acceptMs: REQUEST_ANSWER_TIMEOUT_MS,
 			focus: plan.kind === "manual" ? { kind: "manual", reason: plan.reason } : { kind: "switch", uri: plan.uri },
 			withdraw: () => withdrawRequest(index.claimStorageDir, plan.holderId, requestId),
-			awaitAnswer: timeoutMs => awaitRequestAnswer(index.claimStorageDir, plan.holderId, requestId, { timeoutMs, onRefusal: (reason, failed) => { refusal = failed ?? reason; } }),
+			awaitAnswer: () => awaitSelectAnswer(index.claimStorageDir, plan.holderId, requestId, { onRefusal: (reason, failed) => { refusal = failed ?? reason; } }),
 		});
 		if (delivered.kind === "unreadable") {
 			deps.warn(`The answer of the window holding this session could not be read: ${delivered.detail}`);
@@ -562,6 +585,8 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		}
 		if (answer === "timeout") {
 			deps.warn("The window holding this session did not respond, so its tab was not selected. It may be busy or run an older OMP Desk.");
+		} else if (answer === "silent") {
+			deps.warn("The window holding this session took the request but did not report back, so it is not known whether its tab was selected. It may be busy; look at that window, or try again in a moment.");
 		} else if (answer === "refused" || answer === "stale-build") {
 			deps.info(selectRefusalSentence(name, answer === "stale-build" ? "stale-build" : refusal));
 			deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
@@ -597,28 +622,30 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		const observed = await index.observeOwnership(tabId);
 		const claim = observed.ok ? observed.claim : null;
 		const windows = deps.registry()?.windows() ?? [];
+		const holder = claim?.holderId == null ? undefined : windows.find(window => window.holderId === claim.holderId);
+		const published = holder?.rows[tabId];
+		const { incarnation, binding } = await runToRequest(index, tabId, published, `handover for ${tabId.slice(0, 12)}`);
+		const claimHolderAlive = claim !== null && await holderSeemsAlive(claim, deps.registry());
 		const plan = planWindowSwitch({
 			claim,
-			incarnation: sessionIncarnation(entry),
-			claimHolderAlive: claim !== null && await holderSeemsAlive(claim, deps.registry()),
+			incarnation,
+			claimHolderAlive,
 			ownHolderId: index.claimHolder.id,
 			windows,
 		});
 		if (plan.kind === "stale") {
-			deps.log.info(`window request: handover for ${tabId.slice(0, 12)}: plan stale (${staleWhy(claim, sessionIncarnation(entry), claim !== null && await holderSeemsAlive(claim, deps.registry()), index.claimHolder.id)})`);
+			deps.log.info(`window request: handover for ${tabId.slice(0, 12)}: plan stale (${staleWhy(claim, incarnation, claimHolderAlive, index.claimHolder.id)})`);
 			deps.info("The session is not open in another window; click it to open it here.");
 			deps.launcherProvider()?.refreshOwnership(new Set([tabId]));
 			return;
 		}
-		const holder = windows.find(window => window.holderId === plan.holderId);
 		const name = windowName(holder?.label);
 		deps.log.info(`window request: handover for ${tabId.slice(0, 12)}: plan to window ${plan.holderId.slice(0, 8)} "${holder?.label ?? ""}" (asker ${index.claimHolder.id.slice(0, 8)})`);
 		if (holder?.stale === true) {
 			deps.warn(`${name} runs an older OMP Desk than the one installed, so the session was not moved. Reload that window (Developer: Reload Window) and try again.`);
 			return;
 		}
-		const published = holder?.rows[tabId];
-		const status = published !== undefined && published.incarnation === plan.incarnation ? published.status : null;
+		const status = published?.status ?? null;
 		if (status === "starting" || status === "stopping" || status === "restoring") {
 			deps.info(`${name} is busy with this session; try again in a moment.`);
 			return;
@@ -638,10 +665,7 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		const postedAt = Date.now();
 		let requestId: string;
 		try {
-			requestId = await postHandoverRequest(index.claimStorageDir, {
-				to: plan.holderId, from: index.claimHolder.id, tabId, incarnation: plan.incarnation,
-				binding: published !== undefined && published.incarnation === plan.incarnation ? published.binding : null,
-			});
+			requestId = await postHandoverRequest(index.claimStorageDir, { to: plan.holderId, from: index.claimHolder.id, tabId, incarnation: plan.incarnation, binding });
 		} catch (error) {
 			deps.warn(`${name} could not be asked to give up the session: ${messageOf(error)}. Nothing was moved.`);
 			return;
@@ -694,26 +718,28 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 	/**
 	 * The shared half of every request to another window: bring that window forward the way
 	 * `focus` plans (`vscode.openFolder` on its URI, or nothing when the plan is manual) and wait
-	 * for its answer, both started at once. The wait ends at `postedAt + timeoutMs` however the
-	 * focus command behaves (it may never settle), and the request is withdrawn when the wait ends
-	 * without an answer, on a timer armed at the start and on every path that stops waiting, so the
-	 * receiver never acts for a requester that has stopped waiting. A focus command that fails
-	 * ends the wait at once and says so, because the receiver may already have acted on the request.
+	 * for its answer, both started at once. The wait bounds itself (ADR-0056, amendment of 2026-10-21): the request is
+	 * withdrawn at `postedAt + acceptMs` while no window took it up, however the focus command behaves (it may never settle),
+	 * and once the receiver took it up the answer is waited for by its progress. The request is withdrawn on a timer armed at
+	 * the start and on every path that stops waiting without an answer, so the receiver never acts for a requester that has
+	 * stopped waiting (a request already taken up cannot be withdrawn: the receiver stops at the `answerBy` the request
+	 * names). A focus command that fails ends the wait at once and says so, because the receiver may already have acted on
+	 * the request.
 	 */
 	async function deliverRequest(options: {
 		/** Names the request in the timing lines. */
 		readonly label: string;
 		readonly postedAt: number;
-		readonly timeoutMs: number;
+		readonly acceptMs: number;
 		readonly focus: WindowFocusPlan;
 		readonly withdraw: () => Promise<void>;
-		readonly awaitAnswer: (timeoutMs: number) => Promise<RequestAnswer>;
+		readonly awaitAnswer: () => Promise<RequestAnswer>;
 	}): Promise<Delivery> {
-		const deadline = options.postedAt + options.timeoutMs;
+		const deadline = options.postedAt + options.acceptMs;
 		const withdraw = () => options.withdraw().catch(() => undefined);
 		const timer = setTimeout(() => { void withdraw(); }, Math.max(0, deadline - Date.now()));
 		try {
-			const answered = options.awaitAnswer(Math.max(250, deadline - Date.now())).then(
+			const answered = options.awaitAnswer().then(
 				(answer): Delivery => {
 					deps.timing("requester: answer seen", `${options.label} ${answer} ${Date.now() - options.postedAt} ms after posting`);
 					return { kind: "answer", answer, manual: options.focus.kind === "manual" ? options.focus.reason : null };
@@ -736,7 +762,7 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 				})();
 			}
 			const outcome = await Promise.race(racers);
-			if (outcome.kind !== "answer" || outcome.answer === "timeout") await withdraw();
+			if (outcome.kind !== "answer" || outcome.answer === "timeout" || outcome.answer === "silent") await withdraw();
 			deps.log.info(`window request: ${options.label}: ${outcome.kind === "answer" ? outcome.answer : outcome.kind}${outcome.kind === "answer" ? "" : ` (${outcome.detail})`} after ${Date.now() - options.postedAt} ms; ${options.focus.kind === "switch" ? `focused ${options.focus.uri}` : `no window focused (${options.focus.reason})`}`);
 			return outcome;
 		} finally {
@@ -883,18 +909,20 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		}
 		let requestId: string;
 		try {
-			requestId = await postLaunchRequest(index.claimStorageDir, { to: route.holderId, from: index.claimHolder.id, workspace: route.workspace, launch });
+			requestId = await postLaunchRequest(index.claimStorageDir, { to: route.holderId, from: index.claimHolder.id, workspace: route.workspace, launch, ...(answerTimeoutMs === undefined ? {} : { waitMs: answerTimeoutMs }) });
 		} catch (error) {
 			deps.warn(`The window that has this folder open could not be asked to start the session: ${messageOf(error)}. Nothing was started.`);
 			return true;
 		}
+		// A caller that names its own bound owns the whole wait (it runs launches one after another); otherwise the receiver is waited for by its progress.
 		const delivered = await deliverRequest({
 			label: `launch ${requestId.slice(0, 8)}`,
 			postedAt,
-			timeoutMs: answerTimeoutMs ?? LAUNCH_ANSWER_TIMEOUT_MS,
+			acceptMs: answerTimeoutMs ?? LAUNCH_ANSWER_TIMEOUT_MS,
 			focus: planWindowFocus(route.holderId, null, registry.windows()),
 			withdraw: () => withdrawRequest(index.claimStorageDir, route.holderId, requestId),
-			awaitAnswer: timeoutMs => awaitRequestAnswer(index.claimStorageDir, route.holderId, requestId, { timeoutMs }),
+			// The accept bound ends the wait first when nothing took the request up; the total bound only needs to follow it.
+			awaitAnswer: () => awaitLaunchAnswer(index.claimStorageDir, route.holderId, requestId, answerTimeoutMs === undefined ? {} : { acceptTimeoutMs: answerTimeoutMs, progressTimeoutMs: answerTimeoutMs, totalTimeoutMs: answerTimeoutMs + 500 }),
 		});
 		if (delivered.kind === "answer" && delivered.answer === "stale-build") {
 			noteOlderBuildWindow([route.holderId], route.workspace.path);
@@ -915,6 +943,8 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 			deps.warn(`The answer of ${subject} could not be read: ${delivered.detail}. Nothing was started from here; check that window before trying again.`);
 		} else if (delivered.kind === "focus-failed") {
 			deps.warn(`VS Code could not bring ${subject} forward: ${delivered.detail}. Nothing was started from here, but the session may have started there; check that window before trying again.`);
+		} else if (delivered.answer === "silent") {
+			deps.warn(`${subject.charAt(0).toUpperCase()}${subject.slice(1)} took the request but did not report back, so it is not known whether the session was started. Nothing was started from here; check that window before trying again. It may be busy or still loading.`);
 		} else if (delivered.answer === "timeout") {
 			deps.warn(`${subject.charAt(0).toUpperCase()}${subject.slice(1)} did not respond in time. Nothing was started from here; check that window before trying again. It may be busy, still loading, or run an older OMP Desk.`);
 		} else if (delivered.answer === "refused") {
@@ -955,10 +985,10 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		const delivered = await deliverRequest({
 			label: `pending launch ${requestId.slice(0, 8)}`,
 			postedAt,
-			timeoutMs: answerTimeoutMs,
+			acceptMs: answerTimeoutMs,
 			focus: { kind: "switch", uri: vscode.Uri.file(workspace.path).toString() },
 			withdraw: () => withdrawPendingLaunch(index.claimStorageDir, key, requestId),
-			awaitAnswer: timeoutMs => awaitPendingLaunchAnswer(index.claimStorageDir, requestId, { timeoutMs }),
+			awaitAnswer: () => awaitPendingLaunchAnswer(index.claimStorageDir, requestId, { timeoutMs: Math.max(250, postedAt + answerTimeoutMs - Date.now()) }),
 		});
 		// A window that had the project open and was not in the registry yet claimed the launch and refused it as an older build.
 		if (delivered.kind === "answer" && delivered.answer === "stale-build") {
@@ -1059,6 +1089,7 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		}
 		deps.timing("receiver: launch validated", request.id.slice(0, 8));
 		if (!(await serveContext.stillWanted())) return refuse("the requester no longer waits");
+		await serveContext.progress(1);
 		// Nothing is awaited between this last look at this window and the beginning of the launch.
 		if (!hasWorkspace() || !targetExists()) return refuse("the workspace or the target changed while it waited");
 		void start().catch(error => {
@@ -1285,6 +1316,7 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		deps.timing("receiver: claim read", request.id.slice(0, 8));
 		if (!(await serveContext.stillWanted())) return refuse(null, "the requester no longer waits");
 		deps.timing("receiver: requester still waits", request.id.slice(0, 8));
+		await serveContext.progress(1);
 		const held = heldBinding(claim);
 		const state = deps.tab(request.tabId);
 		if (!held.ok) return refuse(held.reason, held.why);
@@ -1298,6 +1330,7 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 			if (!(await deps.selectEditorTab(held.slot))) return refuse("busy", "VS Code did not make the session's tab the active one");
 		}
 		deps.timing("receiver: tab selected", request.id.slice(0, 8));
+		await serveContext.progress(2);
 		const after = heldBinding(await readClaim());
 		if (!after.ok) return refuse(after.reason, `${after.why} (after selecting)`);
 		if (after.slot !== held.slot || after.generation !== held.generation) return refuse("binding-mismatch", "the editor binding changed while the tab was selected");

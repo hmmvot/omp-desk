@@ -14,8 +14,10 @@ import {
 	PENDING_LAUNCH_TTL_MS,
 	REQUEST_TTL_MS,
 	WINDOW_REQUEST_DIRECTORY,
+	awaitLaunchAnswer,
 	awaitPendingLaunchAnswer,
 	awaitRequestAnswer,
+	awaitSelectAnswer,
 	pendingKeyOf,
 	planFolderLaunch,
 	planWindowFocus,
@@ -140,7 +142,7 @@ describe("window requests", () => {
 		assert.deepEqual(late.served, []);
 	});
 
-	it("tells a server that is mid-request that the requester gave up, so it does not act late", async () => {
+	it("tells a server that took the request up that the requester gave up, so it does not act late", async () => {
 		let release!: () => void;
 		const held = new Promise<void>(resolve => { release = resolve; });
 		let wantedAtTheBoundary: boolean | null = null;
@@ -149,12 +151,72 @@ describe("window requests", () => {
 			wantedAtTheBoundary = await context.stillWanted();
 			return wantedAtTheBoundary ? SELECTED : REFUSED;
 		});
-		const id = await post("holder-b");
+		const id = await postSwitchRequest(storage, { to: "holder-b", from: "holder-a", tabId: "tab:1", incarnation: "inc-1", waitMs: 60 });
 		await until(() => target.served.length === 1);
-		assert.equal(await awaitRequestAnswer(storage, "holder-b", id, { timeoutMs: 50, pollMs: 10 }), "timeout", "the requester gives up and withdraws");
+		assert.equal(await awaitSelectAnswer(storage, "holder-b", id, { progressTimeoutMs: 40, totalTimeoutMs: 60, pollMs: 10 }), "silent", "taken up and silent is not the same as never taken up");
 		release();
 		await until(() => wantedAtTheBoundary !== null);
-		assert.equal(wantedAtTheBoundary, false);
+		assert.equal(wantedAtTheBoundary, false, "the request names when its requester stops waiting");
+		await until(() => !fs.existsSync(path.join(directory, `holder-b.${id}.accepted`)));
+	});
+
+	it("takes a select request up on receipt, and waits for a slow holder by its progress", async () => {
+		const id = await post("holder-b");
+		let takenUpWhileServing = false;
+		owner("holder-b", async (_request, context) => {
+			takenUpWhileServing = fs.existsSync(path.join(directory, `holder-b.${id}.accepted`)) && !fs.existsSync(path.join(directory, `holder-b.${id}.request`));
+			// Slower than the accept bound: a holder busy for a few seconds is still working, and says so.
+			for (const done of [1, 2, 3]) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+				await context.progress(done);
+			}
+			return SELECTED;
+		});
+		assert.equal(await awaitSelectAnswer(storage, "holder-b", id, { acceptTimeoutMs: 150, progressTimeoutMs: 180, totalTimeoutMs: 5_000, pollMs: 10 }), "served");
+		assert.equal(takenUpWhileServing, true);
+		await until(() => !fs.existsSync(path.join(directory, `holder-b.${id}.accepted`)));
+	});
+
+	it("answers a refusal of a taken-up select request with its reason, and a request nobody took up as a timeout that withdraws it", async () => {
+		owner("holder-b", async () => ({ ok: false, focused: false, refusal: "busy", check: "run-mismatch" }));
+		const refused = await post("holder-b");
+		const reasons: unknown[] = [];
+		assert.equal(await awaitSelectAnswer(storage, "holder-b", refused, { pollMs: 10, onRefusal: (reason, check) => reasons.push([reason, check]) }), "refused");
+		assert.equal(reasons.length, 1);
+		const asleep = await post("holder-asleep");
+		assert.equal(await awaitSelectAnswer(storage, "holder-asleep", asleep, { acceptTimeoutMs: 80, pollMs: 10 }), "timeout");
+		const late = owner("holder-asleep");
+		await new Promise(resolve => setTimeout(resolve, 150));
+		assert.deepEqual(late.served, [], "a window that wakes later does not act on a request nobody waits for");
+	});
+
+	it("reads an answer of a holder that does not take requests up (an older build) as an answer", async () => {
+		const id = await post("holder-old");
+		const request = path.join(directory, `holder-old.${id}.request`);
+		// An older build serves the file in place, answers, then deletes it.
+		fs.writeFileSync(path.join(directory, `holder-old.${id}.response`), JSON.stringify({ version: 1, id, ok: true, focused: true }));
+		fs.rmSync(request, { force: true });
+		assert.equal(await awaitSelectAnswer(storage, "holder-old", id, { pollMs: 10 }), "served");
+	});
+
+	it("counts an older requester's wait from createdAt, and ignores an answerBy that is not plausible", async () => {
+		const wanted = new Map<string, boolean>();
+		owner("holder-b", async (request, context) => {
+			wanted.set(request.id, await context.stillWanted());
+			return SELECTED;
+		});
+		const wantedBy = async (extra: Record<string, unknown>, ageMs: number): Promise<boolean> => {
+			const id = `req-${wanted.size}`;
+			const createdAt = new Date(Date.now() - ageMs).toISOString();
+			fs.mkdirSync(directory, { recursive: true });
+			fs.writeFileSync(path.join(directory, `holder-b.${id}.request`), JSON.stringify({ version: 1, kind: "select", id, to: "holder-b", from: "holder-a", tabId: "tab:1", incarnation: "inc-1", binding: null, createdAt, ...extra }));
+			await until(() => wanted.has(id));
+			return wanted.get(id)!;
+		};
+		assert.equal(await wantedBy({}, 1_000), true, "within the older requester's short bound");
+		assert.equal(await wantedBy({}, 5_500), false, "an older requester has given up by then (and withdrew the file, which this receiver cannot see)");
+		assert.equal(await wantedBy({ answerBy: new Date(Date.now() + 25_000).toISOString() }, 5_500), true, "a requester that names answerBy is waited for until then");
+		assert.equal(await wantedBy({ answerBy: new Date(Date.now() + 86_400_000).toISOString() }, 5_500), false, "an answerBy beyond the longest wait is not believed");
 	});
 
 	it("withdraws a request on demand, so a slow focus change cannot leave it actionable", async () => {
@@ -313,8 +375,8 @@ describe("window requests", () => {
 			assert.deepEqual(late.served, [], "a window that wakes later does not start a launch nobody waits for");
 		});
 
-		it("is not started once its requester withdrew it, even when the receiver is slow", async () => {
-			const id = await postLaunchRequest(storage, { to: "holder-b", from: "holder-a", workspace: WS, launch: NEW });
+		it("is not started once its requester stopped waiting, even when the receiver took it up and is slow", async () => {
+			const id = await postLaunchRequest(storage, { to: "holder-b", from: "holder-a", workspace: WS, launch: NEW, waitMs: 60 });
 			let wanted: boolean | null = null;
 			const gate = Promise.withResolvers<void>();
 			const target = owner("holder-b", async (_request, context) => {
@@ -323,10 +385,27 @@ describe("window requests", () => {
 				return wanted ? SELECTED : REFUSED;
 			});
 			await until(() => target.served.length === 1);
-			await withdrawRequest(storage, "holder-b", id);
+			assert.equal(await awaitLaunchAnswer(storage, "holder-b", id, { progressTimeoutMs: 40, totalTimeoutMs: 60, pollMs: 10 }), "silent", "a launch that was taken up cannot be withdrawn, so the wait ends as unknown");
 			gate.resolve();
 			await until(() => wanted !== null);
-			assert.equal(wanted, false);
+			assert.equal(wanted, false, "the receiver counts the requester's own answerBy");
+			await until(() => !fs.existsSync(path.join(directory, `holder-b.${id}.accepted`)));
+		});
+
+		it("is taken up on receipt and waited for by its progress, however slow the receiver is", async () => {
+			const id = await postLaunchRequest(storage, { to: "holder-b", from: "holder-a", workspace: WS, launch: NEW });
+			let takenUpWhileServing = false;
+			owner("holder-b", async (_request, context) => {
+				takenUpWhileServing = fs.existsSync(path.join(directory, `holder-b.${id}.accepted`)) && !fs.existsSync(path.join(directory, `holder-b.${id}.request`));
+				for (const done of [1, 2, 3]) {
+					await new Promise(resolve => setTimeout(resolve, 100));
+					await context.progress(done);
+				}
+				return SELECTED;
+			});
+			assert.equal(await awaitLaunchAnswer(storage, "holder-b", id, { acceptTimeoutMs: 150, progressTimeoutMs: 180, totalTimeoutMs: 5_000, pollMs: 10 }), "served");
+			assert.equal(takenUpWhileServing, true, "the request file was renamed before it was served");
+			await until(() => !fs.existsSync(path.join(directory, `holder-b.${id}.accepted`)));
 		});
 
 		it("serves a duplicate delivery of one request once", async () => {

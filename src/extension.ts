@@ -1057,6 +1057,10 @@ function windowRoutingDeps(): WindowRoutingDeps {
     resolveSessionFolders: () => windowState().resolveSessionFolders(),
     packageChangedOnDisk,
     ensureCatalogReady,
+    refreshCatalog: async index => {
+      const folders = windowState().launcherFolders;
+      if (folders !== undefined) await adoptCatalogChanges(index, folders);
+    },
     sessionProcesses: () => windowState().sessionProcesses,
     launcherProvider: () => windowState().launcherProvider,
     sessionsViewVisible: () => windowState().launcherView?.visible === true,

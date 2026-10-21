@@ -23,14 +23,22 @@
  * names a process id. A **reload** request (Reload All Windows) carries no argument: the receiver
  * reloads its own window, so a newly installed build takes effect in every window at once.
  *
- * A stop and a reload are *taken up* before they are answered (the receiver renames the request file to
- * `<holder id>.<request id>.accepted`; a stop rewrites that file with its progress after each row), because the
- * requester must tell a window that never saw the request (a stop may then go through the broker) from one that
- * took it and is working (it must not). A reload is taken up so that a window that reloads cannot read the same
- * request again once its extension host is back:
+ * Every kind but `models` is *taken up* before it is answered (the receiver renames the request file to
+ * `<holder id>.<request id>.accepted`; a stop, a select and a launch rewrite that file with their progress), because the
+ * requester must tell a window that never saw the request (a stop may then go through the broker; a select or launch is
+ * withdrawn and reported as unanswered) from one that took it and is working (a stop must not go through the broker; a
+ * select or launch is waited for by its progress, not by a fixed short bound, since a busy window may stall for seconds
+ * between two steps, ADR-0056 amendment of 2026-10-21). A reload is taken up so that a window that reloads cannot read the
+ * same request again once its extension host is back. A request taken up cannot be withdrawn, so a select or launch says
+ * when its requester stops waiting (`answerBy`) and the receiver does not act after that:
  *
  *   `window-requests/<holder id>.<request id>.accepted` → `{ version, id, done }`
  *   `window-requests/<holder id>.<request id>.response` → `{ version, id, ok, focused, rows: [{ state, reason }] }`
+ *
+ * An older build does not take a select or a launch up: it serves the request file in place and deletes it after answering,
+ * which a requester of this build reads as an answer (or withdraws the request at the accept bound, exactly as an older
+ * requester did); an older requester withdraws at its own, shorter bound, which a receiver of this build counts from
+ * `createdAt` when the request names no `answerBy`.
  *
  * The receiver writes the response and deletes the request; the requester reads the response
  * (and deletes it). A request is dropped once it is older than its kind's lifetime
@@ -71,15 +79,27 @@ export const REQUEST_TTL_MS = 6_000;
 export const LAUNCH_REQUEST_TTL_MS = 11_000;
 /** Request and response files this old are garbage whatever their addressee. */
 export const REQUEST_SWEEP_MS = 120_000;
-/** How long a requester waits for the owner's answer to a select request, from the moment it posts. */
+/**
+ * How long a requester waits for the owner to take a select request up, from the moment it posts. A request nobody took up by
+ * then is withdrawn (ADR-0056, amendment of 2026-10-21). Once taken up, the owner is working and the wait follows its progress
+ * ({@link SELECT_PROGRESS_TIMEOUT_MS}, {@link SELECT_TOTAL_TIMEOUT_MS}). It is also the bound an older requester, which has no take-up
+ * and no `answerBy`, waits for the answer in all.
+ */
 export const REQUEST_ANSWER_TIMEOUT_MS = 5_000;
 /**
- * How long a requester waits for a window to accept a launch, from the moment it posts. The
- * receiver answers on admission (it has validated the request and begun the launch), not when
- * OMP is ready, so a normal answer takes a few hundred milliseconds; a window that is still
- * loading may take seconds.
+ * How long a requester waits for a window to take a launch up, from the moment it posts. The receiver takes it up as soon as its
+ * request watch sees it and answers on admission (it has validated the request and begun the launch), not when OMP is ready, so a
+ * normal answer takes a few hundred milliseconds; a window that is still loading may take seconds. It is also the bound an older
+ * requester waits for the answer in all.
  */
 export const LAUNCH_ANSWER_TIMEOUT_MS = 10_000;
+/** How long a requester waits, after a window took a select request up, for it to show progress or answer; each change of its progress file restarts the count. */
+export const SELECT_PROGRESS_TIMEOUT_MS = 15_000;
+/** The longest a requester waits for one select answer in all, from the post, however steadily the owner shows progress. */
+export const SELECT_TOTAL_TIMEOUT_MS = 30_000;
+/** The launch counterparts of {@link SELECT_PROGRESS_TIMEOUT_MS} and {@link SELECT_TOTAL_TIMEOUT_MS}: a window that took a launch up may still be waiting for its own catalog and folders. */
+export const LAUNCH_PROGRESS_TIMEOUT_MS = 30_000;
+export const LAUNCH_TOTAL_TIMEOUT_MS = 60_000;
 /**
  * A stop request nobody took up this long after it was posted is dropped by its receiver. The
  * requester gives up on acceptance after {@link STOP_ACCEPT_TIMEOUT_MS} and withdraws it, so this only
@@ -163,6 +183,12 @@ interface RequestBase {
 	readonly to: string;
 	readonly from: string;
 	readonly createdAt: string;
+	/**
+	 * Select and launch requests only (ADR-0056, amendment of 2026-10-21): the moment this requester stops waiting for the answer, so a
+	 * receiver that took the request up does not act for a requester that is gone. A request of an older requester has none; the receiver
+	 * then counts the older, shorter wait from `createdAt` ({@link REQUEST_ANSWER_TIMEOUT_MS}, {@link LAUNCH_ANSWER_TIMEOUT_MS}).
+	 */
+	readonly answerBy?: string;
 }
 
 /** One request to select a session's tab in the window that holds it. */
@@ -306,14 +332,21 @@ export const isSelectCheck = (value: unknown): value is SelectCheck => SELECT_CH
 
 /** What `serve` may ask while it works. */
 export interface ServeContext {
-	/** `false` once the request was withdrawn or expired: the requester no longer wants the tab selected. A stop that was taken up cannot be withdrawn: it is `false` only once this window shuts down. */
+	/**
+	 * `false` once the requester no longer wants the work: the request was withdrawn or expired (a request that is not taken up), or, for a select
+	 * or launch that was taken up, the moment the requester said it stops waiting (`answerBy`) has passed. A stop, a reload and a handover that were
+	 * taken up cannot be withdrawn: `false` only once this window shuts down.
+	 */
 	stillWanted(): Promise<boolean>;
-	/** A stop request's progress: `done` rows are finished. The requester measures silence from the last change. Nothing for any other kind. */
+	/** A taken-up request's progress: a stop's `done` rows, a select's or launch's steps finished. The requester measures silence from the last change. Nothing for any other kind. */
 	progress(done: number): Promise<void>;
 }
 
-/** How the requester's wait ended. */
-export type RequestAnswer = "served" | "unfocused" | "refused" | "stale-build" | "timeout";
+/**
+ * How the requester's wait ended. `timeout`: the window never took the request up (it was withdrawn here, or it vanished unanswered): nothing was done
+ * there. `silent`: the window took the request up and did not answer in time, or it is not known whether it did: it may still act.
+ */
+export type RequestAnswer = "served" | "unfocused" | "refused" | "stale-build" | "timeout" | "silent";
 
 function directoryOf(storageDir: string): string {
 	return path.join(path.resolve(storageDir), WINDOW_REQUEST_DIRECTORY);
@@ -369,6 +402,14 @@ function parseStopRows(value: unknown): readonly RowIdentity[] | null {
 	return rows;
 }
 
+/** The `answerBy` of a select or launch request, or nothing when the request has none or it is not a plausible moment (the older, shorter wait then applies). */
+function parseAnswerBy(value: unknown, createdAt: string): { readonly answerBy: string } | Record<string, never> {
+	if (typeof value !== "string" || value.length > 40) return {};
+	const at = Date.parse(value);
+	const created = Date.parse(createdAt);
+	return Number.isFinite(at) && at >= created && at - created <= LAUNCH_TOTAL_TIMEOUT_MS + FUTURE_SKEW_MS ? { answerBy: value } : {};
+}
+
 function parseRequest(text: string, fileTo: string, fileId: string): WindowRequest | null {
 	let parsed: unknown;
 	try {
@@ -378,14 +419,14 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 	}
 	if (typeof parsed !== "object" || parsed === null) return null;
 	// Every field is checked one by one below; nothing of this shape is trusted before that.
-	const { version, kind, id, to, from, tabId, incarnation, binding, createdAt, launch, workspace, rows } = parsed as Record<string, unknown>;
+	const { version, kind, id, to, from, tabId, incarnation, binding, createdAt, launch, workspace, rows, answerBy } = parsed as Record<string, unknown>;
 	if (version !== VERSION || id !== fileId || to !== fileTo) return null;
 	if (typeof from !== "string" || !ID_RE.test(from)) return null;
 	if (typeof createdAt !== "string" || createdAt.length > 40 || !Number.isFinite(Date.parse(createdAt))) return null;
 	if (kind === "launch") {
 		const action = parseLaunch(launch);
 		const target = parseWorkspace(workspace);
-		return action === null || target === null ? null : { kind, version: VERSION, id, to, from, createdAt, workspace: target, launch: action };
+		return action === null || target === null ? null : { kind, version: VERSION, id, to, from, createdAt, ...parseAnswerBy(answerBy, createdAt), workspace: target, launch: action };
 	}
 	if (kind === "reload" || kind === "models") return { kind, version: VERSION, id, to, from, createdAt };
 	if (kind === "stop") {
@@ -396,7 +437,7 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 	if (typeof tabId !== "string" || tabId.length === 0 || tabId.length > MAX_TAB_ID) return null;
 	if (typeof incarnation !== "string" || !INCARNATION_RE.test(incarnation)) return null;
 	if (binding !== null && !isBinding(binding)) return null;
-	return { kind, version: VERSION, id, to, from, tabId, incarnation, binding, createdAt };
+	return { kind, version: VERSION, id, to, from, tabId, incarnation, binding, createdAt, ...(kind === "select" ? parseAnswerBy(answerBy, createdAt) : {}) };
 }
 
 /** The outcome in `text`, or `null` unless it is a well-formed answer to request `id`. */
@@ -460,7 +501,7 @@ function parseStopResponse(text: string, id: string, count: number): readonly St
  */
 export async function postSwitchRequest(
 	storageDir: string,
-	request: { readonly to: string; readonly from: string; readonly tabId: string; readonly incarnation: string; readonly binding?: string | null },
+	request: { readonly to: string; readonly from: string; readonly tabId: string; readonly incarnation: string; readonly binding?: string | null; readonly waitMs?: number },
 	now: () => number = Date.now,
 ): Promise<string> {
 	if (!ID_RE.test(request.to) || !ID_RE.test(request.from)) throw new TypeError("a window request needs holder ids of letters, digits and dashes");
@@ -468,6 +509,7 @@ export async function postSwitchRequest(
 	if (request.binding != null && !isBinding(request.binding)) throw new TypeError("a window request names a binding as letters, digits, dots and dashes");
 	if (request.tabId.length === 0 || request.tabId.length > MAX_TAB_ID) throw new TypeError("a window request needs a tab id of at most 200 characters");
 	const id = randomUUID();
+	const postedAt = now();
 	const record: SwitchRequest = {
 		kind: "select",
 		version: VERSION,
@@ -477,7 +519,8 @@ export async function postSwitchRequest(
 		tabId: request.tabId,
 		incarnation: request.incarnation,
 		binding: request.binding ?? null,
-		createdAt: new Date(now()).toISOString(),
+		createdAt: new Date(postedAt).toISOString(),
+		answerBy: new Date(postedAt + (request.waitMs ?? SELECT_TOTAL_TIMEOUT_MS)).toISOString(),
 	};
 	await writeRequest(storageDir, record, now);
 	return id;
@@ -489,20 +532,22 @@ export async function postSwitchRequest(
  */
 export async function postLaunchRequest(
 	storageDir: string,
-	request: { readonly to: string; readonly from: string; readonly workspace: LaunchWorkspace; readonly launch: LaunchAction },
+	request: { readonly to: string; readonly from: string; readonly workspace: LaunchWorkspace; readonly launch: LaunchAction; readonly waitMs?: number },
 	now: () => number = Date.now,
 ): Promise<string> {
 	if (!ID_RE.test(request.to) || !ID_RE.test(request.from)) throw new TypeError("a window request needs holder ids of letters, digits and dashes");
 	if (parseLaunch(request.launch) === null) throw new TypeError("a launch request needs a folder id or a tab id and a known verb");
 	if (parseWorkspace(request.workspace) === null) throw new TypeError("a launch request needs the folder the receiving window must have open");
 	const id = randomUUID();
+	const postedAt = now();
 	const record: LaunchRequest = {
 		kind: "launch",
 		version: VERSION,
 		id,
 		to: request.to,
 		from: request.from,
-		createdAt: new Date(now()).toISOString(),
+		createdAt: new Date(postedAt).toISOString(),
+		answerBy: new Date(postedAt + (request.waitMs ?? LAUNCH_TOTAL_TIMEOUT_MS)).toISOString(),
 		workspace: request.workspace,
 		launch: request.launch,
 	};
@@ -983,6 +1028,69 @@ export async function awaitHandoverAnswer(
 	}
 }
 
+/** What bounds {@link awaitSelectAnswer} and {@link awaitLaunchAnswer}; every field defaults to the module's constant of the kind and exists for tests. */
+export interface ServedWaitOptions {
+	readonly acceptTimeoutMs?: number;
+	readonly withdrawTimeoutMs?: number;
+	readonly progressTimeoutMs?: number;
+	readonly totalTimeoutMs?: number;
+	readonly stallGapMs?: number;
+	readonly pollMs?: number;
+	readonly now?: () => number;
+	/** Told the reason and failed check a refusing answer carried (either may be absent), before the wait returns `"refused"` (or `"stale-build"`). */
+	readonly onRefusal?: (reason: RefusalReason | undefined, check: SelectCheck | undefined) => void;
+}
+
+/** A select or launch answer as the taken-up wait reads it from the response file. */
+type ServedAnswer =
+	| { readonly kind: "served"; readonly focused: boolean }
+	| { readonly kind: "refused"; readonly refusal: RefusalReason | undefined; readonly check: SelectCheck | undefined };
+
+/**
+ * The wait for a select or launch answer (ADR-0056, amendment of 2026-10-21): the taken-up state machine of {@link awaitTakenUpAnswer} with
+ * the answer vocabulary of {@link RequestAnswer}. Before the receiver takes the request up the requester owns it and withdraws it at the
+ * accept bound (`timeout`: nothing was done there). Once it is taken up the receiver is working, and the wait ends with its answer, or as
+ * `silent` once its progress file has not changed for the progress bound, or the total bound has passed. A response that is not a well-formed
+ * answer is deleted and ignored; one that was seen and could not be used ends the wait as `silent`, never as "nothing was done".
+ */
+async function awaitServedAnswer(
+	storageDir: string,
+	to: string,
+	id: string,
+	defaults: { readonly acceptMs: number; readonly progressMs: number; readonly totalMs: number },
+	options: ServedWaitOptions,
+): Promise<RequestAnswer> {
+	const answer = await awaitTakenUpAnswer<ServedAnswer>(storageDir, to, id, {
+		acceptMs: options.acceptTimeoutMs ?? defaults.acceptMs,
+		withdrawMs: options.withdrawTimeoutMs ?? STOP_WITHDRAW_TIMEOUT_MS,
+		progressMs: options.progressTimeoutMs ?? defaults.progressMs,
+		totalMs: options.totalTimeoutMs ?? defaults.totalMs,
+		stallMs: options.stallGapMs ?? STOP_STALL_GAP_MS,
+	}, options, MAX_RESPONSE_BYTES, text => {
+		const outcome = parseResponse(text, id);
+		if (outcome === null) return null;
+		return outcome.ok ? { kind: "served", focused: outcome.focused } : { kind: "refused", refusal: outcome.refusal, check: outcome.check };
+	});
+	switch (answer.kind) {
+		case "not-accepted": return "timeout";
+		case "silent": return "silent";
+		case "served": return answer.focused ? "served" : "unfocused";
+		case "refused":
+			options.onRefusal?.(answer.refusal, answer.check);
+			return answer.refusal === "stale-build" ? "stale-build" : "refused";
+	}
+}
+
+/** Wait for the answer to select request `id`: see {@link awaitServedAnswer}. Never throws except on an unreadable directory. */
+export async function awaitSelectAnswer(storageDir: string, to: string, id: string, options: ServedWaitOptions = {}): Promise<RequestAnswer> {
+	return await awaitServedAnswer(storageDir, to, id, { acceptMs: REQUEST_ANSWER_TIMEOUT_MS, progressMs: SELECT_PROGRESS_TIMEOUT_MS, totalMs: SELECT_TOTAL_TIMEOUT_MS }, options);
+}
+
+/** Wait for the answer to launch request `id`: see {@link awaitServedAnswer}. */
+export async function awaitLaunchAnswer(storageDir: string, to: string, id: string, options: ServedWaitOptions = {}): Promise<RequestAnswer> {
+	return await awaitServedAnswer(storageDir, to, id, { acceptMs: LAUNCH_ANSWER_TIMEOUT_MS, progressMs: LAUNCH_PROGRESS_TIMEOUT_MS, totalMs: LAUNCH_TOTAL_TIMEOUT_MS }, options);
+}
+
 /**
  * What one window answered for one row of {@link askWindowToStop}: a receiver's answer, or why there is none.
  * `not-accepted`: the window never took the request up (nothing was done there). `silent`: it is not known whether
@@ -1112,7 +1220,7 @@ export function startRequestWatch(
 				return;
 			}
 			const acceptedFile = path.join(directory, `${request.to}.${request.id}${ACCEPTED_SUFFIX}`);
-			const takenUp = request.kind === "stop" || request.kind === "reload" || request.kind === "handover";
+			const takenUp = request.kind !== "models";
 			if (takenUp) {
 				// Take the request up: one atomic rename, so the requester's delete and this claim cannot both win. A request
 				// the requester already withdrew is gone, and nothing is done for it.
@@ -1125,8 +1233,17 @@ export function startRequestWatch(
 			}
 			const stillWanted = async (): Promise<boolean> => {
 				if (disposed) return false;
-				// A stop or a reload that was taken up cannot be withdrawn (the user already confirmed the stop; the reload is the very act asked for).
-				if (takenUp) return true;
+				// A stop, a reload and a handover that were taken up cannot be withdrawn (the user already confirmed the stop; the reload and the
+				// handover are the very act asked for).
+				if (takenUp && request.kind !== "select" && request.kind !== "launch") return true;
+				// A select or launch that was taken up cannot be withdrawn either, so the requester says when it stops waiting (`answerBy`); a
+				// request of an older requester, which withdraws its file at its older, shorter bound, is counted from `createdAt`.
+				if (request.kind === "select" || request.kind === "launch") {
+					const until = request.answerBy !== undefined
+						? Date.parse(request.answerBy)
+						: Date.parse(request.createdAt) + (request.kind === "select" ? REQUEST_ANSWER_TIMEOUT_MS : LAUNCH_ANSWER_TIMEOUT_MS);
+					return now() <= until;
+				}
 				if (now() - Date.parse(request.createdAt) > requestTtlMs(request)) return false;
 				try {
 					return (await fsp.stat(file)).isFile();
@@ -1135,7 +1252,7 @@ export function startRequestWatch(
 				}
 			};
 			const progress = async (done: number): Promise<void> => {
-				if (request.kind !== "stop" || disposed) return;
+				if (!takenUp || request.kind === "reload" || request.kind === "handover" || disposed) return;
 				await replaceFileAtomic(acceptedFile, `${JSON.stringify({ version: VERSION, id: request.id, done })}\n`).catch(() => {});
 			};
 			let outcome: ServeOutcome = { ok: false, focused: false };

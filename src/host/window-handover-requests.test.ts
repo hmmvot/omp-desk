@@ -20,6 +20,7 @@ import {
 	WINDOW_REQUEST_DIRECTORY,
 	awaitHandoverAnswer,
 	awaitRequestAnswer,
+	awaitSelectAnswer,
 	postHandoverRequest,
 	postSwitchRequest,
 	requestTtlMs,
@@ -288,13 +289,13 @@ describe("handover requests between windows", () => {
 		assert.equal(await awaitRequestAnswer(storage, "holder-b", id, { timeoutMs: 5_000, pollMs: 20 }), "refused");
 	});
 
-	it("still serves a select request without taking it up", async () => {
+	it("takes a select request up like any other kind, and leaves no evidence of it after the answer", async () => {
 		const kinds: string[] = [];
 		startWatch("holder-b", kinds);
 		const id = await postSwitchRequest(storage, { to: "holder-b", from: "holder-a", tabId: TAB, incarnation: INCARNATION, binding: null });
-		assert.equal(await awaitRequestAnswer(storage, "holder-b", id, { timeoutMs: 5_000, pollMs: 20 }), "served");
+		assert.equal(await awaitSelectAnswer(storage, "holder-b", id, { pollMs: 20 }), "served");
 		assert.deepEqual(kinds, ["select"]);
-		assert.deepEqual(files(".accepted"), [], "a select request is not taken up");
+		assert.deepEqual(files(".accepted"), [], "the accepted file is removed once the response is written");
 	});
 
 	function startWatch(holderId: string, kinds: string[]): void {

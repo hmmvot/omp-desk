@@ -147,6 +147,9 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		handOver: (async () => ({ status: "moved" })) as () => Promise<{ status: string; code?: string }>,
 		activity: new Map<string, string>(),
 		viewVisible: false,
+		catalogRefreshes: 0,
+		/** Runs when the routing re-reads the catalog: a test changes what the index records, as another window's commit would. */
+		afterCatalogRefresh: null as (() => void) | null,
 		listed: [] as Array<{ item: { state: string; tabId: string }; folder: string }>,
 	};
 	const registry: FakeRegistry = {
@@ -203,6 +206,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		resolveSessionFolders: () => state.sessionFolders(),
 		packageChangedOnDisk: () => state.packageChanged,
 		ensureCatalogReady: () => state.catalogReady(),
+		refreshCatalog: async () => { state.catalogRefreshes++; state.afterCatalogRefresh?.(); },
 		sessionProcesses: () => state.processes as never,
 		launcherProvider: () => ({
 			lastActivityOf: tabId => state.activity.get(tabId) ?? null,
@@ -463,6 +467,17 @@ describe("switching to the window that holds a session", () => {
 		assert.deepEqual(w.served.flatMap(served => served.kind === "select" ? [[served.tabId, served.incarnation]] : []), [[TAB, "gen-1_none"]]);
 		assert.deepEqual([w.informed, w.warnings], [[], []], "a switch that works is silent");
 		assert.equal(w.released.length, 1, "the selection goes back to this window's own session");
+	});
+
+	it("names the run and binding the holder published, not the run this window's catalog records", async () => {
+		const target = URI.file("C:/omp-vscode/omp-vscode.code-workspace").toString();
+		const row = { status: "waiting", incarnation: "gen-9_none", binding: `${"7".repeat(32)}.2`, lastActivityAt: null } as const;
+		const w = await world([{ holderId: "owner-window", uri: target, pid: 4242, serve: { ok: true, focused: true }, rows: { [TAB]: row } }]);
+		w.state.entries.set(TAB, { tabId: TAB, cwd: FOLDER, ownership: { ownerGeneration: "gen-1" }, host: null });
+		w.state.claim = { verifiable: true, holderId: "owner-window", pid: 4242, ownerGeneration: "gen-1", windowUri: target };
+		await w.routing.switchToWindow(w.index, TAB);
+		assert.deepEqual(w.served.flatMap(served => served.kind === "select" ? [[served.incarnation, served.binding]] : []), [["gen-9_none", row.binding]]);
+		assert.equal(w.state.catalogRefreshes, 0, "the holder's own row is not second-guessed by a catalog read");
 	});
 
 	it("explains why, and does not try to open anything, when the owner has no window identity", async () => {
@@ -1311,11 +1326,18 @@ describe("moving a live session to this window (ADR-0080)", () => {
 			});
 		}
 
-		it("ignores a published status of another run of the session, and posts without a binding", async () => {
-			const w = await asking({ ok: true, focused: false }, { rows: { [TAB]: { status: "starting", incarnation: "gen-0_other", binding: "none", lastActivityAt: null } } });
+		it("names the run the holder published, with its binding, even when this window's catalog records another run", async () => {
+			const w = await asking({ ok: true, focused: false }, { rows: { [TAB]: { status: "waiting", incarnation: "gen-0_other", binding: "none", lastActivityAt: null } } });
 			await moveHere(w);
-			assert.deepEqual(posted(w).map(request => request.binding), [null]);
-			assert.equal(w.opened.length, 1);
+			assert.deepEqual(posted(w).map(request => [request.incarnation, request.binding]), [["gen-0_other", "none"]]);
+			assert.equal(w.state.catalogRefreshes, 0, "a published row is the holder's own view: the catalog is not read for it");
+		});
+
+		it("reads the catalog afresh and names the run it records now when the holder published no row", async () => {
+			const w = await asking({ ok: true, focused: false }, { rows: {} });
+			await moveHere(w);
+			assert.equal(w.state.catalogRefreshes, 1);
+			assert.deepEqual(posted(w).map(request => [request.incarnation, request.binding]), [[INCARNATION, null]]);
 		});
 
 		describe("a working or questioning session", () => {
