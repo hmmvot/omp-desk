@@ -142,6 +142,16 @@
           "default": true,
           "description": "Show a closed ```html block of an assistant reply in Chat as a live page (Page | Source toggle, Copy) instead of code, and tell the model in Chat sessions that it may write one (one short paragraph, about 240 tokens, added to the system prompt; subagents and Terminal sessions are unchanged). The page runs in a sandboxed frame served from a loopback address of this window, with no network, no storage and no access to Chat, VS Code or your files; it can read the theme as CSS variables. Turn it off and every `html` block stays code and the model is told nothing. The prompt applies to sessions started or resumed afterwards; a change of the display reaches open Chats at once, but turning it on needs a window reload to start the page server for Chats that were already open."
         },
+        "ompDesk.chatSendWith": {
+          "type": "string",
+          "enum": ["enter", "shiftEnter"],
+          "enumDescriptions": [
+            "Enter sends the message (steers while a turn runs) and Shift+Enter inserts a newline.",
+            "Shift+Enter sends the message (Alt+Shift+Enter queues a follow-up while a turn runs) and Enter inserts a newline."
+          ],
+          "default": "enter",
+          "description": "Which key sends a message in Chat. `enter`: Enter sends and Shift+Enter inserts a newline. `shiftEnter`: Shift+Enter sends and Enter inserts a newline. It covers every message box that sends on Enter (the composer, a side question's follow-up row, the /review instructions box and an ask's \"Other\" field). Ctrl+Enter sends in both modes, an open `/` or `@` list still takes a plain Enter to accept a row, and Enter during an IME composition never sends. Applies at once to open Chats."
+        },
         "ompDesk.executablePath": {
           "type": "string",
           "default": "",

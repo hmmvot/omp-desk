@@ -15,6 +15,8 @@ import { chatWritable } from "../lib/chat-client";
 import type { BtwClient, BtwView } from "../lib/btw-client";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { requestPanelAction } from "../lib/panel-actions";
+import { useSendWith } from "../lib/send-with";
+import { isSendChord, SEND_KEY_LABELS } from "../../chat/send-with";
 import { CopyButton } from "./CopyButton";
 import { Markdown } from "./Markdown";
 import { PacedMarkdown } from "./PacedMarkdown";
@@ -166,6 +168,7 @@ function FollowUp({ btw, recordId, disabled, why }: { btw: BtwClient; recordId: 
 	const [text, setText] = useState("");
 	const [sending, setSending] = useState(false);
 	const mounted = useRef(true);
+	const sendWith = useSendWith();
 	useEffect(() => () => { mounted.current = false; }, []);
 	const submit = async (): Promise<void> => {
 		const question = text.trim();
@@ -182,11 +185,11 @@ function FollowUp({ btw, recordId, disabled, why }: { btw: BtwClient; recordId: 
 				placeholder="Ask a follow-up…" spellCheck={false}
 				onChange={event => setText(event.target.value)}
 				onKeyDown={event => {
-					if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return;
+					if (!isSendChord(event, sendWith) || event.nativeEvent.isComposing || event.keyCode === 229) return;
 					event.preventDefault();
 					void submit();
 				}} />
-			<button type="button" className="omp-btw-send" disabled={disabled || sending || text.trim().length === 0} aria-label="Send the follow-up" title={why ?? "Send the follow-up (Enter)"} onClick={() => void submit()}>
+			<button type="button" className="omp-btw-send" disabled={disabled || sending || text.trim().length === 0} aria-label="Send the follow-up" title={why ?? `Send the follow-up (${SEND_KEY_LABELS[sendWith].send})`} onClick={() => void submit()}>
 				<span className="codicon codicon-send" aria-hidden="true" />
 			</button>
 		</div>

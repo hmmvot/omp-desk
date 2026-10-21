@@ -190,6 +190,8 @@ describe("parseChatHostMessage", () => {
 			bad({ key: "Alt+\nT" }),
 			bad({ key: "" }),
 			bad({ conflicts: [{ by: "x", command: "y" }, { by: "x", command: "y" }, { by: "x", command: "y" }, { by: "x", command: "y" }] }),
+		assert.deepEqual(parseChatHostMessage({ ...preferences, sendWith: "shiftEnter" }), { ...preferences, sendWith: "shiftEnter" }, "the send-key setting rides along");
+		assert.equal(parseChatHostMessage({ ...preferences, sendWith: "ctrlEnter" }), null);
 			bad({ conflicts: [{ by: 3, command: "y" }] }),
 			bad({ conflicts: [{ by: "x", command: "y\u001b" }] }),
 			bad({ more: -1 }),

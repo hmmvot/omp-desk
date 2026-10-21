@@ -3,6 +3,8 @@ import { guestTransport } from "../bridge";
 import { folderName, shortAge } from "../lib/empty-state";
 import { useKeyHint } from "../lib/key-hints-store";
 import { useRecentSessions } from "../lib/recent-sessions";
+import { useSendWith } from "../lib/send-with";
+import { SEND_KEY_LABELS } from "../../chat/send-with";
 import type { EmptyStateKeyCommand } from "../../shared/key-hints";
 
 /** One Desk command's key as the user effectively has it: a `<kbd>`, `none` when removed, and a warning button when another binding may take it. */
@@ -49,6 +51,7 @@ export function EmptyState({ cwd, model, thinkingLevel }: {
 	thinkingLevel?: string | null;
 }): ReactNode {
 	const recents = useRecentSessions(cwd);
+	const sendWith = useSendWith();
 	const modelName = model === null || model === undefined ? null : model.name ?? model.id;
 	const setting = [modelName, thinkingLevel].filter((part): part is string => typeof part === "string" && part.length > 0).join(" · ");
 	const now = Date.now();
@@ -69,8 +72,8 @@ export function EmptyState({ cwd, model, thinkingLevel }: {
 						<Hint keys={<CommandKey command="ompDesk.searchPromptHistory" />}>search prompts</Hint>
 					</Group>
 					<Group title="While the agent works">
-						<Hint keys={<kbd>Enter</kbd>}>steer</Hint>
-						<Hint keys={<kbd>Alt+Enter</kbd>}>queue</Hint>
+						<Hint keys={<kbd>{SEND_KEY_LABELS[sendWith].send}</kbd>}>steer</Hint>
+						<Hint keys={<kbd>{SEND_KEY_LABELS[sendWith].queue}</kbd>}>queue</Hint>
 						<Hint keys={<kbd>Alt+↑</kbd>}>take a queued message back</Hint>
 						<Hint keys={<CommandKey command="ompDesk.stopTurn" />}>stop</Hint>
 					</Group>

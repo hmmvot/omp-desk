@@ -42,6 +42,7 @@
 // runner, which does not resolve extensionless specifiers, and it must stay free of host code.
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { isToolsMode, type ToolsMode } from "../chat/tools-mode.ts";
+import { isChatSendWith, type ChatSendWith } from "../chat/send-with.ts";
 import type { ClearDeferrable } from "../chat/clear.ts";
 import { parseChatMessage, parseChatEntry, type AssistantMessage, type ChatEntry } from "../chat/messages.ts";
 import { MAX_AGENT_IDENTITIES, parseAgentRoster, parseAgentActivity, parseSubagentFrame } from "../chat/agents.ts";
@@ -224,6 +225,8 @@ export interface ChatDisplayPreferences {
 	toolIntent?: boolean;
 	/** The `ompDesk.chatHtmlPages` setting: a closed `html` fence of a reply is shown as a sandboxed page; absent = on (a host that does not say has not been asked). */
 	htmlPages?: boolean;
+	/** The `ompDesk.chatSendWith` setting: which Enter chord sends in Chat's inputs, `enter` (Enter sends, Shift+Enter is a newline) or `shiftEnter` (the reverse); absent = `enter`. */
+	sendWith?: ChatSendWith;
 }
 export interface ChatDisplayPreferencesMessage extends ChatDisplayPreferences {
 	type: "omp:chat-display-preferences";
@@ -1210,7 +1213,7 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);
 			if (epoch === null || (value.toolCallDetail !== "overview" && value.toolCallDetail !== "detailed") || typeof value.accessibilitySupport !== "boolean") return null;
-			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolIntent !== undefined && typeof value.toolIntent !== "boolean") || (value.htmlPages !== undefined && typeof value.htmlPages !== "boolean") || (value.toolsMode !== undefined && !isToolsMode(value.toolsMode))) return null;
+			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolIntent !== undefined && typeof value.toolIntent !== "boolean") || (value.htmlPages !== undefined && typeof value.htmlPages !== "boolean") || (value.sendWith !== undefined && !isChatSendWith(value.sendWith)) || (value.toolsMode !== undefined && !isToolsMode(value.toolsMode))) return null;
 			return {
 				type: value.type, epoch, toolCallDetail: value.toolCallDetail, accessibilitySupport: value.accessibilitySupport,
 				...(value.thinkingExpanded === undefined ? {} : { thinkingExpanded: value.thinkingExpanded }),
@@ -1247,6 +1250,7 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 			if (value.readOnlyReason !== null && !isText(value.readOnlyReason, 2_000)) return null;
 			const exitReason = value.exitReason === undefined ? undefined : parseChatExitReason(value.exitReason);
 			if (exitReason === null) return null;
+				...(value.sendWith === undefined ? {} : { sendWith: value.sendWith }),
 			return {
 				type: "omp:chat-state",
 				epoch,

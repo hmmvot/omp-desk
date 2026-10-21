@@ -17,6 +17,8 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChatAskAnswer, ChatAskQuestion, ChatUiRequest } from "../../chat/model";
+import { useSendWith } from "../lib/send-with";
+import { isSendChord } from "../../chat/send-with";
 import { Markdown } from "./Markdown";
 
 type AskRequest = Extract<ChatUiRequest, { method: "ask" }>;
@@ -141,9 +143,10 @@ interface CustomEditorProps {
 	onCommit(draft: string): void;
 }
 
-/** The "Other" text entry: typing updates the answer; Enter/Use answer advances, Shift+Enter inserts a newline. */
+/** The "Other" text entry: typing updates the answer; the send key of `ompDesk.chatSendWith` (Enter by default) / Use answer advances, the other Enter chord inserts a newline. */
 function CustomEditor({ draft, onChange, onCommit }: CustomEditorProps): ReactNode {
 	const ref = useRef<HTMLTextAreaElement | null>(null);
+	const sendWith = useSendWith();
 	useEffect(() => {
 		ref.current?.focus();
 	}, []);
@@ -158,7 +161,7 @@ function CustomEditor({ draft, onChange, onCommit }: CustomEditorProps): ReactNo
 				spellCheck={false}
 				onChange={event => onChange(event.target.value)}
 				onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-					if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+					if (isSendChord(event, sendWith) && !event.nativeEvent.isComposing && event.keyCode !== 229) {
 						event.preventDefault();
 						onCommit(draft);
 					}

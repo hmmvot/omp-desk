@@ -74,6 +74,8 @@ import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
 import { findQuoteRuns, isQuoteLineAt } from "../lib/quote-lines";
 import { quoteKeyEdit } from "../lib/quote-edits";
+import { useSendWith } from "../lib/send-with";
+import { isSendChord, SEND_KEY_LABELS, type ChatSendWith } from "../../chat/send-with";
 import { removalRange } from "../lib/quote-draft";
 import { provideQuoteSink } from "../lib/quote-sink";
 import { quoteSelectionIntoDraft } from "../lib/quote-selection";
@@ -120,7 +122,10 @@ const MAX_ROWS = 8;
 /** The words under the field while the caret is in a fenced code block (docs/designs/2026-10-15-composer-code-blocks.md). */
 const CODE_HINT = "Code block · Ctrl+Enter: send · Enter: new line · Tab: indent · Shift+Tab: outdent, or leave when there is nothing to outdent";
 /** The words under the field while the caret is in a quote line (docs/designs/2026-10-15-quote-chat-selection.md). */
-const QUOTE_HINT = "Quote · Ctrl+Enter: send · Enter: new line · Shift+Tab: leave the quote";
+const QUOTE_HINTS: Record<ChatSendWith, string> = {
+	enter: "Quote · Ctrl+Enter: send · Enter: new line · Shift+Tab: leave the quote",
+	shiftEnter: "Quote · Shift+Enter or Ctrl+Enter: send · Enter: new line · Shift+Tab: leave the quote",
+};
 /** How long a quote's notice stays above the conversation. */
 const QUOTE_NOTICE_MS = 5000;
 
@@ -206,9 +211,8 @@ function replaceInSurface(surface: DraftSurface, from: number, to: number, repla
  * covers most browsers; the tracked flag bridges WebKit, which fires the
  * confirming Enter keydown after `compositionend`.
  */
-function shouldSubmitOnEnter(event: Pick<globalThis.KeyboardEvent, "key" | "shiftKey" | "isComposing">, composing: boolean): boolean {
-	if (event.key !== "Enter" || event.shiftKey) return false;
-	return !(event.isComposing || composing);
+function isComposerSendKey(event: Pick<globalThis.KeyboardEvent, "key" | "shiftKey" | "ctrlKey" | "metaKey" | "isComposing">, composing: boolean, mode: ChatSendWith): boolean {
+	return isSendChord(event, mode) && !(event.isComposing || composing);
 }
 
 /** Tracks IME composition in a ref the keydown handler reads synchronously. */
@@ -254,6 +258,7 @@ function AskEditor({ prefill, placeholder, disabled, onSubmit }: AskEditorProps)
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 
 	useLayoutEffect(() => {
+	const sendWith = useSendWith();
 		autosize(textareaRef.current, 1);
 	}, [draft]);
 
@@ -265,7 +270,7 @@ function AskEditor({ prefill, placeholder, disabled, onSubmit }: AskEditorProps)
 				value={draft}
 				onChange={event => setDraft(event.target.value)}
 				onKeyDown={event => {
-					if (shouldSubmitOnEnter(event.nativeEvent, composingRef.current)) {
+					if (isComposerSendKey(event.nativeEvent, composingRef.current, sendWith)) {
 						event.preventDefault();
 						onSubmit(draft);
 					}
@@ -476,6 +481,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const busy = snapshot.working;
 	const request = snapshot.uiRequest;
 	useEffect(() => { setSubmitted(false); }, [snapshot.working, snapshot.phase, snapshot.commandFeedback, snapshot.lastPromptResult, progressAvailable]);
+	const sendWith = useSendWith();
+	const keyLabels = SEND_KEY_LABELS[sendWith];
 	// `reading` is the rendered mirror of `readingRef`: it drives what this frame
 	// shows, while `send` enforces the synchronous ref.
 	/** Images whose marker is in the text — what the strip shows and a send carries. */
@@ -1537,7 +1544,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				}
 			}
 			// A quote line follows the code block's keys (docs/designs/2026-10-15-quote-chat-selection.md, Section 4): Enter is a new line that carries the prefix (an empty quote line lets go of it), Shift+Tab leaves the quote, Backspace and Delete take the prefix with them. Ctrl+Enter sends from here through the rules below.
-			if (block === null && !composing && event.keyCode !== 229 && captureRef.current === null) {
+			// In Shift+Enter mode a plain Shift+Enter in a quote sends (the quote rules treat it as a new line otherwise); a plain Enter is the quote's new line in both.
+			if (block === null && !composing && event.keyCode !== 229 && captureRef.current === null && !(sendWith === "shiftEnter" && event.key === "Enter" && event.shiftKey && !event.altKey)) {
 				const blocksNow = findFencedBlocks(text);
 				const quoteEdit = quoteKeyEdit(text, findQuoteRuns(text, blocksNow), event, start, end);
 				if (quoteEdit !== null) {
@@ -1601,12 +1609,12 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					}
 				}
 			}
-			if (shouldSubmitOnEnter(event, composingRef.current)) {
+			if (isComposerSendKey(event, composingRef.current, sendWith)) {
 				event.preventDefault();
 				send(event.altKey);
 			}
 		},
-		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, publishDocuments, send, suggestionsOpen, visible, selectSuggestion, writeDraft],
+		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, publishDocuments, send, sendWith, suggestionsOpen, visible, selectSuggestion, writeDraft],
 	);
 
 	/** Answer the shown dialog; the client answers each dialog once and refuses a stale card. */
@@ -1733,9 +1741,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					type="button"
 					className="omp-btn omp-btn--icon-mid"
 					disabled={!canSubmit}
-					title="Queue follow-up (Alt+Enter; Shift+Enter for a newline)"
+					title={`Queue follow-up (${keyLabels.queue}; ${keyLabels.newline} for a newline)`}
 					aria-label="Queue follow-up"
-					aria-keyshortcuts="Alt+Enter"
+					aria-keyshortcuts={keyLabels.queue}
 					onClick={() => send(true)}
 				>
 					<span aria-hidden="true" className="codicon codicon-list-ordered omp-btn-icon" />
@@ -1746,9 +1754,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				type="button"
 				className="omp-btn omp-btn--primary omp-btn--icon-narrow"
 				disabled={!canSubmit}
-				title={busy ? "Steer the running turn (Enter; Shift+Enter for a newline)" : "Send message (Enter; Shift+Enter for a newline)"}
+				title={`${busy ? "Steer the running turn" : "Send message"} (${keyLabels.send}; ${keyLabels.newline} for a newline)`}
 				aria-label={busy ? "Steer the running turn" : "Send message"}
-				aria-keyshortcuts="Enter"
+				aria-keyshortcuts={keyLabels.send}
 				onClick={() => send(false)}
 			>
 				<span aria-hidden="true" className="codicon codicon-send omp-btn-icon" />
@@ -1920,8 +1928,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			</div>
 			{(blocks.length > 0 || quoteLayout.runs.length > 0) && (
 				// The row stays while the draft holds a block or a quote and only its words come and go with the caret, so a click into one never moves the text under the pointer.
-				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : undefined}>
-					{caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : ""}
+				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINTS[sendWith] : undefined}>
+					{caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINTS[sendWith] : ""}
 				</div>
 			)}
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />

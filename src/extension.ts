@@ -6999,6 +6999,7 @@ function readChatDisplayPreferences(): ChatDisplayPreferences {
     toolsMode: toolsModeFromStored(s.context?.globalState.get<unknown>(TOOLS_EXPANDED_KEY)),
     toolIntent: vscode.workspace.getConfiguration("ompDesk").get<boolean>("toolIntentDescriptions", false),
     htmlPages: chatHtmlPagesEnabled(),
+    sendWith: vscode.workspace.getConfiguration("ompDesk").get<string>("chatSendWith", "enter") === "shiftEnter" ? "shiftEnter" : "enter",
   };
 }
 
@@ -7034,7 +7035,7 @@ function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): 
     if (chatHtmlPagesEnabled()) void s.htmlPageServer.ensure();
     else void s.htmlPageServer.close();
   }
-  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("ompDesk.toolIntentDescriptions") || event.affectsConfiguration("ompDesk.chatHtmlPages") || event.affectsConfiguration("editor.accessibilitySupport")) {
+  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("ompDesk.toolIntentDescriptions") || event.affectsConfiguration("ompDesk.chatHtmlPages") || event.affectsConfiguration("ompDesk.chatSendWith") || event.affectsConfiguration("editor.accessibilitySupport")) {
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
 }

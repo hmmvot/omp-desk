@@ -26,7 +26,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Ctrl+Shift+U` | Cycle thinking level (**Cycle Model** has no default key) | Chat editor |
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |
 
-Inside the Chat page, `Enter` steers a running turn, `Alt+Enter` queues a follow-up, `Alt+↑` takes the newest queued message back into the draft and `Esc` `Esc` starts a Rewind; see [Chat](chat.md). In the composer `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes (the composer keeps its own undo stack, so VS Code's **Edit > Undo** menu item does nothing there).
+Inside the Chat page, `Enter` steers a running turn, `Alt+Enter` queues a follow-up, `Alt+↑` takes the newest queued message back into the draft and `Esc` `Esc` starts a Rewind; see [Chat](chat.md). `Enter` sends and `Shift+Enter` is a newline unless you set [`ompDesk.chatSendWith`](settings.md) to `shiftEnter`: then `Shift+Enter` sends and steers, `Alt+Shift+Enter` queues a follow-up and `Enter` is a newline, in every message box that sends on `Enter`. In the composer `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes (the composer keeps its own undo stack, so VS Code's **Edit > Undo** menu item does nothing there).
 
 ## Keymap notes
 

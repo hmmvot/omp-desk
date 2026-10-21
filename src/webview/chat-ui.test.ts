@@ -4223,6 +4223,117 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				const removed = "intro\n\nmy comment\n\n> other quote\n";
 				const quoteStart = "intro\n\n".length;
 				/** Ctrl+Z as the keyboard sends it: only the keydown the field's handler reads, no editing command to fall back on. */
+		const sendWithPreference = (sendWith: string): Promise<unknown> => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,sendWith:'${sendWith}'})`);
+		const enterKey = async (modifiers = 0): Promise<void> => {
+			for (const type of ["keyDown", "keyUp"]) await ui.call("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers, ...(type === "keyDown" ? { text: "\r" } : {}) });
+		};
+
+		await t.test("ompDesk.chatSendWith: Enter sends and Shift+Enter is a newline by default; with shiftEnter Shift+Enter sends and Enter is a newline, live, and the hints follow", async () => {
+			await reset("send-with");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});window.composer.focus()");
+			const sendButton = (): Promise<{ keys: string | null; title: string | null }> => ui.evaluate("(()=>{const b=document.querySelector('button[aria-label=\"Send message\"]');return{keys:b?.getAttribute('aria-keyshortcuts')??null,title:b?.title??null}})()");
+			assert.deepEqual(await sendButton(), { keys: "Enter", title: "Send message (Enter; Shift+Enter for a newline)" });
+			// The default: Shift+Enter is a newline, Enter sends.
+			await ui.call("Input.insertText", { text: "a" });
+			await enterKey(8);
+			await ui.call("Input.insertText", { text: "b" });
+			assert.equal((await areaState()).value, "a\nb");
+			assert.equal(await sendCount(), 0, "Shift+Enter sent nothing");
+			await enterKey();
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "a\nb");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			// The setting changes live: the keys swap and the hints follow.
+			await sendWithPreference("shiftEnter");
+			await ui.wait("document.querySelector('button[aria-label=\"Send message\"]')?.getAttribute('aria-keyshortcuts')==='Shift+Enter'");
+			assert.equal((await sendButton()).title, "Send message (Shift+Enter; Enter for a newline)");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "c" });
+			await enterKey();
+			await ui.call("Input.insertText", { text: "d" });
+			assert.equal((await areaState()).value, "c\nd", "a plain Enter is a newline");
+			assert.equal(await sendCount(), 1, "and sends nothing");
+			await enterKey(8);
+			await ui.wait("window.ui.sends().length===2");
+			assert.equal(await ui.evaluate("window.ui.sends()[1].text"), "c\nd");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			// Ctrl+Enter still sends.
+			await ui.call("Input.insertText", { text: "e" });
+			await enterKey(2);
+			await ui.wait("window.ui.sends().length===3");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			// An open slash list takes a plain Enter to accept; Shift+Enter sends with it open; a closed list leaves Enter a newline.
+			await ui.call("Input.insertText", { text: "/sha" });
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await enterKey();
+			await ui.wait("window.composer.value().startsWith('/shake')");
+			assert.equal(await sendCount(), 3, "Enter with the list open accepted and did not send");
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]')"), null);
+			await ui.call("Input.insertText", { text: "x" });
+			await enterKey();
+			assert.equal((await areaState()).value.endsWith("\n"), true, "with the list closed Enter is a newline");
+			assert.equal(await sendCount(), 3);
+			await setDraft("");
+			await ui.call("Input.insertText", { text: "/sha" });
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await enterKey(8);
+			await ui.wait("window.ui.sends().length===4");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			// An IME composition never sends, with either chord.
+			await ui.call("Input.insertText", { text: "ime" });
+			const prevented = await ui.evaluate<boolean[]>(`(()=>{
+			 const area=window.composer.el();const out=[];
+			 const key=init=>{const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...init});area.dispatchEvent(event);out.push(event.defaultPrevented)};
+			 key({key:'Enter',shiftKey:true,isComposing:true});
+			 area.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+			 key({key:'Enter',shiftKey:true});
+			 area.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:''}));
+			 return out;})()`);
+			assert.deepEqual(prevented, [false, false]);
+			assert.equal(await sendCount(), 4, "nothing was sent during a composition");
+			// Back to the default.
+			await sendWithPreference("enter");
+			await ui.wait("document.querySelector('button[aria-label=\"Send message\"]')?.getAttribute('aria-keyshortcuts')==='Enter'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("ompDesk.chatSendWith shiftEnter: a while-running turn steers with Shift+Enter and queues with Alt+Shift+Enter, and the /review editor box sends with Shift+Enter and takes Enter as a newline", async () => {
+			await reset("send-with-running");
+			await sendWithPreference("shiftEnter");
+			await ui.evaluate("window.ui.push({working:true,settled:false});window.composer.focus()");
+			await ui.wait("document.querySelector('button[aria-label=\"Queue follow-up\"]')");
+			assert.equal(await ui.evaluate("document.querySelector('button[aria-label=\"Queue follow-up\"]').getAttribute('aria-keyshortcuts')"), "Alt+Shift+Enter");
+			await ui.call("Input.insertText", { text: "steer me" });
+			await enterKey(8);
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.ui.sends()[0].type"), "omp:chat-steer");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			await ui.call("Input.insertText", { text: "queue me" });
+			await enterKey(8 | 1);
+			await ui.wait("window.ui.sends().length===2");
+			assert.equal(await ui.evaluate("window.ui.sends()[1].type"), "omp:chat-follow-up");
+			await ui.evaluate("window.ui.sendReply();window.ui.push({working:false,settled:true})");
+			await ui.wait("window.composer.value()===''");
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'sw-edit',method:'editor',title:'Instructions',prefill:'Top\\n',promptStyle:true}]})");
+			await ui.wait("document.querySelector('.omp-ask textarea')");
+			await ui.evaluate("(()=>{const field=document.querySelector('.omp-ask textarea');field.focus();field.setSelectionRange(field.value.length,field.value.length)})()");
+			await ui.call("Input.insertText", { text: "one" });
+			await enterKey();
+			await ui.call("Input.insertText", { text: "two" });
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask textarea').value"), "Top\none\ntwo", "a plain Enter adds a line");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-ui-response').length"), 0);
+			await enterKey(8);
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-ui-response' && message.response.id==='sw-edit')");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-ui-response').at(-1).response"), { id: "sw-edit", value: "Top\none\ntwo" });
+			await ui.evaluate("window.ui.push({uiRequests:[]})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 				const ctrlZ = (): Promise<void> => press("z", "KeyZ", 90, { modifiers: 2 });
 				const expectRestored = async (what: string, expected: string): Promise<void> => {
 					await ctrlZ();

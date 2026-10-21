@@ -3800,8 +3800,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const settingsWrites = harness.configurationWrites().length;
 		try {
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
-				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true, sendWith: "enter" },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true, sendWith: "enter" },
 			]);
 			// A page's own stale route can never overwrite what the host says.
 			const before = clients[0]!.getDisplayPreferences();
@@ -3811,8 +3811,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.configuration({ "ompDesk.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "editor.accessibilitySupport" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
-				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true, sendWith: "enter" },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed", toolIntent: false, htmlPages: true, sendWith: "enter" },
 			]);
 			assert.equal(channel.written.length, writes, "presentation updates never write OMP commands even when writer admission is fenced");
 			harness.configuration({ "ompDesk.toolIntentDescriptions": true });
@@ -3821,6 +3821,12 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.configuration({ "ompDesk.toolIntentDescriptions": false });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "ompDesk.toolIntentDescriptions" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences().toolIntent), [false, false]);
+			harness.configuration({ "ompDesk.chatSendWith": "shiftEnter" });
+			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "ompDesk.chatSendWith" });
+			assert.deepEqual(clients.map(client => client.getDisplayPreferences().sendWith), ["shiftEnter", "shiftEnter"], "ompDesk.chatSendWith reaches both pages without a restart");
+			harness.configuration({ "ompDesk.chatSendWith": "enter" });
+			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "ompDesk.chatSendWith" });
+			assert.deepEqual(clients.map(client => client.getDisplayPreferences().sendWith), ["enter", "enter"]);
 		} finally {
 			for (const detach of detached) detach();
 			host.dispose();
