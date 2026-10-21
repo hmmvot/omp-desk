@@ -278,6 +278,8 @@ export interface ServeOutcome {
 	 * finish it. Only a refusal can carry a reason.
 	 */
 	readonly refusal?: RefusalReason;
+	/** For a select refusal, the holder's check that failed (see {@link SelectCheck}); only a refusal carries one. */
+	readonly check?: SelectCheck;
 	/** A stop request's per-row answers, in the order of the request's rows; only a successful outcome carries them. */
 	readonly rows?: readonly StopRowAnswer[];
 	/**
@@ -292,6 +294,15 @@ export type RefusalReason = "stale-build" | "not-holder" | "busy" | "terminal" |
 
 const REFUSAL_REASONS: readonly RefusalReason[] = ["stale-build", "not-holder", "busy", "terminal", "unfinished"];
 const isRefusalReason = (value: unknown): value is RefusalReason => REFUSAL_REASONS.includes(value as RefusalReason);
+
+/**
+ * Which check of a holder's select failed. It travels beside the refusal, never as its reason: a build that does not know
+ * a value would discard an answer whose `refusal` it cannot read and time out, while it reads a refusal with an extra field.
+ */
+export type SelectCheck = "no-editor" | "run-mismatch" | "binding-mismatch";
+
+const SELECT_CHECKS: readonly SelectCheck[] = ["no-editor", "run-mismatch", "binding-mismatch"];
+export const isSelectCheck = (value: unknown): value is SelectCheck => SELECT_CHECKS.includes(value as SelectCheck);
 
 /** What `serve` may ask while it works. */
 export interface ServeContext {
@@ -401,16 +412,19 @@ function parseResponse(text: string, id: string): ServeOutcome | null {
 	if (record.version !== VERSION || record.id !== id || typeof record.ok !== "boolean" || typeof record.focused !== "boolean") return null;
 	// An answer of a build that predates a refusal reason has none; one with a reason this build does not know, or a reason on a success, is no answer.
 	if (record.refusal !== undefined && (record.ok || !isRefusalReason(record.refusal))) return null;
-	return { ok: record.ok, focused: record.focused, ...(record.refusal === undefined ? {} : { refusal: record.refusal }) };
+	// The failed check is only an explanation: one this build does not know, or one on a success, is ignored and the answer still reads.
+	const check = !record.ok && isSelectCheck(record.check) ? { check: record.check } : {};
+	return { ok: record.ok, focused: record.focused, ...(record.refusal === undefined ? {} : { refusal: record.refusal }), ...check };
 }
 
 /** The text of the response file for `outcome`: what the requester reads back with {@link parseResponse}. */
 function responseText(id: string, outcome: ServeOutcome): string {
 	const refusal = !outcome.ok && outcome.refusal !== undefined ? { refusal: outcome.refusal } : {};
+	const check = !outcome.ok && outcome.check !== undefined ? { check: outcome.check } : {};
 	const rows = outcome.ok && outcome.rows !== undefined
 		? { rows: outcome.rows.map(row => ({ state: row.state, reason: row.reason.slice(0, MAX_STOP_REASON) })) }
 		: {};
-	return `${JSON.stringify({ version: VERSION, id, ok: outcome.ok, focused: outcome.ok && outcome.focused, ...refusal, ...rows })}\n`;
+	return `${JSON.stringify({ version: VERSION, id, ok: outcome.ok, focused: outcome.ok && outcome.focused, ...refusal, ...check, ...rows })}\n`;
 }
 
 /**
@@ -678,7 +692,12 @@ export async function awaitRequestAnswer(
 	storageDir: string,
 	to: string,
 	id: string,
-	options: { readonly timeoutMs?: number; readonly pollMs?: number } = {},
+	options: {
+		readonly timeoutMs?: number;
+		readonly pollMs?: number;
+		/** Told the reason and failed check a refusing answer carried (either may be absent), before the wait returns `"refused"` (or `"stale-build"`). */
+		readonly onRefusal?: (reason: RefusalReason | undefined, check: SelectCheck | undefined) => void;
+	} = {},
 ): Promise<RequestAnswer> {
 	const directory = directoryOf(storageDir);
 	const response = path.join(directory, `${to}.${id}${RESPONSE_SUFFIX}`);
@@ -690,7 +709,10 @@ export async function awaitRequestAnswer(
 		if (read.kind !== "missing") {
 			await fsp.rm(response, { force: true });
 			const outcome = read.kind === "text" ? parseResponse(read.text, id) : null;
-			if (outcome !== null) return !outcome.ok ? (outcome.refusal === "stale-build" ? "stale-build" : "refused") : outcome.focused ? "served" : "unfocused";
+			if (outcome !== null) {
+				if (!outcome.ok) options.onRefusal?.(outcome.refusal, outcome.check);
+				return !outcome.ok ? (outcome.refusal === "stale-build" ? "stale-build" : "refused") : outcome.focused ? "served" : "unfocused";
+			}
 		}
 		if (Date.now() >= deadline) {
 			await fsp.rm(path.join(directory, `${to}.${id}${REQUEST_SUFFIX}`), { force: true });

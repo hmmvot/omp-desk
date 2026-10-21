@@ -20,7 +20,7 @@ import {
 	stopRowsOnRequest,
 	stopTargetOf,
 } from "./broker-process-controller.ts";
-import type { CapturedRowStop, ChoiceRequest, ConfirmRequest, KillAllPeer, PeerAnswerFor, ProcessControllerPorts } from "./broker-process-controller.ts";
+import type { CapturedRowStop, ChoiceRequest, ConfirmRequest, KillAllPeer, PeerAnswerFor, ProcessControllerPorts, StopCaptureOptions } from "./broker-process-controller.ts";
 import type { BrokerStopMode, BrokerStopOutcome, BrokerStopTarget } from "./broker-process-stop.ts";
 import { planKillAll, rowIdentityOf } from "./broker-processes.ts";
 import type {
@@ -131,7 +131,9 @@ function harness(options: HarnessOptions) {
 	const forgotten: string[] = [];
 	const capturedFor: { driven: BrokerProcessRow[]; recorded: BrokerProcessRow[] } = { driven: [], recorded: [] };
 	/** The options every capture was asked with, in order: `offerForce: false` is a stop another window asked for. */
-	const captureOptions: Array<{ readonly offerForce: boolean }> = [];
+	const captureOptions: StopCaptureOptions[] = [];
+	/** The Info lines of the log, kept apart from `events`: they are not a step of the stop. */
+	const logs: string[] = [];
 	const asked: Array<{ holderId: string; rows: readonly RowIdentity[] }> = [];
 	const brokerProbes: BrokerStopTarget[] = [];
 	let freshReads = 0;
@@ -178,6 +180,9 @@ function harness(options: HarnessOptions) {
 		info: message => {
 			events.push("info");
 			infos.push(message);
+		},
+		log: message => {
+			logs.push(message);
 		},
 		warn: message => {
 			events.push("warn");
@@ -234,7 +239,7 @@ function harness(options: HarnessOptions) {
 			events.push("refresh");
 		},
 	};
-	return { ports, events, readOptions, confirms, choices, infos, warns, stops, forgotten, capturedFor, captureOptions, asked, brokerProbes };
+	return { ports, events, readOptions, confirms, choices, infos, warns, logs, stops, forgotten, capturedFor, captureOptions, asked, brokerProbes };
 }
 
 /** A captured row stop that logs when it runs, through the harness's own event log. */
@@ -723,6 +728,25 @@ describe("Kill All", () => {
 		const all = harness({ reads: [everything, everything, []], choices: ["all"] });
 		await killAll(all.ports);
 		assert.deepEqual(all.stops.map(call => call.target.slot).sort(), [mine.slot, other.slot, detached.slot].sort());
+	});
+
+	it("logs the chosen tier and the rows each route stops, and nothing when the modal is cancelled", async () => {
+		const mine = here();
+		const other = terminal({ window: "other-window", host: terminalHost({ window: "other-window" }) });
+		const detached = orphan();
+		const everything = [mine, other, detached];
+		const onlyHere = harness({ reads: [everything, everything, [other, detached]], choices: ["here"] });
+		await killAll(onlyHere.ports);
+		assert.match(onlyHere.logs[0] ?? "", /^processes: Kill All confirmed with "Stop in This Window": 1 of 1 shown process still eligible \(1 run here, 0 that another window may run, 0 no window can run\)$/);
+		assert.deepEqual(onlyHere.logs.slice(1).map(line => line.replace(/^.*asked by /, "")), ["kill-all"]);
+
+		const all = harness({ reads: [everything, everything, []], choices: ["all"] });
+		await killAll(all.ports);
+		assert.match(all.logs[0] ?? "", /"Stop in All Windows": 3 of 3 shown processes still eligible/);
+
+		const cancelled = harness({ reads: [everything], choices: [null] });
+		await killAll(cancelled.ports);
+		assert.deepEqual(cancelled.logs, []);
 	});
 
 	it("stops each row by the route its own Stop uses, so a driven session goes through its stop lifecycle", async () => {
@@ -1257,7 +1281,7 @@ describe("Kill All: asking the other windows", () => {
 		await killAll(h.ports);
 		assert.deepEqual(h.stops, []);
 		assert.deepEqual(h.capturedFor.driven.map(target => target.id), [native.id]);
-		assert.deepEqual(h.captureOptions, [{ offerForce: true }]);
+		assert.deepEqual(h.captureOptions, [{ offerForce: true, origin: "kill-all" }]);
 	});
 
 	it("does not take a window's 'stopped' for proof: the row's broker must be independently gone, even when its record is no longer listed", async () => {
@@ -1362,11 +1386,14 @@ describe("stopRowsOnRequest: serving another window's Kill All", () => {
 		const answers = await stopRowsOnRequest([chat, native, recorded].map(rowIdentityOf), failing.ports);
 		assert.deepEqual(answers.map(answer => answer.state), ["unconfirmed", "unconfirmed", "unconfirmed"]);
 		assert.deepEqual(failing.confirms, [], "no prompt of any kind");
-		assert.deepEqual(failing.captureOptions, [{ offerForce: false }, { offerForce: false }, { offerForce: false }]);
+		const peerAsked: StopCaptureOptions = { offerForce: false, origin: "peer-kill-all" };
+		assert.deepEqual(failing.captureOptions, [peerAsked, peerAsked, peerAsked]);
+		assert.equal(failing.logs.filter(line => line.endsWith("asked by peer-kill-all, never forced")).length, 3, "each row another window asked for names who asked, at Info");
 		// An ordinary Stop of the same session still lets its flow offer a Force Stop.
 		const single = harness({ reads: [[chat]], driven: captured([]) });
 		await stopProcess(chat.id, single.ports);
-		assert.deepEqual(single.captureOptions, [{ offerForce: true }]);
+		assert.deepEqual(single.captureOptions, [{ offerForce: true, origin: "processes-stop" }]);
+		assert.match(single.logs[0] ?? "", /stop dispatched for .* by the driven route, asked by processes-stop$/);
 	});
 
 	it("never offers a Force Stop on the requester's behalf, and reports a stop that did not work as not confirmed", async () => {

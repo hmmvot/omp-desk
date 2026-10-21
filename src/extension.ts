@@ -1332,7 +1332,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     editorPanels: registerEditorPanels(editorPanelsDeps()),
     bridgeEndpoints: new Map<string, BridgeEditorEndpoint>(),
     createBridgeEndpoint: options => new BridgeEditorEndpoint(options),
-    rootGone: async root => await recordedRootGone(await attachBrokerClient().catch(() => null), root),
+    rootGone: async root => await recordedRootGone(await withSessionReadDeadline(attachBrokerClient(), 2_000).catch(() => null), root),
     bridgeLiveEditors: new Set<string>(),
     bridgeEditors: new EditorCoordinator(),
     outcomes: new Map<string, RestoreOutcome>(),
@@ -4561,7 +4561,7 @@ async function switchSessionModeNow(context: vscode.ExtensionContext, index: Ses
         "The session is still stopping. Stop it before trying the view switch again.",
         "Stop Session",
       ).then(action => {
-        if (action === "Stop Session" && hostOf(state) === runtime) return s.sessionActions.stopHost(context, index, tabId);
+        if (action === "Stop Session" && hostOf(state) === runtime) return s.sessionActions.stopHost(context, index, tabId, undefined, "view-switch");
       }).then(undefined, error => {
         log.error(`tab ${tabId}: view switch recovery failed: ${messageOf(error)}`);
         showWarning("The session could not be stopped from this editor. Use Stop in Processes, then reopen the session.");
@@ -11744,7 +11744,7 @@ async function closeSession(context: vscode.ExtensionContext, index: SessionInde
   // transport is told that, with the row's own reason, and nothing is stopped.
   if (runtime === null) {
     if (entry.host !== null) {
-      await pendingEntry(tabId, "close", { origin: "row", step: "checking" }, () => windowState().sessionActions.stopHost(context, index, argument));
+      await pendingEntry(tabId, "close", { origin: "row", step: "checking" }, () => windowState().sessionActions.stopHost(context, index, argument, undefined, "close"));
       return;
     }
     showWarning(

@@ -38,6 +38,17 @@ describe("event loop lag monitor", () => {
 		assert.match(m.lines[0]!, /process CPU 40 ms in 1334 ms/);
 	});
 
+	it("splits the process CPU by mode and says how long the event loop was busy, so a spinning thread is told from the OS", () => {
+		let split = { userMs: 0, systemMs: 0, busyMs: 0 };
+		let now = 1000;
+		const logged: LoggedLine[] = [];
+		const instance = new EventLoopLagMonitor({ log: recordingLogger(logged), now: () => now, cpuMs: () => split.userMs + split.systemMs, split: () => split });
+		split = { userMs: 300, systemMs: 700, busyMs: 1200 };
+		now += 1334;
+		instance.sample();
+		assert.match(logged[0]!.message, /process CPU 1000 ms in 1334 ms; user 300 ms, system 700 ms, event loop busy 1200 ms\)/);
+	});
+
 	it("logs a stall of a second or more as a warning and a shorter one as debug", () => {
 		const m = monitor();
 		m.tick(100 + 700);

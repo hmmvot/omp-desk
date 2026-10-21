@@ -50,6 +50,20 @@ export interface CapturedRowStop {
 	run(): Promise<boolean>;
 }
 
+/**
+ * Who asked for a stop, as the log names it: an explicit stop ends a running session, so every one must be attributable
+ * to a surface (and to a window, which the caller adds). `processes-stop` is the Processes view's single Stop,
+ * `kill-all` this window's own Kill All, `peer-kill-all` the rows this window stops because another window ran Kill All.
+ * `sessions-row`, `close` and `view-switch` are the stops of the session rows and the editor, which never pass through here.
+ */
+export type StopOrigin = "sessions-row" | "close" | "view-switch" | "processes-stop" | "kill-all" | "peer-kill-all";
+
+/** What a capture of a row's own stop flow is told: whether it may open a Force Stop, and who asked for the stop. */
+export interface StopCaptureOptions {
+	readonly offerForce: boolean;
+	readonly origin: StopOrigin;
+}
+
 export interface ConfirmRequest {
 	readonly message: string;
 	readonly detail: string;
@@ -77,15 +91,17 @@ export interface ProcessControllerPorts {
 	/** Show a progress notification while `work` runs. */
 	withProgress(title: string, work: () => Promise<void>): Promise<void>;
 	info(message: string): void;
+	/** One Info line of the extension's log: the stops this module dispatches name who asked and what was chosen. Shows nothing to the user. */
+	log(message: string): void;
 	warn(message: string): void;
 	/**
 	 * Capture the row's own stop flow for a session this window drives, or `null` when it changed. With
 	 * `offerForce: false` (a stop another window asked for) the flow never opens a Force Stop or any other modal:
 	 * a graceful stop that did not work ends the flow unconfirmed.
 	 */
-	captureDrivenStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
+	captureDrivenStop(row: BrokerProcessRow, options: StopCaptureOptions): Promise<CapturedRowStop | null>;
 	/** Capture the row's recorded-host stop flow, or `null` when the row no longer records this exact broker. Same `offerForce` rule. */
-	captureRecordedStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
+	captureRecordedStop(row: BrokerProcessRow, options: StopCaptureOptions): Promise<CapturedRowStop | null>;
 	stopThroughBroker(target: BrokerStopTarget, mode: BrokerStopMode): Promise<BrokerStopOutcome>;
 	/**
 	 * Prove the broker's process gone by its PID and creation time, waiting up to `timeoutMs`. This is
@@ -209,11 +225,13 @@ async function retireStoppedSlot(row: BrokerProcessRow, ports: ProcessController
 async function stopRow(
 	row: BrokerProcessRow,
 	ports: ProcessControllerPorts,
-	options: { readonly offerForce: boolean; readonly fallback?: boolean } = { offerForce: true },
+	options: { readonly offerForce: boolean; readonly origin: StopOrigin; readonly fallback?: boolean },
 ): Promise<RowStopResult> {
 	const route = routeOf(row, options.fallback === true);
+	ports.log(`processes: stop dispatched for ${describeProcess(row)} (slot ${row.slot}) by the ${route} route, asked by ${options.origin}${options.offerForce ? "" : ", never forced"}`);
 	if (route !== "broker") {
-		const captured = route === "driven" ? await ports.captureDrivenStop(row, { offerForce: options.offerForce }) : await ports.captureRecordedStop(row, { offerForce: options.offerForce });
+		const captureOptions: StopCaptureOptions = { offerForce: options.offerForce, origin: options.origin };
+		const captured = route === "driven" ? await ports.captureDrivenStop(row, captureOptions) : await ports.captureRecordedStop(row, captureOptions);
 		if (captured === null) return { kind: "changed" };
 		if (!(await captured.run())) return { kind: "flow-unconfirmed" };
 		// The flow proves the session's writer gone, not that the broker retired (its shutdown acknowledgement is not an
@@ -261,7 +279,7 @@ export async function stopProcess(rowId: string, ports: ProcessControllerPorts):
 	}
 	let result: RowStopResult;
 	try {
-		result = await stopRow(row, ports);
+		result = await stopRow(row, ports, { offerForce: true, origin: "processes-stop" });
 	} finally {
 		await ports.refresh();
 	}
@@ -294,6 +312,7 @@ export async function stopOrphanedAndIdle(ports: ProcessControllerPorts): Promis
 		ports.info("Nothing was stopped.");
 		return;
 	}
+	ports.log(`processes: Stop Orphaned and Idle confirmed for ${first.length} ${first.length === 1 ? "process" : "processes"} (${parts.join(" and ")})`);
 	const confirmed = new Set(first.map(row => row.id));
 	const targets = selectOrphanedAndIdle((await ports.read({ fresh: true })).rows).filter(row => confirmed.has(row.id));
 	let stopped = 0;
@@ -511,6 +530,7 @@ export async function killAll(ports: ProcessControllerPorts): Promise<void> {
 	const remoteRows = choice === "all" ? targets.filter(row => !hereIds.has(row.id) && mayRunInAnotherWindow(row)) : [];
 	const remoteIds = new Set(remoteRows.map(row => row.id));
 	const directRows = choice === "all" ? targets.filter(row => !hereIds.has(row.id) && !remoteIds.has(row.id)) : [];
+	ports.log(`processes: Kill All confirmed with "${choice === "all" ? "Stop in All Windows" : "Stop in This Window"}": ${targets.length} of ${chosen.size} shown ${chosen.size === 1 ? "process" : "processes"} still eligible (${hereRows.length} run here, ${remoteRows.length} that another window may run, ${directRows.length} no window can run)`);
 	const results = new Map<string, RowStopResult | Error>();
 	/** Rows stopped through the broker although a window should have stopped them, with why. */
 	const withoutWindow = new Map<string, string>();
@@ -535,7 +555,7 @@ export async function killAll(ports: ProcessControllerPorts): Promise<void> {
 				leftAlone += 1;
 				return;
 			}
-			results.set(row.id, await stopRow(current, ports, { offerForce: true, fallback: category === "fallback" }));
+			results.set(row.id, await stopRow(current, ports, { offerForce: true, origin: "kill-all", fallback: category === "fallback" }));
 		} catch (error) {
 			results.set(row.id, asError(error));
 		}
@@ -691,7 +711,7 @@ async function serveOneRow(
 	try {
 		const current = planKillAll((await ports.read()).rows).here.find(candidate => sameBroker(row, candidate) && rowMatchesIdentity(candidate, identity));
 		if (current === undefined) return { state: "changed", reason: "it changed before it could be stopped; nothing was stopped" };
-		return answerOf(await stopRow(current, ports, { offerForce: false }));
+		return answerOf(await stopRow(current, ports, { offerForce: false, origin: "peer-kill-all" }));
 	} catch (error) {
 		return { state: "unconfirmed", reason: `it was not stopped: ${asError(error).message}` };
 	}

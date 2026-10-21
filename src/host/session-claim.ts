@@ -1062,13 +1062,18 @@ function readAdvisory(pid: number): Promise<AdvisoryReading> {
 	return reading;
 }
 
-/** A successful existence probe; generation matching is required separately. */
+/**
+ * A successful existence probe; generation matching is required separately. Only `ESRCH` proves the
+ * pid absent: a holder this account may not open (a window of another elevation or session) answers
+ * `EPERM`, which still means it exists, and its creation time then decides (the same reading as
+ * `isPtyProcessAlive`).
+ */
 function holderProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
 	} catch (error) {
-		return false;
+		return !isErrorCode(error, "ESRCH");
 	}
 }
 

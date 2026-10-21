@@ -289,6 +289,16 @@ describe("window requests", () => {
 			assert.equal(await forged("id-forged-1", { ok: true, refusal: "stale-build" }), "timeout");
 			assert.equal(await forged("id-forged-2", { ok: false, refusal: "who-knows" }), "timeout");
 			assert.equal(await forged("id-forged-3", { ok: false }), "refused", "a build that predates reasons sends none");
+			const seen: unknown[] = [];
+			const watch = (name: string) => ({ timeoutMs: 300, pollMs: 20, onRefusal: (reason: unknown, check: unknown) => { seen.push([name, reason, check]); } });
+			const forgedChecked = async (name: string, body: object) => {
+				fs.writeFileSync(path.join(directory, `holder-x.${name}.response`), JSON.stringify({ version: 1, id: name, focused: false, ...body }));
+				return await awaitRequestAnswer(storage, "holder-x", name, watch(name));
+			};
+			assert.equal(await forgedChecked("id-check-1", { ok: false, check: "run-mismatch" }), "refused", "the check rides beside an absent refusal reason");
+			assert.equal(await forgedChecked("id-check-2", { ok: false, check: "a-check-of-a-newer-build" }), "refused", "an unknown check is ignored, never makes the answer unreadable");
+			assert.equal(await forgedChecked("id-check-3", { ok: true, check: "no-editor" }), "unfocused", "a check on a success is ignored");
+			assert.deepEqual(seen, [["id-check-1", undefined, "run-mismatch"], ["id-check-2", undefined, undefined]]);
 		});
 
 		it("answers a refusal as refused and a window that never answers as a timeout, withdrawing the request", async () => {

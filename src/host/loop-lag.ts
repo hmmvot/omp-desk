@@ -26,6 +26,25 @@ export interface LoopLagOptions {
 	readonly now?: () => number;
 	/** CPU milliseconds (user + system) this process has used. Default `process.cpuUsage`. */
 	readonly cpuMs?: () => number;
+	/**
+	 * Cumulative CPU split and main-thread busy time, in milliseconds. Default: `process.cpuUsage` and the event loop's
+	 * utilization, used only when `cpuMs` is not replaced. A stall whose process CPU roughly equals its length with
+	 * the loop busy is one thread spinning; high CPU with an idle loop is another thread of the process; mostly system
+	 * time points at the OS (file system, page faults) and not at JavaScript.
+	 */
+	readonly split?: () => CpuSplit;
+}
+
+/** Cumulative CPU time of this process by mode, and the time the event loop was not waiting. */
+export interface CpuSplit {
+	readonly userMs: number;
+	readonly systemMs: number;
+	readonly busyMs: number;
+}
+
+function processSplit(): CpuSplit {
+	const usage = process.cpuUsage();
+	return { userMs: usage.user / 1000, systemMs: usage.system / 1000, busyMs: performance.eventLoopUtilization().active };
 }
 
 /** One marked operation: running while `end` is `null`. */
@@ -53,6 +72,8 @@ export class EventLoopLagMonitor {
 	readonly #tickMs: number;
 	readonly #now: () => number;
 	readonly #cpuMs: () => number;
+	readonly #split: (() => CpuSplit) | null;
+	#lastSplit: CpuSplit | null;
 	readonly #active = new Set<Mark>();
 	readonly #finished: Mark[] = [];
 	#lastTick: number;
@@ -67,6 +88,8 @@ export class EventLoopLagMonitor {
 			const usage = process.cpuUsage();
 			return (usage.user + usage.system) / 1000;
 		});
+		this.#split = options.split ?? (options.cpuMs === undefined ? processSplit : null);
+		this.#lastSplit = this.#split?.() ?? null;
 		this.#lastTick = this.#now();
 		this.#lastCpu = this.#cpuMs();
 	}
@@ -75,6 +98,7 @@ export class EventLoopLagMonitor {
 	start(): () => void {
 		this.#lastTick = this.#now();
 		this.#lastCpu = this.#cpuMs();
+		this.#lastSplit = this.#split?.() ?? null;
 		const timer = setInterval(() => this.sample(), this.#tickMs);
 		timer.unref?.();
 		return () => clearInterval(timer);
@@ -125,9 +149,15 @@ export class EventLoopLagMonitor {
 		const cpuUsed = cpu - this.#lastCpu;
 		this.#lastTick = at;
 		this.#lastCpu = cpu;
+		const split = this.#split?.() ?? null;
+		const before = this.#lastSplit;
+		this.#lastSplit = split;
 		const lag = at - from - this.#tickMs;
 		if (lag < this.#thresholdMs || lag > SUSPEND_MS) return;
-		const text = `event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms): ${this.#describe(from, at)}`;
+		const modes = split === null || before === null
+			? ""
+			: `; user ${Math.round(split.userMs - before.userMs)} ms, system ${Math.round(split.systemMs - before.systemMs)} ms, event loop busy ${Math.round(split.busyMs - before.busyMs)} ms`;
+		const text = `event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms${modes}): ${this.#describe(from, at)}`;
 		if (lag >= LOOP_LAG_WARN_MS) this.#log.warn(text);
 		else this.#log.debug(text);
 	}

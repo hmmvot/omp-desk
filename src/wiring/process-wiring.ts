@@ -13,7 +13,7 @@ import * as vscode from "vscode";
 import { brokerStopAttachFor, stopBrokerThroughBroker } from "../host/broker-process-stop.ts";
 import type { BrokerStopPorts, BrokerStopTarget, BrokerStopOutcome } from "../host/broker-process-stop.ts";
 import { killAll, stopOrphanedAndIdle, stopProcess, stopRowsOnRequest } from "../host/broker-process-controller.ts";
-import type { CapturedRowStop, ProcessControllerPorts } from "../host/broker-process-controller.ts";
+import type { CapturedRowStop, ProcessControllerPorts, StopCaptureOptions } from "../host/broker-process-controller.ts";
 import { createBrokerRecordLister } from "../host/broker-process-records.ts";
 import { buildBrokerProcessCatalog, createBrokerProcessReader, sessionRowWindow } from "../host/broker-processes.ts";
 import type {
@@ -85,8 +85,8 @@ export interface ProcessWiringDeps {
 	/** Re-read the shared catalog (index, broker slots, shell slots, folders). */
 	refreshCatalog(): Promise<void>;
 	refreshLauncher(): void;
-	captureDrivenStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
-	captureRecordedStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
+	captureDrivenStop(row: BrokerProcessRow, options: StopCaptureOptions): Promise<CapturedRowStop | null>;
+	captureRecordedStop(row: BrokerProcessRow, options: StopCaptureOptions): Promise<CapturedRowStop | null>;
 	/** Hold the owning shell lifecycle for the whole authenticated stop/shutdown sequence. */
 	runBrokerStop(target: BrokerStopTarget, operation: () => Promise<BrokerStopOutcome>): Promise<BrokerStopOutcome>;
 	log: Logger;
@@ -110,6 +110,8 @@ export interface SessionProcessesDeps extends ProcessWiringDeps {
 	peers(): Promise<readonly WindowPeer[]>;
 	/** Ask a window to stop the rows it runs among `rows` through its own lifecycle, one answer per row. Never throws. */
 	askWindowToStop(holderId: string, rows: readonly RowIdentity[]): Promise<readonly PeerRowAnswer[]>;
+	/** This window as the log names it (workspace name and holder id prefix), so an explicit stop is attributable to the window that asked. */
+	requester(): string;
 }
 
 /** What the extension calls into the registered processes: view or layout changes and launcher refreshes. */
@@ -306,6 +308,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `OMP Desk: ${title}` }, work);
 		},
 		info: message => void vscode.window.showInformationMessage(`OMP Desk: ${message}`),
+		log: message => deps.log.info(message),
 		warn: message => void vscode.window.showWarningMessage(`OMP Desk: ${message}`),
 		captureDrivenStop: (row, options) => deps.captureDrivenStop(row, options),
 		captureRecordedStop: (row, options) => deps.captureRecordedStop(row, options),
@@ -351,10 +354,17 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 				void vscode.window.showWarningMessage("OMP Desk: Select a process in the Sessions view to stop.");
 				return;
 			}
+			deps.log.info(`processes: Stop asked for process row ${id} from the Processes view of ${deps.requester()}`);
 			await stopProcess(id, controllerPorts);
 		}),
-		vscode.commands.registerCommand("ompDesk.stopOrphanedProcesses", () => stopOrphanedAndIdle(controllerPorts)),
-		vscode.commands.registerCommand("ompDesk.killAll", () => killAll(controllerPorts)),
+		vscode.commands.registerCommand("ompDesk.stopOrphanedProcesses", () => {
+			deps.log.info(`processes: Stop Orphaned and Idle asked from the Processes view of ${deps.requester()}`);
+			return stopOrphanedAndIdle(controllerPorts);
+		}),
+		vscode.commands.registerCommand("ompDesk.killAll", () => {
+			deps.log.info(`processes: Kill All asked from the Processes view of ${deps.requester()}`);
+			return killAll(controllerPorts);
+		}),
 	);
 
 	return {
@@ -372,6 +382,11 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		refresh: () => read({ fresh: true }),
 		async serveStopRequest(identities, progress) {
 			const answers = await stopRowsOnRequest(identities, controllerPorts, progress);
+			// One line per row: which row another window's Kill All asked this window to stop, and what became of it (the `stop request` line before this names the window).
+			for (const [position, identity] of identities.entries()) {
+				const answer = answers[position];
+				deps.log.info(`processes: another window's Kill All asked for ${identity.ptyKind} ${identity.slot}${identity.tabId === null ? "" : ` (conversation ${identity.tabId})`}: ${answer?.state ?? "no answer"}${answer === undefined || answer.reason === "" ? "" : ` (${answer.reason})`}`);
+			}
 			// The requester is another window of this profile: this window says what it did on its behalf, so a stop it did not start is never silent.
 			const acted = answers.filter(answer => answer.state === "stopped" || answer.state === "unconfirmed");
 			if (acted.length > 0) {

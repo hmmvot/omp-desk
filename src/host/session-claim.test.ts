@@ -16,7 +16,7 @@ import { existsSync, symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 import {
 	ClaimBusyError,
 	ClaimConflictError,
@@ -575,6 +575,32 @@ describe("whether another window's holder looks alive, for display", () => {
 		assert.equal(observed?.processCreationTime, null);
 		assert.equal(await claimHolderMayBeAlive(observed!), true, "this process's own holder is live by registration");
 		await claim.release();
+	});
+
+	/** `process.kill(pid, 0)` as an account that may not open the holder answers: `EPERM` for the given pid, the real answer otherwise. */
+	function denyProbeOf(pid: number): void {
+		const real = process.kill.bind(process);
+		mock.method(process, "kill", (target: number, signal?: string | number) => {
+			if (target === pid && signal === 0) throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+			return real(target, signal);
+		});
+	}
+
+	it("takes a holder this account may not probe (EPERM) as existing, and lets its start time decide", async () => {
+		const storageDir = await makeStorageDir();
+		const pid = await liveProcess();
+		const filedAt = Date.now();
+		const same = await foreignClaim(storageDir, await makeSessionFile(), pid, { filedAt });
+		const reused = await foreignClaim(storageDir, await makeSessionFile(), pid, { processCreationTime: "2000-01-01T00:00:00.000Z", filedAt });
+		denyProbeOf(pid);
+		try {
+			assert.equal(await claimHolderMayBeAlive(same), true, "a refused probe is not an absent process");
+			assert.equal(await claimHolderSeemsAlive(same), true);
+			assert.equal(await claimHolderMayBeAlive(reused), false, "the start time still tells a reused pid apart");
+			assert.equal(await claimHolderProvablyGone(same), false);
+		} finally {
+			mock.restoreAll();
+		}
 	});
 });
 

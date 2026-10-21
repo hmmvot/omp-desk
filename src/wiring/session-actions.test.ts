@@ -107,7 +107,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		folders: undefined as unknown,
 		provider: undefined as unknown,
 		view: undefined as { message?: string; visible: boolean; selection?: readonly unknown[] } | undefined,
-		processes: null as { refresh(): Promise<{ rows: unknown[] }>; sync(): void; touch(): void; serveStopRequest(): Promise<never[]> } | null,
+		processes: null as { refresh(): Promise<{ rows: unknown[] }>; sync(): void; touch(): void; serveStopRequest(rows?: unknown[], progress?: (done: number) => Promise<void>): Promise<{ state: string }[]> } | null,
 		/** The window's startup restore: `null` once it is over (the default), otherwise what the Processes poll waits for. */
 		restoreOver: null as Promise<void> | null,
 		registry: undefined as { readOtherWindows(): Promise<{ unreadable: number; windows: unknown[] }> } | undefined,
@@ -676,6 +676,44 @@ describe("stopping a session's recorded process", () => {
 			[TAB, "Stop", undefined],
 			[TAB, "Stop", { target: 1, conflicting: false, captured: { epoch: "e1" }, gracefulOnly: true }],
 		]);
+		const dispatched = w.lines.filter(line => line.message.startsWith("stop: "));
+		assert.equal(dispatched.length, 2, "the driven route is logged before each dispatch, as the recorded route is");
+		assert.deepEqual(dispatched.map(line => line.level), ["info", "info"]);
+		assert.match(dispatched[0]!.message, new RegExp(`\\(tab ${TAB}, slot ${SLOT}\\) asked by Stop on the Sessions row of window "no folder" \\(this-win\\); no window holds the claim; the stop flow asks for the confirmation$`));
+		assert.match(dispatched[1]!.message, /asked by Stop in the Processes view of window "no folder" \(this-win\); no window holds the claim; preconfirmed, nothing asked$/);
+	});
+
+	it("refuses a stop that asked nothing while another live window holds the row, dispatches nothing, and still lets the row's own Stop through", async () => {
+		const rpc = { brokerId: "broker-1", brokerGeneration: "gen-1" };
+		const rival = createClaimHolder();
+		const heldBy = (holderId: string, pid: number) => ({ ok: true, claim: { verifiable: true, holderId, pid, processCreationTime: null, createdAt: STAMP } });
+		const index = fakeIndex([{ tabId: TAB, cwd: "C:/proj", host: recordedHost({ rpc }) as never }], {
+			stopRecordedHost: async () => ({ stopped: false, detail: "The fixture index stopped nothing.", slot: null }),
+			observeOwnership: async () => heldBy(rival.id, process.pid),
+		});
+		const recorded = { slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1", attemptStartedAt: STAMP, pid: 51704 };
+		const w = await world(index);
+		w.state.stopPort = { stopRecordedHost: async () => ({ kind: "unknown", detail: "not reached" }) };
+		const refusal = "This session is open in another window; stop it from its own window or confirm Stop on its row.";
+		for (const origin of [undefined, "kill-all", "peer-kill-all"] as const) {
+			assert.equal(await w.actions.stopHost(w.state.context, index, TAB, { recorded }, origin), false);
+		}
+		assert.deepEqual(w.warnings, [refusal, refusal, refusal]);
+		assert.deepEqual([w.dialogs, w.stopPortRequests, w.confirmedStops], [[], [], []], "nothing was asked and nothing reached the stop port");
+		const refused = w.lines.filter(line => line.message.startsWith("stop refused: "));
+		assert.deepEqual(refused.map(line => line.level), ["info", "info", "info"]);
+		assert.deepEqual(refused.map(line => /asked by (.*?) of window/.exec(line.message)?.[1]), ["Stop in the Processes view", "Kill All", "another window's Kill All"]);
+		assert.match(refused[0]!.message, new RegExp(`another window \\(${rival.id.slice(0, 8)}\\) may hold the claim; it asked nothing and another live window holds the session$`));
+		// The row's own Stop asks the user, and keeps working against a rival's recorded broker.
+		assert.equal(await w.actions.stopHost(w.state.context, index, TAB), false);
+		assert.equal(w.dialogs.length, 1);
+		assert.equal(w.stopPortRequests.length, 1);
+		assert.match(w.logged.find(line => line.startsWith("stop: ")) ?? "", /asked by Stop on the Sessions row .*another window \(\w{8}\) may hold the claim; confirmed in the dialog$/);
+		// A claim left by a window that is gone is no veto for a stop that asked nothing.
+		Object.assign(index, { observeOwnership: async () => heldBy(rival.id, 4194303) });
+		await w.actions.stopHost(w.state.context, index, TAB, { recorded });
+		assert.equal(w.stopPortRequests.length, 2);
+		assert.equal(w.dialogs.length, 1);
 	});
 
 	it("reattaches a native writer only, and refuses when this window still cannot reach it", async () => {
@@ -1034,6 +1072,38 @@ describe("the processes of the Sessions view", () => {
 		}
 	});
 
+	it("logs at Info which window asked for a Stop, Stop Orphaned and Idle or Kill All, and what a peer's Kill All asked of this window", async () => {
+		const index = fakeIndex([{ tabId: TAB, cwd: "C:/proj", host: null }]);
+		const w = await world(index);
+		w.state.provenance = { kind: "none" };
+		w.state.provider = { headlineFor: () => "headline", displayedState: () => "stopped", setProcesses: () => {} };
+		const storage = await mkdtemp(path.join(temp, "storage-"));
+		const context = { globalStorageUri: { fsPath: storage }, subscriptions: [] as { dispose(): void }[], extensionUri: { fsPath: storage } };
+		w.actions.setupProcesses(context as never, index as never, { name: "folders" } as never);
+		stub.workspace.name = "proj";
+		try {
+			await stub.commands.registered.get("ompDesk.stopProcess")!("row-unknown");
+			await stub.commands.registered.get("ompDesk.stopOrphanedProcesses")!();
+			await stub.commands.registered.get("ompDesk.killAll")!();
+			const answers = await w.state.processes!.serveStopRequest([
+				{ slot: "host:peer", brokerId: "b1", generation: "g1", ptyKind: "managed-rpc", tabId: TAB },
+				{ slot: "shell:peer", brokerId: "b2", generation: "g2", ptyKind: "folder-shell", tabId: null },
+			] as never, async () => {});
+			assert.deepEqual(answers.map(answer => answer.state), ["changed", "changed"]);
+		} finally {
+			stub.workspace.name = undefined;
+			for (const subscription of context.subscriptions) subscription.dispose();
+		}
+		const window = 'window "proj" (this-win)';
+		assert.deepEqual(w.lines.map(line => [line.level, line.message]).filter(([, message]) => message.startsWith("processes: ")), [
+			["info", `processes: Stop asked for process row row-unknown from the Processes view of ${window}`],
+			["info", `processes: Stop Orphaned and Idle asked from the Processes view of ${window}`],
+			["info", `processes: Kill All asked from the Processes view of ${window}`],
+			["info", `processes: another window's Kill All asked for managed-rpc host:peer (conversation ${TAB}): changed (that process is gone or is not the one that was shown; nothing was stopped)`],
+			["info", "processes: another window's Kill All asked for folder-shell shell:peer: changed (that process is gone or is not the one that was shown; nothing was stopped)"],
+		]);
+	});
+
 	describe("while the startup restore runs", () => {
 		/** One Processes registration over a visible view; `over` is what the window's startup restore settles. */
 		async function visibleProcesses(over: Promise<void> | null) {
@@ -1202,6 +1272,26 @@ describe("destructive actions by what holds the session", () => {
 			} finally {
 				await held.rival.release();
 			}
+		});
+
+		it("logs, before the broker is asked, who asked for the Stop, which row and slot, and who held the claim", async () => {
+			const f = await legacyFixture("stop-logged", true, true);
+			const held = await holdAsAnotherWindow(f.index, f.root, f.file!);
+			f.state.brokerSlots = { forget: async () => {} } as never;
+			const seenAtDispatch: string[] = [];
+			f.state.stopPort = { stopRecordedHost: async () => { seenAtDispatch.push(...f.lines.map(line => line.message)); return { kind: "stopped", writerGone: true, treeEmpty: true, detail: "fixture", slot: SLOT }; } };
+			stub.workspace.name = "proj";
+			try {
+				assert.equal(await f.actions.stopHost(f.state.context, f.index, TAB, undefined, "close"), true);
+			} finally {
+				stub.workspace.name = undefined;
+				await held.rival.release();
+			}
+			const holder = (id: string | null) => id?.slice(0, 8);
+			assert.deepEqual(seenAtDispatch.filter(line => line.startsWith("stop: ")), [
+				`stop: "New session 1" (tab ${TAB}, slot ${SLOT}) asked by Close on the Sessions row of window "proj" (${holder(f.index.claimHolder.id)}); ` +
+				`another window (${holder(held.holderId)}) may hold the claim; confirmed in the dialog`,
+			]);
 		});
 
 		it("keeps the row's process, slot and credentials when the broker could not prove the writer gone", async () => {

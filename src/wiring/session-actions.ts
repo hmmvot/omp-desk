@@ -13,6 +13,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
+import type { StopOrigin } from "../host/broker-process-controller.ts";
 import type { DetailTabs } from "../host/detail-tabs.ts";
 import type { EditorCoordinator } from "../host/editor-coordinator.ts";
 import type { EditorSlotRegistry } from "../host/editor-slots.ts";
@@ -20,6 +21,7 @@ import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-
 import type { PtyBrokerClient } from "../host/pty-client.ts";
 import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
+import { claimHolderMayBeAlive } from "../host/session-claim.ts";
 import type { RestoreOutcome, SessionIndex } from "../host/session-index.ts";
 import type { SessionRuntime, TransitionToken } from "../runtime/session-runtime.ts";
 import type { KillSelection } from "../host/session-kill.ts";
@@ -51,6 +53,38 @@ import { registerStatsDashboard } from "./stats-wiring.ts";
 const DELETE_TRANSCRIPT_LABEL = "Delete";
 /** The confirmation button for the explicit stop of a row's recorded OMP process. */
 const STOP_RECORDED_HOST_LABEL = "Stop OMP Process";
+/** What the log says asked for a stop: the surface, so an explicit stop is attributable to who pressed it and where. */
+const STOP_ORIGIN_TEXT: Readonly<Record<StopOrigin, string>> = {
+	"sessions-row": "Stop on the Sessions row",
+	"close": "Close on the Sessions row",
+	"view-switch": "the stop offered after a failed view switch",
+	"processes-stop": "Stop in the Processes view",
+	"kill-all": "Kill All",
+	"peer-kill-all": "another window's Kill All",
+};
+
+/** Who holds a session's claim, as a stop judges and logs it. `other-window` is a holder that may be alive. */
+type StopClaimView =
+	| { readonly kind: "none" }
+	| { readonly kind: "this-window" }
+	| { readonly kind: "other-window"; readonly holder: string }
+	| { readonly kind: "gone-window"; readonly holder: string }
+	| { readonly kind: "unreadable" };
+
+function describeStopClaim(claim: StopClaimView): string {
+	switch (claim.kind) {
+		case "none": return "no window holds the claim";
+		case "this-window": return "this window holds the claim";
+		case "other-window": return `another window (${claim.holder}) may hold the claim`;
+		case "gone-window": return `the claim is left by a window that is gone (${claim.holder})`;
+		case "unreadable": return "the claim could not be read";
+	}
+}
+
+/** This window as the log names it: the workspace name and the holder id prefix, as Kill's requester does. */
+function windowRequester(index: SessionIndex): string {
+	return `window "${vscode.workspace.name ?? "no folder"}" (${index.claimHolder.id.slice(0, 8)})`;
+}
 
 /** What the actions read and change of one editor record of this window. */
 export interface SessionTab {
@@ -226,6 +260,8 @@ export interface SessionActions {
 		index: SessionIndex,
 		argument: unknown,
 		preconfirmed?: { readonly recorded: RecordedStopCapture; readonly gracefulOnly?: boolean },
+		/** Who asked, for the log; a Stop on the row when omitted (a preconfirmed stop is the Processes view's). */
+		origin?: StopOrigin,
 	): Promise<boolean>;
 	/** Kill (ADR-0060): end the process tree of a session row, or of a process row of the Terminals group, at once. */
 	kill(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void>;
@@ -388,6 +424,29 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		});
 	}
 
+	/** The claim of a row as a stop reads it, once, before anything is dispatched. */
+	async function readStopClaim(index: SessionIndex, tabId: string): Promise<StopClaimView> {
+		const observed = await index.observeOwnership(tabId);
+		if (!observed.ok) return { kind: "unreadable" };
+		const claim = observed.claim;
+		if (claim === null) return { kind: "none" };
+		if (!claim.verifiable || claim.holderId === null) return { kind: "unreadable" };
+		if (claim.holderId === index.claimHolder.id) return { kind: "this-window" };
+		const holder = claim.holderId.slice(0, 8);
+		return await claimHolderMayBeAlive(claim) ? { kind: "other-window", holder } : { kind: "gone-window", holder };
+	}
+
+	/** The row a stop is about, who asked and how the row is held: the same words in the dispatch line and in a refusal. */
+	function describeStopSubject(index: SessionIndex, tabId: string, entry: SessionIndexEntry, slot: string | null, origin: StopOrigin, claim: StopClaimView): string {
+		const title = deps.launcherProvider()?.headlineFor(tabId) ?? sessionHeadline(entry, null);
+		return `"${title}" (tab ${tabId}${slot === null ? "" : `, slot ${slot}`}) asked by ${STOP_ORIGIN_TEXT[origin]} of ${windowRequester(index)}; ${describeStopClaim(claim)}`;
+	}
+
+	/** One Info line before a stop is dispatched, for both the driven and the recorded route, so no session ends without a named initiator. */
+	function logStopDispatch(index: SessionIndex, tabId: string, entry: SessionIndexEntry, slot: string, origin: StopOrigin, confirmation: string, claim: StopClaimView): void {
+		deps.log.info(`stop: ${describeStopSubject(index, tabId, entry, slot, origin, claim)}; ${confirmation}`);
+	}
+
 	/**
 	 * Stop this row's recorded OMP process through the broker that owns it.
 	 *
@@ -401,6 +460,9 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	 * decides whether it may happen: exact lifecycle target and durable stopped intent
 	 * written before dispatch. Unknown outcomes are truthful, not stale ownership;
 	 * no numeric PID is ever signalled.
+	 *
+	 * Every dispatch is logged first with who asked (`asker`), the confirmation it had and who holds the claim. A stop that
+	 * asked nothing (`preconfirmed`) is refused outright when another live window holds the session.
 	 */
 	async function stopSessionHost(
 		context: vscode.ExtensionContext,
@@ -412,6 +474,8 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		 * read just before (`recorded`), and anything else is refused, never stopped.
 		 */
 		preconfirmed?: { readonly recorded: RecordedStopCapture; readonly gracefulOnly?: boolean },
+		/** Who asked, for the log: the Sessions row's Stop when omitted, the Processes view's when `preconfirmed`. */
+		asker?: StopOrigin,
 	): Promise<boolean> {
 		const target = deps.sessionTarget(index, argument);
 		if (target === null) {
@@ -423,6 +487,15 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			deps.warn(
 				"This session has no running process that this window can stop. Refresh Sessions and try again.",
 			);
+			return false;
+		}
+		const origin: StopOrigin = asker ?? (preconfirmed === undefined ? "sessions-row" : "processes-stop");
+		const claim = await readStopClaim(index, tabId);
+		// A stop that asked the user nothing (the Processes view's Stop, a Kill All dispatch) must never end a session another
+		// live window holds: that window's user never agreed to it. The Stop on the row asks, and keeps working against a rival's broker.
+		if (preconfirmed !== undefined && claim.kind === "other-window") {
+			deps.log.info(`stop refused: ${describeStopSubject(index, tabId, entry, null, origin, claim)}; it asked nothing and another live window holds the session`);
+			deps.warn("This session is open in another window; stop it from its own window or confirm Stop on its row.");
 			return false;
 		}
 		if (entry.host.transport === "native" && deps.sessionRuntime().snapshot(tabId) === null) {
@@ -453,6 +526,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 					captured: await deps.sessionRuntime().readTransitionFacts({ conversation: tabId, target: live.attachment }),
 					gracefulOnly: preconfirmed.gracefulOnly === true,
 				};
+			logStopDispatch(index, tabId, entry, live.slot, origin, preconfirmed === undefined ? "the stop flow asks for the confirmation" : "preconfirmed, nothing asked", claim);
 			return await deps.confirmAndStopRuntime(context, index, tabId, "Stop", captured);
 		}
 		// The transport has to exist before anything is confirmed: this row's own recorded
@@ -493,6 +567,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				return false;
 			}
 		}
+		logStopDispatch(index, tabId, entry, provenance.slot, origin, preconfirmed === undefined ? "confirmed in the dialog" : "preconfirmed, nothing asked", claim);
 		deps.stoppingTabs().add(tabId);
 		deps.refreshLauncher();
 		try {
@@ -613,6 +688,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				}));
 			},
 			askWindowToStop: (holderId, rows) => askWindowToStop(index.claimStorageDir, { to: holderId, from: index.claimHolder.id, rows }),
+			requester: () => windowRequester(index),
 			async runBrokerStop(target, operation) {
 				if (target.kind !== "folder-shell") return await operation();
 				return await index.lifecycle.run(target.slot, async () => {
@@ -638,7 +714,13 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				if (state === undefined || held === null || tabId === null || (hostTabId !== null && hostTabId !== tabId)) return null;
 				const conflicting = deps.passiveReasonForSlot(state.slotId) !== null;
 				const captured = await deps.sessionRuntime().readTransitionFacts({ conversation: tabId, target: held.attachment });
-				return { run: () => deps.confirmAndStopRuntime(context, index, tabId, "Stop", { target: held.attachment, conflicting, captured, gracefulOnly: !options.offerForce }) };
+				return {
+					run: async () => {
+						const entry = index.get(tabId);
+						if (entry !== null) logStopDispatch(index, tabId, entry, held.slot, options.origin, "preconfirmed, nothing asked", await readStopClaim(index, tabId));
+						return await deps.confirmAndStopRuntime(context, index, tabId, "Stop", { target: held.attachment, conflicting, captured, gracefulOnly: !options.offerForce });
+					},
+				};
 			},
 			async captureRecordedStop(row, options) {
 				const tabId = row.host?.kind === "session" ? row.host.tabId : null;
@@ -659,7 +741,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 					attemptStartedAt: entry.host.startedAt,
 					pid: entry.host.pid,
 				};
-				return { run: () => stopSessionHost(context, index, { tabId }, { recorded, gracefulOnly: !options.offerForce }) };
+				return { run: () => stopSessionHost(context, index, { tabId }, { recorded, gracefulOnly: !options.offerForce }, options.origin) };
 			},
 			log: deps.log,
 		}));

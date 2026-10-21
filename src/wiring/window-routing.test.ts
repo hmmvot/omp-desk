@@ -487,6 +487,50 @@ describe("switching to the window that holds a session", () => {
 		assert.deepEqual([refusing.warnings, unfocused.warnings], [[], []]);
 	});
 
+	it("says which check the holder failed instead of one sentence for every refusal", async () => {
+		const target = URI.file("C:/omp-vscode/other.code-workspace").toString();
+		const cases = [
+			["no-editor", /no longer has an editor open/],
+			["run-mismatch", /records another run of this session/],
+			["binding-mismatch", /no editor connected to this run/],
+			["not-holder", /no longer holds this session/],
+			["busy", /could not bring the session's tab to the front just now/],
+		] as const;
+		for (const [failed, sentence] of cases) {
+			// The three checks of the holder travel beside the refusal; not-holder and busy are reasons an older build also reads.
+			const outcome: ServeOutcome = failed === "not-holder" || failed === "busy" ? { ok: false, focused: false, refusal: failed } : { ok: false, focused: false, check: failed };
+			const w = await holderOf(target, outcome);
+			await w.routing.switchToWindow(w.index, TAB);
+			assert.match(w.informed[0] ?? "", sentence, failed);
+			assert.deepEqual(w.refreshedOwnership, [[TAB]], "the row is observed again");
+			assert.ok(w.lines.some(line => line.level === "info" && line.message.includes(`refused by `) && line.message.includes(`(${failed})`)), "the reason is logged at info");
+		}
+	});
+
+	it("logs the plan, the outcome and the notice at info, and reads the other windows afresh before planning", async () => {
+		const target = URI.file("C:/omp-vscode/other.code-workspace").toString();
+		const w = await holderOf(target, { ok: true, focused: false });
+		const order: string[] = [];
+		const refresh = w.registry.refresh;
+		w.registry.refresh = async () => { order.push("refreshed"); return refresh(); };
+		const observe = w.fake.observeOwnership;
+		w.fake.observeOwnership = async tabId => { order.push("claim read"); return observe(tabId); };
+		await w.routing.switchToWindow(w.index, TAB);
+		assert.deepEqual(order.slice(0, 2), ["refreshed", "claim read"], "the registry is read before the plan is made");
+		const info = w.lines.filter(line => line.level === "info").map(line => line.message);
+		assert.ok(info.some(line => line.includes("plan switch to window owner-wi")), "the plan");
+		assert.ok(info.some(line => /: unfocused after \d+ ms; focused file:/.test(line)), "the outcome, its time and the URI focused");
+		assert.ok(info.some(line => line.startsWith("notice: The window holding this session selected its tab")), "the notice is logged with its text");
+	});
+
+	it("still switches when the registry cannot be read afresh, and logs it", async () => {
+		const w = await holderOf(URI.file("C:/omp-vscode/other.code-workspace").toString(), { ok: true, focused: true });
+		w.registry.refresh = async () => { throw new Error("locked"); };
+		await w.routing.switchToWindow(w.index, TAB);
+		assert.ok(w.logged.includes("switch window: the other windows could not be read afresh: locked"));
+		assert.equal(w.calls.length, 1);
+	});
+
 	it("says that the session is no longer open elsewhere when the claim went away", async () => {
 		const w = await holderOf(URI.file("C:/omp-vscode/x.code-workspace").toString(), null);
 		w.state.claim = null;
@@ -1115,18 +1159,19 @@ describe("serving another window's request to select a session's tab", () => {
 
 	it("refuses, selecting nothing, when this window records another run than the request names", async () => {
 		const { w, serveIt } = await setup(2);
-		assert.deepEqual(await serveIt({ incarnation: `${OWNER}_an-earlier-launch` }), refused);
+		assert.deepEqual(await serveIt({ incarnation: `${OWNER}_an-earlier-launch` }), { ok: false, focused: false, check: "run-mismatch" });
+		assert.ok(w.lines.some(line => line.level === "info" && /select id-1 from window other for tab:88888888: refused \(run-mismatch\)/.test(line.message)), "the failing check is logged at info");
 		assert.deepEqual(w.selected, []);
 	});
 
 	it("refuses, selecting nothing, when the claim is not this window's or is of another generation, or when the requester gave up", async () => {
 		const { w, serveIt } = await setup(3);
 		w.state.claim = elsewhere;
-		assert.deepEqual(await serveIt(), refused);
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, refusal: "not-holder" });
 		w.state.claim = earlierRun;
-		assert.deepEqual(await serveIt(), refused, "the claim names this window but not the generation the catalog records");
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, check: "run-mismatch" }, "the claim names this window but not the generation the catalog records");
 		w.state.claim = null;
-		assert.deepEqual(await serveIt(), refused, "no claim at all");
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, refusal: "not-holder" }, "no claim at all");
 		w.state.claim = ours;
 		assert.deepEqual(await serveIt({}, { ...wanted, stillWanted: async () => false }), refused);
 		assert.deepEqual(w.selected, []);
@@ -1134,26 +1179,26 @@ describe("serving another window's request to select a session's tab", () => {
 
 	it("refuses, selecting nothing, for a session it has no editor for, and when it has no live host to serve it", async () => {
 		const { w, serveIt } = await setup(4);
-		assert.deepEqual(await serveIt({ tabId: tabFor(5) }), refused);
+		assert.deepEqual(await serveIt({ tabId: tabFor(5) }), { ok: false, focused: false, check: "run-mismatch" });
 		w.state.liveHost = false;
-		assert.deepEqual(await serveIt(), refused, "showing a not-yet-revived editor could otherwise start a restore of a session nothing serves");
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, check: "binding-mismatch" }, "showing a not-yet-revived editor could otherwise start a restore of a session nothing serves");
 		w.state.liveHost = true;
 		w.state.editorTabs.clear();
-		assert.deepEqual(await serveIt(), refused, "VS Code shows no tab for the editor: nothing can be revived, so no command is issued and no mark is left");
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, check: "no-editor" }, "VS Code shows no tab for the editor: nothing can be revived, so no command is issued and no mark is left");
 		assert.deepEqual([w.selected, [...w.requestSelections]], [[], []]);
 	});
 
 	it("refuses a request that names another binding of the editor than the one now serving the session (a native handover and back)", async () => {
 		const { w, serveIt } = await setup(6);
 		w.state.binding.generation = 4;
-		assert.deepEqual(await serveIt(), refused);
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, check: "binding-mismatch" });
 		assert.deepEqual(w.selected, []);
 		assert.deepEqual(await serveIt({ binding: null }), { ok: true, focused: true }, "a request that saw no published binding is fenced by the run alone");
 	});
 
 	it("refuses a request that names the binding of another editor slot of the same run", async () => {
 		const { w, serveIt } = await setup(0);
-		assert.deepEqual(await serveIt({ binding: `${"f".repeat(32)}.3` }), refused);
+		assert.deepEqual(await serveIt({ binding: `${"f".repeat(32)}.3` }), { ok: false, focused: false, check: "binding-mismatch" });
 		assert.deepEqual(w.selected, []);
 	});
 
@@ -1174,11 +1219,11 @@ describe("serving another window's request to select a session's tab", () => {
 		const claimMoved = await setup(7);
 		let reads = 0;
 		claimMoved.w.fake.observeOwnership = async () => ({ ok: true, claim: ++reads === 1 ? ours : elsewhere });
-		assert.deepEqual(await claimMoved.serveIt(), refused);
+		assert.deepEqual(await claimMoved.serveIt(), { ok: false, focused: false, refusal: "not-holder" });
 		const rebound = await setup(8);
 		let looks = 2;
 		rebound.w.fake.slotBinding = () => ({ ...rebound.w.state.binding, generation: ++looks });
-		assert.deepEqual(await rebound.serveIt({ binding: null }), refused);
+		assert.deepEqual(await rebound.serveIt({ binding: null }), { ok: false, focused: false, check: "binding-mismatch" });
 	});
 
 	it("defers the serializer's restore of a tab it is showing, however late VS Code revives the editor, and only once", async () => {
@@ -1199,7 +1244,7 @@ describe("serving another window's request to select a session's tab", () => {
 	it("keeps the serializer deferral even when the selection did not end with the tab active", async () => {
 		const { w, tabId, serveIt } = await setup(1);
 		w.state.selectResult = false;
-		assert.deepEqual(await serveIt(), refused);
+		assert.deepEqual(await serveIt(), { ok: false, focused: false, refusal: "busy" });
 		assert.ok(w.requestSelections.has(tabId), "a command may already have triggered the revival");
 		w.state.liveHost = false;
 		await w.routing.openRestoredTabIfUncovered(undefined as never, w.index, tabId);

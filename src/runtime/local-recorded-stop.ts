@@ -16,6 +16,7 @@ import { stopBrokerOwnedHost } from "../host/rpc-reconcile.ts";
 import type { RecordedHostStopPort, StopRecordedHostResult } from "../host/session-availability.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import { isManagedHost } from "../host/session-model.ts";
+import type { SessionIndexEntry } from "../host/session-model.ts";
 import { recordedControlOwner } from "./local-control.ts";
 import type { LocalWriterVerifier } from "./local-writer.ts";
 import type { LocalHostControl } from "./local-control.ts";
@@ -54,6 +55,12 @@ export function readBrokerProvenance(sources: BrokerProvenanceSources, tabId: st
 		if (byEditor.kind === "unreadable") unreadable = true;
 	}
 	return unreadable ? { kind: "unreadable" } : { kind: "none" };
+}
+
+/** The row a recorded stop is about, as its log lines name it: the tab, its cached title (when it has one) and the slot its broker holds it under. */
+function describeStopRow(entry: SessionIndexEntry, slot: string): string {
+	const title = (entry.title ?? "").replace(/\s+/g, " ").trim();
+	return `${entry.tabId}${title === "" ? "" : ` "${title}"`} (slot ${slot})`;
 }
 
 /**
@@ -108,7 +115,7 @@ export function createRecordedHostStopPort(
 				expected: entry.host !== null && isManagedHost(entry.host) ? (entry.host.rpc ?? null) : null,
 			});
 			if (!stopped.ok) {
-				ports.log.warn(`recorded host stop ${entry.tabId}: ${stopped.reason}`);
+				ports.log.warn(`recorded host stop ${describeStopRow(entry, provenance.slot)}: ${stopped.reason}`);
 				return {
 					kind: "unknown",
 					// A refusal that never dispatched proves nothing was stopped. One that did is
@@ -118,7 +125,7 @@ export function createRecordedHostStopPort(
 						: "This window could not reach the session safely. Nothing was stopped; refresh Sessions and try again.",
 				};
 			}
-			ports.log.info(`recorded host stop ${entry.tabId}: ${stopped.verdict.diagnosticDetail ?? stopped.verdict.detail}`);
+			ports.log.info(`recorded host stop ${describeStopRow(entry, provenance.slot)}: ${stopped.verdict.diagnosticDetail ?? stopped.verdict.detail}`);
 			return {
 				kind: "stopped",
 				writerGone: stopped.verdict.writerGone,

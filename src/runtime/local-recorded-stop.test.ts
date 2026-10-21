@@ -91,6 +91,19 @@ describe("the transport that stops a recorded host", () => {
 		const native = entry({ host: { pid: 1, startedAt: STAMP, transport: "native", rpc: null } });
 		assert.deepEqual(await port({ kind: "slot", slot: SLOT }, {}).stop(native), { kind: "unknown", detail: "Stop this session from its Terminal editor, or use /exit there." });
 	});
+
+	it("names the tab, its title and the slot in the line it logs for a stop the broker could not carry out", async () => {
+		const noRecord = { readRecord: async () => ({ kind: "none" }) };
+		const stopping = port({ kind: "slot", slot: SLOT }, noRecord);
+		const outcome = await stopping.stop(entry({ title: "  Fix the\n build  " }));
+		assert.equal(outcome.kind, "unknown");
+		assert.deepEqual(stopping.logged.map(line => [line.level, line.message]), [
+			["warn", `recorded host stop ${TAB} "Fix the build" (slot ${SLOT}): no broker is recorded for this row's slot, so this window cannot reach the OMP process it started`],
+		]);
+		const untitled = port({ kind: "slot", slot: SLOT }, noRecord);
+		await untitled.stop(entry());
+		assert.match(untitled.logged[0]?.message ?? "", new RegExp(`^recorded host stop ${TAB} \\(slot ${SLOT}\\): `));
+	});
 });
 
 describe("stopping a recorded host under the conversation's gate", () => {
