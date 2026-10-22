@@ -191,7 +191,8 @@ export const harness = {
     w.editorPanels = registerEditorPanels({ ...editorPanelsDeps(), createWebviewPanel: handler });
     return () => { w.editorPanels = previous; };
   },
-  installWindow(next) { window = next; },
+  // The window a case replaces is disposed as deactivation disposes it: an operation that case left pending (a Resume still waiting for its writer) must not keep the process alive through its clocks.
+  installWindow(next) { window?.pendingDisplay.dispose(); window?.pending.dispose(); window = next; },
   window: () => windowState(),
   createWindowState,
   localLauncher: (context, index) => localLauncher(context, index, fixtureChat), handleTerminalGuestMessage,
@@ -441,6 +442,7 @@ interface WindowFixture {
     refreshReadiness(tabId: string): void;
   };
   readonly hostControlAttempts: WeakMap<object, Promise<void>>;
+  readonly pending: { get(key: string): unknown; settle(key: string): void };
 }
 
 interface Harness {
@@ -6060,6 +6062,13 @@ describe("Resume from a stopped Chat", () => {
     throw new Error("the page never showed the expected state");
   }
 
+  /** The Resume the page asked for has run to its end: nothing of it is still in flight when the case ends and the next one replaces the window. */
+  const resumeEnded = () => settle(() => {
+    const { pending } = harness.window();
+    pending.settle(TAB);
+    return pending.get(TAB) === undefined;
+  });
+
   /** A stopped session: its process exited, so its row has no runtime, and the page still shows the Resume button. */
   async function stoppedChat(release: boolean, restore: (options: { allowStoppedResume: boolean }, index: Record<string, unknown>, native: ReturnType<typeof runtime>) => Promise<unknown>) {
     const saved = storage(); const native = runtime(871);
@@ -6108,7 +6117,7 @@ describe("Resume from a stopped Chat", () => {
         await bounded(f.host.sessionOf(TAB)!.start());
         await settle(() => f.rendered.getSnapshot().phase === "live");
         assert.equal(f.rendered.writable, true, "the composer becomes writable");
-      } finally { f.host.dispose(); harness.forgetTurnActivity(f.index, TAB); }
+      } finally { await resumeEnded(); f.host.dispose(); harness.forgetTurnActivity(f.index, TAB); }
     });
   }
 
@@ -6121,7 +6130,7 @@ describe("Resume from a stopped Chat", () => {
       const shown = await settle(() => { const snapshot = f.rendered.getSnapshot(); return snapshot.phase === "blocked" ? snapshot : null; });
       assert.equal(shown.readOnlyReason, reason, "the page names why Resume did not start the session");
       assert.equal(f.rendered.writable, false);
-    } finally { f.host.dispose(); harness.forgetTurnActivity(f.index, TAB); }
+    } finally { await resumeEnded(); f.host.dispose(); harness.forgetTurnActivity(f.index, TAB); }
   });
 });
 
@@ -6152,13 +6161,16 @@ describe("Quote Selection to Session in the Markdown preview", () => {
     const index = indexFixture(runtime(894)) as unknown as SessionIndex;
     harness.reset(index, null);
     harness.clipboardText("kept");
-    const infos = harness.infos().length;
+    const infos: string[] = [];
+    harness.information(async message => { infos.push(String(message)); return undefined; });
+    // Pickers of earlier cases stay in the fixture's list: only the ones this case opens count.
+    const pickers = harness.quickPickCount();
     showPreview("Preview chat.md");
     copyingCommand("");
     await harness.quotePreviewSelection(index);
     assert.equal(harness.clipboardText(), "kept");
-    assert.deepEqual(harness.infos().slice(infos), ["OMP Desk: Select some text in the preview first."]);
-    assert.equal(harness.quickPickCount(), 0);
+    assert.deepEqual(infos, ["OMP Desk: Select some text in the preview first."]);
+    assert.equal(harness.quickPickCount(), pickers);
   });
 
   it("the preview opened as an editor (a custom editor tab with the plain file name as its label) is copied from and names its file exactly", async () => {
@@ -6166,11 +6178,12 @@ describe("Quote Selection to Session in the Markdown preview", () => {
     harness.reset(index, null);
     harness.setActiveTab({ label: "world.md", input: harness.customTabInput("vscode.markdown.preview.editor", "D:\\Work\\Repo\\docs\\world.md") });
     const calls = copyingCommand("Rendered words.");
+    const pickers = harness.quickPickCount();
     const quoting = harness.quotePreviewSelection(index);
-    for (let waited = 0; harness.lastQuickPick() === undefined && waited < 100; waited++) await new Promise(resolve => setTimeout(resolve, 20));
+    for (let waited = 0; harness.quickPickCount() === pickers && waited < 100; waited++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.deepEqual(calls.map(call => call[0]), ["editor.action.clipboardCopyAction"]);
     const picker = harness.lastQuickPick();
-    assert.ok(picker !== undefined, "the quote went on to choose a session");
+    assert.ok(harness.quickPickCount() > pickers && picker !== undefined, "the quote went on to choose a session");
     picker.dismiss();
     await quoting;
   });
