@@ -3590,7 +3590,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		const vscodeCopy = `(()=>{
 		 window.lastFocused=null;window.copied=[];
 		 window.addEventListener('focusin',()=>{const f=document.activeElement;if(f&&f!==document.body&&f!==document.documentElement)window.lastFocused=f});
-		 document.addEventListener('copy',()=>window.copied.push({text:getSelection().toString(),active:document.activeElement?.className||document.activeElement?.tagName}),true);
+		 document.addEventListener('copy',()=>window.copied.push({text:getSelection().toString(),active:document.activeElement?.id||document.activeElement?.className||document.activeElement?.tagName}),true);
 		 window.vscodeCopy=()=>{const active=document.activeElement;
 		  if((active===document.body||active===document.documentElement)&&window.lastFocused?.isConnected)window.lastFocused.focus({preventScroll:true});
 		  return document.execCommand('copy')};
@@ -4317,14 +4317,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 		});
 
-		await t.test("every way a quote goes is one Ctrl+Z from coming back, whether the removal was a click or a key on the Remove quote button, a deleted selection or Backspace taking prefix levels, and the focus is in the field afterwards", async () => {
-			await reset("quote-undo");
-			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
-			try {
-				const draft = "intro\n\n> first quote\n> second line\nmy comment\n\n> other quote\n";
-				const removed = "intro\n\nmy comment\n\n> other quote\n";
-				const quoteStart = "intro\n\n".length;
-				/** Ctrl+Z as the keyboard sends it: only the keydown the field's handler reads, no editing command to fall back on. */
 		const sendWithPreference = (sendWith: string): Promise<unknown> => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,sendWith:'${sendWith}'})`);
 		const enterKey = async (modifiers = 0): Promise<void> => {
 			for (const type of ["keyDown", "keyUp"]) await ui.call("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers, ...(type === "keyDown" ? { text: "\r" } : {}) });
@@ -4436,6 +4428,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("every way a quote goes is one Ctrl+Z from coming back, whether the removal was a click or a key on the Remove quote button, a deleted selection or Backspace taking prefix levels, and the focus is in the field afterwards", async () => {
+			await reset("quote-undo");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				const draft = "intro\n\n> first quote\n> second line\nmy comment\n\n> other quote\n";
+				const removed = "intro\n\nmy comment\n\n> other quote\n";
+				const quoteStart = "intro\n\n".length;
+				/** Ctrl+Z as the keyboard sends it: only the keydown the field's handler reads, no editing command to fall back on. */
 				const ctrlZ = (): Promise<void> => press("z", "KeyZ", 90, { modifiers: 2 });
 				const expectRestored = async (what: string, expected: string): Promise<void> => {
 					await ctrlZ();
