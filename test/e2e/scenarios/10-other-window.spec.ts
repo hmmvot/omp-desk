@@ -12,7 +12,7 @@ import type { Page } from "@playwright/test";
 import { deskLogLines } from "../support/desk-log.ts";
 import type { Desk } from "../support/desk.ts";
 import { expect, test } from "../support/fixtures.ts";
-import { startCpuLoad, type Load } from "../support/load.ts";
+import { CPU_LOAD_SKIP_REASON, cpuLoadAllowed, startCpuLoad, type Load } from "../support/load.ts";
 import type { RunState } from "../support/state.ts";
 
 const REQUESTER_HELD = /requester: open of a row this window does not run \S+ held elsewhere=true/;
@@ -54,6 +54,7 @@ test("a session another window runs shows as held there, and a click switches to
 });
 
 test("the same while the CPU is saturated (twice the logical processors spinning)", async ({ desk, state }) => {
+	test.skip(!cpuLoadAllowed, CPU_LOAD_SKIP_REASON);
 	test.setTimeout(300_000);
 	await otherWindowScenario(desk, state, `loaded-${Date.now().toString(36)}`, 120_000, true);
 });

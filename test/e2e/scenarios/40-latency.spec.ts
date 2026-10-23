@@ -18,7 +18,7 @@ import type { Page } from "@playwright/test";
 import type { Desk } from "../support/desk.ts";
 import { expect, test } from "../support/fixtures.ts";
 import { clickToReady } from "../support/latency.ts";
-import { startCpuLoad } from "../support/load.ts";
+import { CPU_LOAD_SKIP_REASON, cpuLoadAllowed, startCpuLoad } from "../support/load.ts";
 import { SKILL_NAME } from "../support/fixtures-constants.ts";
 import type { RunState } from "../support/state.ts";
 
@@ -87,6 +87,7 @@ test("quick and cached paths stay inside their budgets", async ({ desk, state })
 });
 
 test("the same measurements under CPU load are recorded", async ({ desk, state }) => {
+	test.skip(!cpuLoadAllowed, CPU_LOAD_SKIP_REASON);
 	test.setTimeout(480_000);
 	const page = await desk.window("alpha-desk");
 	const load = startCpuLoad();
