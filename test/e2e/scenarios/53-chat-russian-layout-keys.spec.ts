@@ -112,5 +112,8 @@ test("every Desk keybinding of a Chat fires for the character a Russian layout t
 		await pressRussian(cdp, chord);
 		await expect.poll(async () => (await quickInput.isVisible()) || (await tabs.count()) > tabsBefore, { message: `${chord.name} opened a picker or a session`, timeout: 30_000 }).toBe(true);
 		if (await quickInput.isVisible()) await closeQuickInput(page);
+		// A session the chord started is still loading its page: a chord pressed before the page listens is lost, and the next
+		// row would open nothing.
+		else await expect(desk.composer(desk.chat(page)), `the session ${chord.name} started`).toBeVisible({ timeout: 30_000 });
 	}
 });

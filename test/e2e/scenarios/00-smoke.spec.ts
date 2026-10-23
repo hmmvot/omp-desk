@@ -31,10 +31,14 @@ test("workbench trees, the nested Chat webview and the mock model work through o
 	const requests: { lastUserText: string }[] = await (await fetch(`${state.mockUrl}/__requests`)).json();
 	expect(requests.some(request => request.lastUserText === "hello there")).toBe(true);
 
-	// A Settings webview *view* of the side bar, one more nested iframe, lists the extension's own settings.
-	await sidebar.getByRole("button", { name: /^Settings/ }).click();
+	// A Settings webview *view* of the side bar, one more nested iframe, lists the extension's own settings. It is collapsed
+	// again afterwards: an expanded view keeps taking the Sessions list's room for every later scenario.
+	const settingsHeader = sidebar.getByRole("button", { name: /^Settings/ });
+	await settingsHeader.click();
 	const settings = desk.sidebarWebview(page);
 	await expect(settings.getByRole("searchbox", { name: "Search settings" })).toBeVisible();
 	await expect(settings.getByRole("article", { name: "Tool Call Detail" })).toBeVisible();
 	await expect(settings.getByRole("combobox", { name: "Tool Call Detail" }).locator("option:checked")).toHaveText("overview");
+	await settingsHeader.click();
+	await expect(settingsHeader).toHaveAttribute("aria-expanded", "false");
 });

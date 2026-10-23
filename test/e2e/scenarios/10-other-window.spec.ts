@@ -16,7 +16,7 @@ import { CPU_LOAD_SKIP_REASON, cpuLoadAllowed, startCpuLoad, type Load } from ".
 import type { RunState } from "../support/state.ts";
 
 const REQUESTER_HELD = /requester: open of a row this window does not run \S+ held elsewhere=true/;
-const REQUESTER_ANSWER = /requester: answer seen select \S+ served/;
+const REQUESTER_ANSWER = /requester: answer seen select \S+ for \S+ to window \S+ served/;
 
 /** `patience` is the timeout of every wait after the session runs; `underLoad` saturates the CPU from that point. */
 async function otherWindowScenario(desk: Desk, state: RunState, marker: string, patience: number, underLoad: boolean): Promise<void> {

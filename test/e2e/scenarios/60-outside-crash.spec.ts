@@ -30,7 +30,7 @@ async function crashScenario(desk: Desk, state: RunState, tag: string, crash: (b
 		const { brokerPid, childPid } = recordedSession(state, marker)!;
 		expect(brokerPid, "Desk records the broker of the session").not.toBeNull();
 		const treeA = await desk.sessionsTree(a);
-		await expect(treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) })).toBeVisible({ timeout: 30_000 });
+		await desk.revealSessionRow(a, treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) }));
 		const treeB = await desk.sessionsTree(b);
 		await expect(treeB.getByRole("treeitem", { name: new RegExp(`${marker}.*process running`) })).toBeVisible();
 
@@ -39,7 +39,7 @@ async function crashScenario(desk: Desk, state: RunState, tag: string, crash: (b
 		const stopped = new RegExp(`${marker}, Stopped`);
 		await expect(treeB.getByRole("treeitem", { name: stopped })).toBeVisible({ timeout: NOTICE_WITHIN_MS });
 		await expect(chat.getByText(STOPPED_CHAT)).toBeVisible();
-		await expect(treeA.getByRole("treeitem", { name: stopped })).toBeVisible({ timeout: NOTICE_WITHIN_MS });
+		await desk.revealSessionRow(a, treeA.getByRole("treeitem", { name: stopped }), NOTICE_WITHIN_MS);
 		expect(pidAlive(childPid!), "the OMP process is gone").toBe(false);
 		expect(await desk.dialog(b).count(), "no question about a process that is already gone").toBe(0);
 

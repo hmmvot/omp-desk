@@ -111,6 +111,21 @@ export class Desk {
 	}
 
 	/**
+	 * Waits until `row` of a window's Sessions list is in the DOM. The list is virtualised and every scenario leaves a running
+	 * session in it, so a row outside the few lines the pane shows does not exist for a locator: the list is scrolled from its
+	 * top, a page at a time, until the row shows up, as a user scrolls to find it.
+	 */
+	async revealSessionRow(page: Page, row: Locator, timeout = 30_000): Promise<void> {
+		const tree = await this.sessionsTree(page);
+		await expect(async () => {
+			if (await row.isVisible()) return;
+			await tree.press("Home");
+			for (let step = 0; step < 60 && !await row.isVisible(); step++) await tree.press("PageDown");
+			expect(await row.isVisible(), "the row is in the Sessions list").toBe(true);
+		}, "the Sessions row is rendered").toPass({ timeout, intervals: [500, 1_000] });
+	}
+
+	/**
 	 * The visible Chat webview of a window. Chat is a webview *panel* in the editor area, so it is told from a side-bar
 	 * webview view by the absence of `purpose=webviewView`; hidden editor tabs keep their iframe but are not visible.
 	 */
@@ -151,8 +166,12 @@ export class Desk {
 		const pick = page.locator(".quick-input-widget").getByRole("option", { name: new RegExp(`^${folderName}`) });
 		// A tree row that re-renders between mouse down and up (the Sessions list refreshes right after a window closed) loses
 		// the click; it is repeated only while neither the pick nor a new panel appeared, so it cannot start two sessions.
+		const row = tree.getByRole("treeitem", { name: /^New Session/ });
 		await expect(async () => {
-			await tree.getByRole("treeitem", { name: /^New Session/ }).click();
+			// The row ends the list, and a list longer than its pane renders only the rows in view (every earlier scenario leaves
+			// a running session behind): End moves the tree's focus to the last row and scrolls it into view.
+			if (!await row.isVisible()) await tree.press("End");
+			await row.click();
 			await expect.poll(async () => await pick.isVisible() || await panels.count() > before, { timeout: 8_000 }).toBe(true);
 		}, `a folder pick or a new Chat panel for ${folderName}`).toPass({ timeout, intervals: [200] });
 		if (await pick.isVisible()) await pick.click();

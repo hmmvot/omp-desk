@@ -38,7 +38,7 @@ test("Kill from the window that does not hold a session stops it in both windows
 		const { chat: chatB, recorded } = await runningInB(desk, state, b, marker);
 		const treeA = await desk.sessionsTree(a);
 		const rowA = treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) });
-		await expect(rowA).toBeVisible({ timeout: 30_000 });
+		await desk.revealSessionRow(a, rowA);
 
 		await desk.rowMenu(a, rowA, "Kill");
 
@@ -46,7 +46,7 @@ test("Kill from the window that does not hold a session stops it in both windows
 		const treeB = await desk.sessionsTree(b);
 		const stopped = new RegExp(`${marker}, Stopped`);
 		await expect(treeB.getByRole("treeitem", { name: stopped })).toBeVisible({ timeout: 45_000 });
-		await expect(treeA.getByRole("treeitem", { name: stopped })).toBeVisible({ timeout: 45_000 });
+		await desk.revealSessionRow(a, treeA.getByRole("treeitem", { name: stopped }), 45_000);
 		await expect(chatB.getByText(STOPPED_CHAT)).toBeVisible();
 		expect(pidAlive(recorded.childPid!), "the OMP process is gone").toBe(false);
 		expect(pidAlive(recorded.brokerPid!), "the broker is gone").toBe(false);
@@ -59,7 +59,7 @@ test("Kill from the window that does not hold a session stops it in both windows
 		await expect(treeB.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) })).toBeVisible({ timeout: 60_000 });
 		await desk.send(chatB, `again ${marker}`);
 		await expect(chatB.getByText(`Mock reply to: again ${marker}`)).toBeVisible({ timeout: 60_000 });
-		await expect(treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) })).toBeVisible({ timeout: 45_000 });
+		await desk.revealSessionRow(a, treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) }), 45_000);
 	} finally {
 		await b.close();
 	}
@@ -73,7 +73,7 @@ test("Close in the holding window ends the process and the other window's row fo
 		const marker = `xclose-${Date.now().toString(36)}`;
 		const { chat: chatB, recorded } = await runningInB(desk, state, b, marker);
 		const treeA = await desk.sessionsTree(a);
-		await expect(treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) })).toBeVisible({ timeout: 30_000 });
+		await desk.revealSessionRow(a, treeA.getByRole("treeitem", { name: new RegExp(`${marker}.*process held by another window`) }));
 
 		const treeB = await desk.sessionsTree(b);
 		const rowB = treeB.getByRole("treeitem", { name: new RegExp(`${marker}.*process running`) });
@@ -84,7 +84,7 @@ test("Close in the holding window ends the process and the other window's row fo
 
 		const stopped = new RegExp(`${marker}, Stopped`);
 		await expect(treeB.getByRole("treeitem", { name: stopped })).toBeVisible({ timeout: 45_000 });
-		await expect(treeA.getByRole("treeitem", { name: stopped })).toBeVisible({ timeout: 45_000 });
+		await desk.revealSessionRow(a, treeA.getByRole("treeitem", { name: stopped }), 45_000);
 		await expect(chatB.getByText(STOPPED_CHAT)).toBeVisible();
 		await expect.poll(() => pidAlive(recorded.childPid!), { message: "the OMP process ended" }).toBe(false);
 		expect(await desk.dialog(b).count(), "a Close that succeeded asks nothing more (no Force Stop)").toBe(0);
