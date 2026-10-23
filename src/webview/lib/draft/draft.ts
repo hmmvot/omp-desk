@@ -8,13 +8,11 @@
  * Seams: the cell reaches the field through a `FieldPort` (`lib/draft-write.ts` over the surface of ADR-0077) and `attach` reads files
  * through an `AttachReader` (`lib/attach-reader.ts`); each has a fake in the node tests.
  *
- * LEDGER OF TRANSITIONAL EXPORTS. While the design's migration groups land, this file re-exports the helpers that the code
- * outside the module still calls, so that moving a file is a mechanical change. Each section below names the group of the design
- * (section 6) whose commit removes it; after group 3 this file exports only the operations and types of the design's
- * section 4 (`draft.test.ts` pins the list).
+ * LEDGER OF TRANSITIONAL EXPORTS. The last block of this file names what the code outside the module still calls and group 3 of the design
+ * (section 6) removes; after it this file exports only the operations and types of the design's section 4 (`draft.test.ts` pins the list).
  */
 
-// Kept in the final interface: the value, the cell, the field rules and the attach seam (group 1).
+// The interface (groups 1 and 2): the value, the cell and its field port, the field rules, the operations.
 export { emptyDraft, knowsReference } from "./value.ts";
 export type { Draft, DraftImage, Recoverable } from "./value.ts";
 export { viewOf } from "./view.ts";
@@ -32,24 +30,25 @@ export type { ImageRead } from "./attachments.ts";
 export { attachGuardRefusal } from "./attachments.ts";
 export type { DraftDocument } from "./draft-documents.ts";
 export type { IsKnownReference, ReferenceKind } from "./image-references.ts";
-export type { ChipSpan } from "./command-chips.ts";
+export type { ChipSpan, ResolveCommand } from "./command-chips.ts";
 export { commandResolver } from "./command-chips.ts";
-export type { ResolveCommand } from "./command-chips.ts";
-
-// Group 2 removes: the writers that become operations (queue restore, Rewind, recall, the hand-off restore, completions) call these.
-export { findReferences, imageReferenceLabel, imageReferencePattern, fileReferencePattern, pruneInactive, referencedNumbers } from "./image-references.ts";
-export { draftFromSentText, isKnownDocument, pruneInactiveDocuments } from "./draft-documents.ts";
-export { MAX_DRAFT_BYTES } from "./attachments.ts";
-
-// Group 2 removes: quotes and the key rules of fenced blocks and quote lines become operations of the Draft.
-export { findQuoteRuns } from "./quote-lines.ts";
+export { keyEdit } from "./key-edit.ts";
+export type { KeyContext, KeyEdit, KeyPress } from "./key-edit.ts";
+export { acceptCompletion, completionAt, insertCommand } from "./completion.ts";
+export type { CompletionRow, CompletionTokens } from "./completion.ts";
+export { recall } from "./recall.ts";
+export { clearText, cleared, insertText, restoreQueued, rewind, setEditorText } from "./refill.ts";
+export type { Alerts, RewindAnswer } from "./refill.ts";
+export type { RestoredQueued } from "./queue-merge.ts";
+export { addRecoverable, dismissLost, dismissRecoverable, restoreHandoff } from "./handoff.ts";
+export { QUOTE_HELD_NOTICE, quote, removeQuote } from "./quote.ts";
+export type { QuoteContext, QuoteRequest, QuoteResult } from "./quote.ts";
+export { quoteTitle } from "./quote-draft.ts";
 export type { QuoteLineFlags, QuoteRun } from "./quote-lines.ts";
-export { quoteKeyEdit, quotePasteEdit } from "./quote-edits.ts";
-export { placeQuote, quoteBlock, quoteLineCount, quoteTitle, removalRange } from "./quote-draft.ts";
 
 // Group 3 removes: the send composition (compose, settleSend) takes over what the composer does with the lists and the bookkeeping
 // fields when it sends, and with them the transitional `withState`.
 export { withState } from "./value.ts";
+export { MAX_DRAFT_BYTES, rawTotal } from "./attachments.ts";
 export { activeDocuments, documentChars } from "./draft-documents.ts";
 export { compactForSend } from "./image-references.ts";
-export { rawTotal } from "./attachments.ts";

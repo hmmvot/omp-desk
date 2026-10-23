@@ -117,8 +117,17 @@ function resolveCommand(commands: readonly ChatSlashCommand[], name: string): Ch
  return command && !classifySlashInput(`/${command.name}`, commands).denied ? deskListed(command) : undefined;
 }
 
+/** The first argument token of a command that takes variants: where it is, what is typed of it and the command's hint. */
+export interface SlashArgument {
+ command: ChatSlashCommand;
+ start: number;
+ end: number;
+ query: string;
+ hint: { text: string; requirement: "optional" | "required" | "unknown" };
+}
+
 /** Only the first argument token is variant-owned; later arguments remain ordinary text. */
-export function slashArgumentAt(commands: readonly ChatSlashCommand[], text: string, caret: number) {
+export function slashArgumentAt(commands: readonly ChatSlashCommand[], text: string, caret: number): SlashArgument | null {
  if (!Number.isSafeInteger(caret) || caret < 1 || caret > text.length) return null;
  const match = /^\/([\w:-]+)[ \t]+([^\s]*)/.exec(text);
  if (!match || caret < match[0].length - match[2]!.length || caret > match[0].length) return null;

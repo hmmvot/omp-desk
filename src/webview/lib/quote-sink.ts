@@ -2,19 +2,11 @@
  * Panel-local registry for quoting text into the draft (docs/designs/2026-10-15-quote-chat-selection.md).
  *
  * The composer owns the draft, so the host's `quote-selection` panel action (`Alt+Q`, the context menu item) asks it through this
- * registry and the composer decides: the refusals, the notice and the edit are the composer's. Like {@link providePanelActions},
+ * registry and the Draft decides (`quote`, `lib/draft/`): the refusals, the notice and the edit. Like {@link providePanelActions},
  * the newest provider answers.
  */
 
-/**
- * What to quote: the Markdown of a selection (`plain`: some part of it could only be quoted as the text it shows); the quotes of an
- * editor (`sources`: one Markdown per selection, each its own quote, and `size` the characters of the selected text, which the
- * size limit counts); or nothing, with the words that say why.
- */
-export type QuoteRequest =
-	| { readonly kind: "selection"; readonly source: string; readonly plain: boolean }
-	| { readonly kind: "editor"; readonly sources: readonly string[]; readonly size: number }
-	| { readonly kind: "nothing"; readonly message: string };
+import type { QuoteRequest } from "./draft/draft.ts";
 
 type QuoteSink = (request: QuoteRequest) => void;
 

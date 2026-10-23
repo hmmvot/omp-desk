@@ -8,37 +8,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { GuestHostMessage } from "../../protocol/messages.ts";
-import { attachInsertedText, followedByBlank, offerInsertedText, spaceInsertion, subscribeInsertedText } from "./insert-text.ts";
+import { attachInsertedText, offerInsertedText, subscribeInsertedText } from "./insert-text.ts";
 import { provideQuoteSink } from "./quote-sink.ts";
-import type { QuoteRequest } from "./quote-sink.ts";
-
-describe("spaceInsertion", () => {
-	it("adds no space at the start of an empty draft, but one after it so typing can continue", () => {
-		assert.equal(spaceInsertion("", 0, 0, "@a.ts"), "@a.ts ");
-	});
-
-	it("separates the reference from the word before it, which OMP would otherwise not read as a mention", () => {
-		assert.equal(spaceInsertion("look at", 7, 7, "@a.ts [line 3]"), " @a.ts [line 3] ");
-	});
-
-	it("reuses whitespace that is already there on either side, stepping the caret over a following blank", () => {
-		assert.equal(spaceInsertion("fix  the bug", 4, 4, "@a.ts"), "@a.ts");
-		assert.equal(followedByBlank("fix  the bug", 4), true);
-		assert.equal(spaceInsertion("fix", 3, 3, "@a.ts"), " @a.ts ");
-		assert.equal(followedByBlank("fix", 3), false);
-	});
-
-	it("still adds a trailing space before a line break, so the caret never rests right after a bare @path", () => {
-		assert.equal(spaceInsertion("fix \nthe bug", 4, 4, "@a.ts"), "@a.ts ");
-		assert.equal(followedByBlank("fix \nthe bug", 4), false);
-	});
-
-	it("replaces a selection, spacing against what surrounds it", () => {
-		const draft = "see THIS now";
-		assert.equal(draft.slice(0, 4) + spaceInsertion(draft, 4, 8, "@a.ts") + draft.slice(8), "see @a.ts now");
-		assert.equal(spaceInsertion("see THISnow", 4, 8, "@a.ts"), "@a.ts ");
-	});
-});
+import type { QuoteRequest } from "./draft/draft.ts";
 
 describe("the insertion registry", () => {
 	it("holds an insertion that arrives before a composer exists and delivers it, in order, to the first one", () => {

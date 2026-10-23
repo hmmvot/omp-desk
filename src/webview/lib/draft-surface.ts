@@ -13,7 +13,6 @@
  * class only and never touches its children or attributes.
  */
 import type { ChipSpan, EditKind, FieldEdit, FieldRules, HistoryMode, Selection } from "./draft/draft.ts";
-import { findFencedBlocks } from "./code-fence.ts";
 import {
 	LineRenderer,
 	caretRowEdges,
@@ -29,7 +28,6 @@ import {
 import { DraftHistory, type DraftSnapshot } from "./draft-history.ts";
 import { deletionTarget, type DeleteKind } from "./draft-text.ts";
 import { normalizeLineEndings } from "../../shared/text-file.ts";
-import { findQuoteRuns, quotePasteEdit } from "./draft/draft.ts";
 import { isPhysicalKey } from "./physical-keys.ts";
 
 export interface SurfaceOptions {
@@ -269,8 +267,8 @@ export class DraftSurface {
 	// ---- rendering -------------------------------------------------------------------------------------------------
 
 	#render(replace: ReadonlySet<number> | true = new Set()): void {
-		const blocks = findFencedBlocks(this.#text);
-		this.#renderer.render(lineSpecs(this.#text, blocks, this.#markers(), findQuoteRuns(this.#text, blocks).lines), replace);
+		const { blocks, quoteLines } = this.#options.rules.layout(this.#text);
+		this.#renderer.render(lineSpecs(this.#text, blocks, this.#markers(), quoteLines), replace);
 		if (!this.#window.open) this.element.setAttribute("data-empty", String(this.#text === ""));
 	}
 
@@ -458,8 +456,8 @@ export class DraftSurface {
 
 	#insert(text: string, kind: EditKind, at?: number): void {
 		const { start, end } = at === undefined ? { start: this.selectionStart, end: this.selectionEnd } : { start: at, end: at };
-		// Pasted, dropped and multi-character text that holds a line break stays in the quote it lands in (quote-edits.ts, quotePasteEdit).
-		const quoted = kind === "paste" && text.includes("\n") ? quotePasteEdit(this.#text, findQuoteRuns(this.#text, findFencedBlocks(this.#text)), text, start, end) : null;
+		// Pasted, dropped and multi-character text that holds a line break stays in the quote it lands in (`fieldRules.pasteEdit`).
+		const quoted = kind === "paste" && text.includes("\n") ? this.#options.rules.pasteEdit(this.#text, text, start, end) : null;
 		this.apply(quoted === null ? { from: start, to: end, insert: text } : { from: quoted.from, to: quoted.to, insert: quoted.insert }, kind);
 	}
 

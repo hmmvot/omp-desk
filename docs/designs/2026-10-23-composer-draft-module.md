@@ -121,7 +121,7 @@ Undo history is not in the value (it is the surface's, text only; ADR-0077 stays
 
 ### 3. Operations, writes and the cell
 
-Every operation is a pure function `(draft, …inputs) → Change | result` with no clock, no randomness and no I/O. What is read from the DOM today (selection, caret) is an input.
+Every operation is a pure function `(draft, …inputs) → Change | result` with no clock, no randomness and no I/O. An operation that must run when the cell says so (`perform`) is written as a factory of an `Op` (`insertText(reference)`, `quote(request, context)`): the cell passes it the draft and the selection as they are at that moment. What is read from the DOM today (selection, caret) is an input.
 
 ```ts
 interface Change { readonly draft: Draft; readonly writes: readonly Write[]; }
@@ -159,17 +159,17 @@ The real port is `lib/draft-write.ts` (`DraftSurface` calls; `write` returns `fa
 | field | `fieldRules(known, resolve)` → `{ chips, atomic, layout, snap, deletion, repair, pasteEdit }` | the surface's imports of the marker, chip, quote and fence rules | the lookups are **live**: the real ones read `cell.read()`, so a widening right after a publish never sees a stale set |
 | 1 | `attach(cell, entries, reader, earlier, events)` (async) | `attach`, `insertMarkers`, `rejectionSummary`, reservations | below |
 | 1 | `removeAttachment(kind, number)` → `Op<void>` | `removeAttachment` | one `remove` write, run by `cell.perform` with `Timing` wait/drop; the operation takes the draft and the selection from `perform` |
-| 2 | `keyEdit(draft, selection, key, mode)` → `{ change } \| null` | the fence and quote branches of `onPromptKeyDown` | `null` = not claimed; `{ change: null }` = claimed with no edit (Tab on a fence line is claimed so the focus stays) |
-| 2 | `completionAt(draft, caret, commands, enabled)`, `acceptCompletion(draft, caret, selected, commands)` | the token queries and splices | `visible` rows stay the view's, from the catalogue |
-| 2 | `insertCommand(draft, name)` | `insertCommandIntoDraft` | the Commands row `insert` plan; the caret-only case is a `caret` write |
-| 2 | `recall(draft, prompts, direction, selection)` | the ↑/↓ branch | owns `walk`, the held documents of a recalled prompt, and the gate "no image at all, retained ones included" |
-| 2 | `setEditorText(draft, text)`, `insertText(draft, selection, reference)` | the `set_editor_text` effect, the inserted-text handler | `insertText` is an `edit` without a selection, then a `caret` write when a blank follows |
-| 2 | `restoreQueued(draft, entries)` → `{ change, alerts }` | `mergeRestoredQueued` and the prunes | owns the lone-withdrawn-message latch |
-| 2 | `rewind(draft, answer)` → `{ change, alerts }` | the navigation effect | holds the previous draft as a recovery card, replaces, or undoes an unedited refill; **every** finished navigation clears `unedited` (a switch, or a rewind with no prompt, is a change that only clears it) |
+| 2 | `keyEdit(draft, selection, key, context)` → `{ claimed: true, change } \| { claimed: false, inBlock }` | the fence and quote branches of `onPromptKeyDown` | `claimed: false` = not claimed (`inBlock`: the caret is in a fenced block, where no popup key applies either); `change: null` = claimed with no edit (Tab on a fence line is claimed so the focus stays); `context` = `{ composing, held, sendWith }` |
+| 2 | `completionAt(draft, caret, commands, enabled)`, `acceptCompletion(caret, selected, commands)` → `Op<void>` | the token queries and splices | `visible` rows stay the view's, from the catalogue |
+| 2 | `insertCommand(draft, name)` → `Change` | `insertCommandIntoDraft` | the Commands row `insert` plan; the caret-only case is a `caret` write |
+| 2 | `recall(draft, prompts, direction, held)` → `Change \| null` | the ↑/↓ branch | owns `walk`, the held documents of a recalled prompt, and the gate "no image at all, retained ones included" |
+| 2 | `setEditorText(draft, text)` → `Change`, `insertText(reference)` → `Op<void>` | the `set_editor_text` effect, the inserted-text handler | `insertText` is an `edit` without a selection, then a `caret` write when a blank follows |
+| 2 | `restoreQueued(entries)` → `Op<Alerts>` | `mergeRestoredQueued` and the prunes | owns the lone-withdrawn-message latch |
+| 2 | `rewind(answer)` → `Op<Alerts>` | the navigation effect | holds the previous draft as a recovery card, replaces, or undoes an unedited refill; **every** finished navigation clears `unedited` (a switch, or a rewind with no prompt, is a change that only clears it) |
 | 2 | `clearText(draft)`, `undoRefill` is inside `rewind`, `cleared(draft)` | three different clears today | `/rewind` typed alone clears the text only (attachments and counters stay); Rewind's Undo clears text, attachments, counters and the attach alert, keeping the walk; an accepted send clears all of that and the walk. They stay three, as they are |
-| 2 | `captureOf(draft)`, `restoreHandoff(draft, capture)` → `{ change, alerts }`, `dismissLost(draft)` | the hand-off provider and the restore effect | numbers bump past restored markers; recovery cards are rebuilt from the capture |
-| 2 | `quote(draft, request, context)` → `{ change, notice } \| { refusal }`, `removeQuote(draft, start)` | `use-quote-draft`'s edit, `removeQuote` | the notice sentences and refusals in one place; `context` carries what only the page knows (`writable`, `captured`, `mounted`) |
-| 2 | `heldMessage(draft)`, `addRecoverable`, `dismissRecoverable` | the Rewind hold, `publishRecoverable` | built on the same internal composition `compose` uses (introduced in group 2) |
+| 2 | `captureOf(draft)` (inside `cell.capture`), `restoreHandoff(draft, capture)` → `Change`, `dismissLost(draft)` → `Change` | the hand-off provider and the restore effect | numbers bump past restored markers; recovery cards are rebuilt from the capture |
+| 2 | `quote(request, context)` → `Op<QuoteResult>`, `removeQuote(start)` → `Op<void>` | `use-quote-draft`'s edit, `removeQuote` | the notice sentences and refusals in one place; `context` carries what only the page knows (`writable`, `settling`); the hand-off and the composition window are the cell's `Timing`, and a host-sent editor quote while the session settles is a `hold` result the hook keeps |
+| 2 | `heldMessage(draft)` (internal to `rewind`), `addRecoverable(draft, card)`, `dismissRecoverable(draft, id)` | the Rewind hold, `publishRecoverable` | built on the same internal composition `compose` uses (introduced in group 2) |
 | 3 | `compose(draft, context, contents?)` → `Composition` | the three copies of the composition and the send's validation | two-phase, below |
 | 3 | `settleSend(draft, outgoing, result)` | the send's tail | accepted unchanged → `cleared`; refused → keep or a card |
 | 3 | `sameAs(draft, original)`, `addToDraft(draft, id)` → `{ change, alerts }` | the "Add to draft" comparison and its lost-images arithmetic | uses `compose`'s own text; a linked file never matches |

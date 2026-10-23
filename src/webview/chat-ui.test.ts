@@ -4103,12 +4103,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Enter, Shift+Enter and Alt+Enter continue a quote and an empty quote line lets go of it, Shift+Tab leaves it, Ctrl+Enter sends, Backspace at its prefix removes a level, Delete joins the next quote line, and no completion opens in one", async () => {
+		await t.test("Enter continues a quote as one undo step, Ctrl+Enter sends from inside one and the hint says so, no completion opens in a quote line, and an IME composition leaves its keys alone (the key rules themselves are node tests of keyEdit)", async () => {
 			await reset("quote-keys");
 			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});window.composer.focus()");
-			const shiftEnter = (): Promise<void> => press("Enter", "Enter", 13, { modifiers: 8 });
-			const altEnter = (): Promise<void> => press("Enter", "Enter", 13, { modifiers: 1 });
-			const shiftTab = (): Promise<void> => press("Tab", "Tab", 9, { modifiers: 8 });
 			await setDraft("> ab");
 			await setSelection(3, 3);
 			await press("Enter", "Enter", 13);
@@ -4117,62 +4114,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await undo();
 			await waitDraft("window.composer.value()==='> ab'");
 			assert.equal((await areaState()).value, "> ab", "one Ctrl+Z takes the whole continuation back");
-			for (const key of [shiftEnter, altEnter]) {
-				await setDraft("> > ab");
-				await setSelection(5, 5);
-				await key();
-				assert.deepEqual(await areaState(), { value: "> > a\n> > b", start: 10, end: 10, focused: true });
-			}
-			assert.equal(await sendCount(), 0);
-			// An empty quote line lets go of one level, the caret staying on the line.
-			await setDraft("> a\n> ");
-			await setSelection(6, 6);
-			await press("Enter", "Enter", 13);
-			assert.deepEqual(await areaState(), { value: "> a\n", start: 4, end: 4, focused: true }, "Enter on an empty quote line leaves the quote");
-			await undo();
-			await waitDraft("window.composer.value()==='> a\\n> '");
-			await setDraft("> a\n> > ");
-			await setSelection(8, 8);
-			await press("Enter", "Enter", 13);
-			assert.deepEqual(await areaState(), { value: "> a\n> ", start: 6, end: 6, focused: true }, "a nested line drops one level");
-			assert.equal(await sendCount(), 0);
-			// Shift+Tab leaves the quote: a plain line after the current one, one level out for a nested line, and the focus stays in the field.
-			await setDraft("> a");
-			await setSelection(3, 3);
-			await shiftTab();
-			assert.deepEqual(await areaState(), { value: "> a\n", start: 4, end: 4, focused: true }, "a new plain line, the caret on it, the focus kept");
-			await undo();
-			await waitDraft("window.composer.value()==='> a'");
-			await setDraft("> > ab");
-			await setSelection(4, 4);
-			await shiftTab();
-			assert.deepEqual(await areaState(), { value: "> > ab\n> ", start: 9, end: 9, focused: true }, "one level out for a nested line, the text after the caret stays where it was");
-			await setDraft("> a\n> ");
-			await setSelection(6, 6);
-			await shiftTab();
-			assert.deepEqual(await areaState(), { value: "> a\n", start: 4, end: 4, focused: true }, "on an empty quote line it removes the prefix");
-			assert.equal(await sendCount(), 0);
-			// With the caret inside the prefix Shift+Tab is the browser's: the text is untouched.
-			await setDraft("> a");
-			await setSelection(1, 1);
-			await shiftTab();
-			assert.equal((await areaState()).value, "> a");
-			await ui.evaluate("window.composer.focus()");
-			// A fenced block nested in the quote: a blank line there stays in the quote.
-			await setDraft("> ```ts\n> \n> ```");
-			await setSelection(10, 10);
-			await press("Enter", "Enter", 13);
-			assert.deepEqual(await areaState(), { value: "> ```ts\n> \n> \n> ```", start: 13, end: 13, focused: true }, "Enter inside a nested fence keeps the prefix, even on an empty line");
-			await setDraft("> > x");
-			await setSelection(4, 4);
-			await press("Backspace", "Backspace", 8);
-			assert.deepEqual(await areaState(), { value: "> x", start: 2, end: 2, focused: true }, "one level at a time");
-			await press("Backspace", "Backspace", 8);
-			assert.deepEqual(await areaState(), { value: "x", start: 0, end: 0, focused: true }, "the last level takes the whole prefix");
-			await setDraft("> a\n> b");
-			await setSelection(3, 3);
-			await press("Delete", "Delete", 46);
-			assert.deepEqual(await areaState(), { value: "> ab", start: 3, end: 3, focused: true }, "the next line's prefix goes with the line break");
 			// Ctrl+Enter sends from inside a quote line, and the hint says so.
 			await setDraft("> q");
 			await setSelection(3, 3);
@@ -4253,7 +4194,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 		});
 
-		await t.test("a quote is refused while the hand-off holds the draft and nothing is inserted later; over the limit and empty it says why", async () => {
+		await t.test("a quote is refused while the hand-off holds the draft and nothing is inserted later (every other refusal is a node test of quote)", async () => {
 			await reset("quote-refusals");
 			await setDraft("kept");
 			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:900})");
@@ -4264,12 +4205,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("!window.composer.readOnly()");
 			await settleFrames();
 			assert.equal((await areaState()).value, "kept", "released, still nothing inserted");
-			await quoteIn("x".repeat(31_482));
-			await ui.wait("document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent==='That selection is 31 482 characters; Quote takes at most 20 000.'");
-			await quoteIn("  \n ");
-			await ui.wait("document.querySelector('.omp-notice[data-notice=\"quote\"] .omp-notice-description')?.textContent==='Select text in the conversation first'");
-			await quoteIn("x".repeat(20_000));
-			await ui.wait("window.composer.value().length>20000");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

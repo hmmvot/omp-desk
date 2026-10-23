@@ -14,7 +14,7 @@ import type { GuestEditorQuote } from "../../protocol/messages.ts";
 import { codeSpan } from "../../shared/code-span.ts";
 import { fenceFor } from "./code-fence.ts";
 import { languageForPath, languageId } from "./code-languages.ts";
-import type { QuoteRequest } from "./quote-sink.ts";
+import type { QuoteRequest } from "./draft/draft.ts";
 
 /** VS Code language ids of documents that are prose: they are quoted as plain quote lines, with no fence. */
 const PROSE_LANGUAGE_IDS: ReadonlySet<string> = new Set(["markdown", "plaintext"]);

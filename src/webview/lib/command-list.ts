@@ -16,7 +16,7 @@ import { FORK_BUSY_SENTENCE } from "../../chat/fork.ts";
 import { NEW_BUSY_SENTENCE } from "../../chat/desk-commands.ts";
 import type { ChatSlashCommand } from "../../chat/model.ts";
 import type { GuestChatCommand } from "../../protocol/messages.ts";
-import { slashCatalogue, spliceSlash } from "./slash-completion.ts";
+import { slashCatalogue } from "./slash-completion.ts";
 
 /** How a GUI-supported command runs when it is picked from the list. */
 export type GuiRoute =
@@ -212,13 +212,3 @@ export function pickPlan(row: CommandRow): PickPlan {
 	return { kind: "insert", name: row.name };
 }
 
-/**
- * The draft after `/name ` is put in it. A draft that already starts with a command token has that token replaced (the
- * typed completion's own rule); any other draft keeps all its text after the command, so nothing the user wrote is lost.
- */
-export function insertCommandIntoDraft(text: string, name: string): { text: string; caret: number } {
-	const token = /^\/[\w:-]*(?=\s|$)/.exec(text);
-	if (token !== null) return spliceSlash(text, { start: 0, end: token[0].length }, name);
-	const prefix = `/${name} `;
-	return { text: prefix + text.trimStart(), caret: prefix.length };
-}

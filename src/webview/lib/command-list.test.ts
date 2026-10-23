@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ChatSlashCommand } from "../../chat/model.ts";
-import { commandAvailability, commandRows, commandSourceLabel, filterCommandRows, insertCommandIntoDraft, pickPlan, type CommandContext } from "./command-list.ts";
+import { commandAvailability, commandRows, commandSourceLabel, filterCommandRows, pickPlan, type CommandContext } from "./command-list.ts";
 
 const CATALOGUE: ChatSlashCommand[] = [
 	{ name: "zebra", source: "builtin", description: "Last alphabetically" },
@@ -90,14 +90,6 @@ test("a pick runs the GUI action, completes a command that takes arguments, or s
 	assert.deepEqual(pickPlan(rowOf("skill:review")), { kind: "insert", name: "skill:review" });
 	assert.deepEqual(pickPlan(rowOf("usage")), { kind: "send", text: "/usage" });
 	assert.deepEqual(pickPlan(rowOf("fix")), { kind: "send", text: "/fix" });
-});
-
-test("inserting a command keeps what the draft already says", () => {
-	assert.deepEqual(insertCommandIntoDraft("", "skill:review"), { text: "/skill:review ", caret: 14 });
-	assert.deepEqual(insertCommandIntoDraft("/ski", "skill:review"), { text: "/skill:review ", caret: 14 });
-	assert.deepEqual(insertCommandIntoDraft("/old existing args", "skill:review"), { text: "/skill:review existing args", caret: 14 });
-	assert.deepEqual(insertCommandIntoDraft("look at this", "skill:review"), { text: "/skill:review look at this", caret: 14 });
-	assert.deepEqual(insertCommandIntoDraft("  look [Image #1]", "fix"), { text: "/fix look [Image #1]", caret: 5 });
 });
 
 test("availability: a GUI command follows its own requirements, an OMP command is not blocked by a running turn, Desk's own say why", () => {

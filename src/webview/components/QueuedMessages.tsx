@@ -4,7 +4,7 @@ import type { ChatModel } from "../../chat/model";
 import type { ChatQueuePurpose, ChatQueuedRef } from "../../protocol/chat-messages";
 import type { ChatClient } from "../lib/chat-client";
 import { chatWritable } from "../lib/chat-client";
-import { offerQueuedForEditing } from "../lib/queue-restore";
+import { offerQueuedForEditing } from "../lib/queue-handover";
 import { queueNotice, queueRows, queueSummary, queueWindow, restoredEntries, type QueueNotice, type QueueRow } from "../lib/queue-view";
 
 function subscribeViewport(notify: () => void): () => void {

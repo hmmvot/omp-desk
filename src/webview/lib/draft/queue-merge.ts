@@ -1,6 +1,6 @@
 /**
- * Queued messages taken back out of OMP's queue to be edited: the pure merge into the composer draft, and
- * the small registry that hands them from the queue row to the mounted composer.
+ * Queued messages taken back out of OMP's queue to be edited: the pure merge into the composer draft (the registry that hands them
+ * from the queue row to the mounted composer is `lib/queue-handover.ts`).
  *
  * The native TUI does the same on Alt+Up (`input-controller.ts` `#restoreEntriesToEditor`): the dequeued
  * messages' text goes into the editor and their images back into the pending-image buffer, with every
@@ -8,11 +8,12 @@
  * contract for the chat composer, with one deliberate difference: the dequeued text is **appended** after
  * an existing draft (the TUI prepends it), so what the user was typing stays where they left it.
  *
- * Everything here is pure except the registry; the composer owns the DOM, selection and focus.
+ * Everything here is pure; the Draft's `restoreQueued` is the operation that applies it.
  */
-import { draftFromSentText, type DraftDocument, type DraftImage } from "./draft/draft.ts";
-import { fileReferencePattern, imageReferenceLabel, imageReferencePattern } from "./draft/draft.ts";
-import { fileMarker, markerName } from "../../shared/file-blocks.ts";
+import { fileMarker, markerName } from "../../../shared/file-blocks.ts";
+import { draftFromSentText, type DraftDocument } from "./draft-documents.ts";
+import { fileReferencePattern, imageReferenceLabel, imageReferencePattern } from "./image-references.ts";
+import type { DraftImage } from "./value.ts";
 
 /** One image of a dequeued message, as OMP's queue returned it. */
 export interface RestoredImage {
@@ -197,37 +198,4 @@ export function mergeRestoredQueued(draft: DraftState, entries: readonly Restore
 	const queued = texts.join("\n\n");
 	const text = draft.text.trim().length === 0 ? queued : queued.length === 0 ? draft.text : `${draft.text}\n\n${queued}`;
 	return { text, images: [...draft.images, ...added], documents: [...draft.documents, ...addedDocuments], nextNumber, nextDocumentNumber, nextId, imagesLost, notes };
-}
-
-/** How many hand-overs may wait for a composer; older ones are dropped first. */
-const MAX_PENDING = 8;
-
-type RestoreListener = (entries: readonly RestoredQueued[]) => void;
-
-const listeners: RestoreListener[] = [];
-const pending: (readonly RestoredQueued[])[] = [];
-
-/** Deliver dequeued messages to the newest mounted composer, or hold them for the next one. */
-export function offerQueuedForEditing(entries: readonly RestoredQueued[]): void {
-	if (entries.length === 0) return;
-	const listener = listeners[listeners.length - 1];
-	if (listener !== undefined) {
-		listener(entries);
-		return;
-	}
-	pending.push(entries);
-	while (pending.length > MAX_PENDING) pending.shift();
-}
-
-/**
- * Register a composer's handler. Anything held while no composer existed is delivered to it first, in order;
- * the returned function releases the handler.
- */
-export function subscribeQueuedForEditing(listener: RestoreListener): () => void {
-	listeners.push(listener);
-	for (const entries of pending.splice(0)) listener(entries);
-	return () => {
-		const position = listeners.indexOf(listener);
-		if (position >= 0) listeners.splice(position, 1);
-	};
 }

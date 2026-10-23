@@ -54,32 +54,38 @@ import { MAX_MESSAGE_CHARS } from "../../shared/attach-limits";
 import { composeFileBlocks } from "../../shared/file-blocks";
 import {
 	MAX_DRAFT_BYTES,
+	acceptCompletion,
 	activeDocuments,
+	addRecoverable,
 	attach as attachToDraft,
+	clearText,
+	cleared,
 	commandResolver,
 	compactForSend,
+	completionAt,
+	dismissLost,
+	dismissRecoverable,
 	documentChars,
-	draftFromSentText,
 	fieldRules,
-	findQuoteRuns,
-	findReferences,
-	isKnownDocument,
+	insertCommand,
+	insertText,
+	keyEdit,
 	knowsReference,
-	pruneInactive,
-	pruneInactiveDocuments,
-	quoteKeyEdit,
 	rawTotal,
 	readingBy,
-	referencedNumbers,
-	removalRange,
+	recall,
 	removeAttachment,
+	removeQuote,
+	restoreHandoff,
+	restoreQueued,
+	rewind,
+	setEditorText,
 	viewOf,
 	withState,
 	type AttachEntry,
 	type DraftDocument,
 	type Recoverable,
 	type ReferenceKind,
-	type Write,
 } from "../lib/draft/draft";
 import { dragCarries, droppedFileUris, fileFromAttached, filesFrom } from "../lib/attach-dom";
 import { attachReader } from "../lib/attach-reader";
@@ -90,7 +96,6 @@ import { AttachmentStrip } from "./AttachmentStrip";
 import { DraftEditor } from "./DraftEditor";
 import type { ChatModel, ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
-import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
 import { useSendWith } from "../lib/send-with";
 import { isSendChord, SEND_KEY_LABELS, type ChatSendWith } from "../../chat/send-with";
 import { provideQuoteSink } from "../lib/quote-sink";
@@ -107,18 +112,18 @@ import { createDoubleEscape } from "../lib/double-escape";
 import { isEditableTarget } from "../lib/type-to-focus";
 import { provideDraftHandoff, subscribeRestoredDraft, takeRestoredDraft } from "../lib/draft-handoff";
 import type { DraftCapture } from "../lib/draft-handoff";
-import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/insert-text";
-import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing } from "../lib/queue-restore";
+import { subscribeInsertedText } from "../lib/insert-text";
+import { offerQueuedForEditing, subscribeQueuedForEditing } from "../lib/queue-handover";
 import { queueNotice, queueRows, restoredEntries } from "../lib/queue-view";
-import { historyStep, sessionPrompts } from "../../chat/prompt-history";
-import { MAX_DROP_URIS, mentionQueryAt, spliceMention } from "../../protocol/messages";
+import { sessionPrompts } from "../../chat/prompt-history";
+import { MAX_DROP_URIS } from "../../protocol/messages";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
-import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";
+import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashSuggestions } from "../lib/slash-completion";
 import { ChatFooter } from "./ChatFooter";
 import { CommandsMenu } from "./CommandsMenu";
 import { KeyboardShortcutsButton } from "./KeyboardShortcutsButton";
-import { insertCommandIntoDraft, pickPlan, type CommandContext, type CommandRow } from "../lib/command-list";
+import { pickPlan, type CommandContext, type CommandRow } from "../lib/command-list";
 import { rewindBlockedReason } from "../../chat/rewind-mode";
 
 /** Textarea line height, kept in sync with `.omp-textarea`; vertical padding and border are read from the element. */
@@ -434,12 +439,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 */
 	const completionsEnabled = canPrompt && !captureLocked && request === null && caretBlock === null && !caretInQuote;
 	const completionKey = `${text}\0${caret}`;
-	const slash = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashQueryAt(text, caret, snapshot.commands) : null, [completionsEnabled, dismissedCompletion, completionKey, snapshot.commands, text, caret]);
-	const argument = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashArgumentAt(snapshot.commands, text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, snapshot.commands, text, caret]);
-	const mention = useMemo(
-		() => completionsEnabled && slash === null && argument === null && dismissedCompletion !== completionKey ? mentionQueryAt(text, caret) : null,
-		[caret, completionsEnabled, text, slash, argument, dismissedCompletion, completionKey],
-	);
+	// Keyed by the text alone: a read starting or a card appearing changes the draft but never the token, and a new token object would send the host another request.
+	const tokens = useMemo(() => completionAt(draft, caret, snapshot.commands, completionsEnabled && dismissedCompletion !== completionKey), [draft.text, caret, snapshot.commands, completionsEnabled, dismissedCompletion, completionKey]); // eslint-disable-line react-hooks/exhaustive-deps
+	const { slash, argument, mention } = tokens;
 	// Narrow the last answer against whatever has been typed since it arrived, so
 	// the popup stays useful between keystrokes instead of blanking until the next
 	// debounce, and a stale answer can never offer an irrelevant path.
@@ -529,16 +531,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 */
 	const acceptSuggestion = useCallback(
 		(selected: { kind: "file" | "slash" | "argument"; name: string }): void => {
-			if (!completionsEnabled || selected.name.length === 0) return;
-			cell.perform(current => {
-				const at = cell.getState().caret;
-				const slashToken = selected.kind === "slash" ? slashQueryAt(current.text, at, snapshot.commands) : null;
-				const argumentToken = selected.kind === "argument" ? slashArgumentAt(snapshot.commands, current.text, at) : null;
-				const token = selected.kind === "file" ? mentionQueryAt(current.text, at) : null;
-				if (slashToken === null && argumentToken === null && token === null) return null;
-				const spliced = slashToken ? spliceSlash(current.text, slashToken, selected.name) : argumentToken ? spliceArgument(current.text, argumentToken.start, argumentToken.end, selected.name) : spliceMention(current.text, at, token!.start, selected.name);
-				return { change: { draft: withState(current, { text: spliced.text }), writes: [{ kind: "text", text: spliced.text, caret: spliced.caret, history: "record", focus: true }] }, result: undefined };
-			}, { composing: "skip", held: "drop" }, outcome => {
+			if (!completionsEnabled) return;
+			cell.perform(acceptCompletion(cell.getState().caret, selected, snapshot.commands), { composing: "skip", held: "drop" }, outcome => {
 				if (outcome.kind !== "applied") return;
 				// The answer has been consumed; anything still in flight is stale.
 				pendingQueryRef.current = null;
@@ -676,9 +670,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	}, [attach, canPrompt, cell, requestUris]);
 
 	/** A message kept as a card beside the draft: a refused or uncertain send. */
-	const addRecoverable = useCallback((entry: Omit<Recoverable, "id">): void => {
-		const now = cell.read();
-		cell.commit({ draft: withState(now, { recoverable: [...now.recoverable, { ...entry, id: now.next.card }], next: { ...now.next, card: now.next.card + 1 } }), writes: [] });
+	const keepRecoverable = useCallback((entry: Omit<Recoverable, "id">): void => {
+		cell.commit(addRecoverable(cell.read(), entry));
 	}, [cell]);
 
 	const send = useCallback(
@@ -698,7 +691,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (draft.length === 0 && attached.length === 0 && files.length === 0) return;
 			// Chat's own `/rewind` and `/branch` never reach OMP; both open the in-place Rewind.
 			if (onRewind !== undefined && attached.length === 0 && files.length === 0 && isRewindCommand(draft)) {
-				cell.commit({ draft: withState(typed, { text: "" }), writes: [{ kind: "text", text: "", history: "reset", focus: false }] });
+				cell.commit(clearText(typed));
 				setSendError(null);
 				onRewind();
 				return;
@@ -804,7 +797,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			setSending(false);
 			if (!result.ok) {
 				if (result.unconfirmed || cell.read().revision !== revision) {
-					addRecoverable({ text, images: wire, reason: result.reason, unconfirmed: result.unconfirmed === true });
+					keepRecoverable({ text, images: wire, reason: result.reason, unconfirmed: result.unconfirmed === true });
 					setSendError(null);
 				} else {
 					setSendError(result.reason);
@@ -817,11 +810,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null && !outcomeSince(client.getSnapshot(), before)) setSubmitted(true);
 			// Admission may finish after typing, attaching, or restoring another draft. Never erase that work.
 			if (cell.read().revision !== revision) return;
-			const cleared = cell.read();
-			cell.commit({ draft: withState(cleared, { text: "", images: [], documents: [], walk: null, next: { ...cleared.next, image: 1, document: 1 } }), writes: [{ kind: "text", text: "", history: "reset", focus: false }] });
+			cell.commit(cleared(cell.read()));
 			setAttachError(null);
 		},
-		[addRecoverable, canPrompt, cell, client, onRewind, onSubmitted, request, snapshot.commands],
+		[keepRecoverable, canPrompt, cell, client, onRewind, onSubmitted, request, snapshot.commands],
 	);
 
 	/** Why the Commands list cannot offer a command now; each row adds its own rule (`lib/command-list.ts`). */
@@ -849,15 +841,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		}
 		if (cell.getState().held || !canPrompt || request !== null) return;
 		if (plan.kind === "insert") {
-			const draft = cell.read();
-			const spliced = insertCommandIntoDraft(draft.text, plan.name);
 			pendingQueryRef.current = null;
 			requestSeqRef.current++;
 			setSuggestions(NO_SUGGESTIONS);
 			setDismissedCompletion(null);
-			const walked = withState(draft, { walk: null });
-			if (spliced.text === draft.text) cell.commit({ draft: walked, writes: [{ kind: "caret", at: spliced.caret, focus: true }] });
-			else cell.commit({ draft: withState(walked, { text: spliced.text }), writes: [{ kind: "text", text: spliced.text, caret: spliced.caret, history: "record", focus: true }] });
+			cell.commit(insertCommand(cell.read(), plan.name));
 			return;
 		}
 		if (sendingRef.current) return;
@@ -892,37 +880,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// pending value is consumed so a later mount cannot replay it into a new draft.
 	useEffect(() => {
 		const apply = (restored: DraftCapture): void => {
-			const draft = cell.read();
-			let imageNumber = draft.next.image;
-			let documentNumber = draft.next.document;
-			// Markers of the restored texts keep their numbers, so new attachments must not reuse one.
-			const bump = (text: string): void => {
-				for (const span of findReferences(text, () => true)) {
-					if (span.kind === "image") imageNumber = Math.max(imageNumber, span.number + 1);
-					else documentNumber = Math.max(documentNumber, span.number + 1);
-				}
-			};
-			bump(restored.text);
-			for (const original of restored.recoverable) bump(original.text);
-			for (const file of restored.documents) documentNumber = Math.max(documentNumber, file.number + 1);
-			const cards = restored.recoverable.map((entry, index): Recoverable => ({
-				id: draft.next.card + index, text: entry.text, images: [], unconfirmed: entry.unconfirmed, lostAttachments: entry.attachments,
-				reason: entry.unconfirmed ? "OMP did not confirm this message before this editor was replaced. It may already have been accepted. Review the conversation before sending it again." : "This original message was not sent. Add it to the draft only when you want to send it.",
-			}));
-			cell.commit({
-				draft: withState(draft, {
-					text: restored.text,
-					lostImages: restored.attachments,
-					documents: restored.documents.map((file): DraftDocument => ({
-						number: file.number,
-						name: file.name,
-						source: file.ref !== null ? { kind: "linked", ref: file.ref, bytes: file.bytes, chars: file.chars } : { kind: "held", content: file.content ?? "", label: file.label, bytes: file.bytes },
-					})),
-					recoverable: cards,
-					next: { ...draft.next, image: imageNumber, document: documentNumber, card: draft.next.card + cards.length },
-				}),
-				writes: [{ kind: "text", text: restored.text, caret: restored.text.length, history: "reset", focus: true }],
-			});
+			cell.commit(restoreHandoff(cell.read(), restored));
 		};
 		const pending = takeRestoredDraft();
 		if (pending !== null) apply(pending);
@@ -933,18 +891,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// `path:N` line reference): the text the extension host composed in an editor is inserted at the caret (over a selection) as one
 	// undo step, and at the end of the draft while no field is mounted. It is never submitted; an IME composition is not
 	// interrupted and a held draft waits for its release. One that arrived before this composer mounted is delivered first (`lib/insert-text`).
-	useEffect(() => subscribeInsertedText(reference => {
-		cell.perform((draft, at) => {
-			const current = draft.text;
-			const start = Math.min(at.selection.anchor, at.selection.focus);
-			const end = Math.max(at.selection.anchor, at.selection.focus);
-			const inserted = spaceInsertion(current, start, end, reference);
-			const writes: Write[] = [{ kind: "edit", edit: { from: start, to: end, insert: inserted }, as: "replace", focus: true }];
-			// A space already follows: the caret steps over it, so it never rests right after a bare `@path`.
-			if (at.mounted && followedByBlank(current, end)) writes.push({ kind: "caret", at: start + inserted.length + 1, focus: false });
-			return { change: { draft: withState(draft, { text: current.slice(0, start) + inserted + current.slice(end) }), writes }, result: undefined };
-		}, { composing: "wait", held: "wait" });
-	}), [cell]);
+	useEffect(() => subscribeInsertedText(reference => cell.perform(insertText(reference), { composing: "wait", held: "wait" })), [cell]);
 
 	// `set_editor_text` from the session (an extension prefilling the prompt): the request
 	// replaces the draft, once per `seq`. The seq present at mount was already applied by an
@@ -955,7 +902,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		if (editorText === null || editorText.seq === editorSeqRef.current) return;
 		if (cell.getState().held) return;
 		editorSeqRef.current = editorText.seq;
-		cell.commit({ draft: withState(cell.read(), { text: editorText.text }), writes: [{ kind: "text", text: editorText.text, history: "record", focus: true }] });
+		cell.commit(setEditorText(cell.read(), editorText.text));
 	}, [editorText, captureLocked, cell]);
 
 	// "Edit" / "Edit all" on queued messages (the queue row above the composer): what OMP handed back is
@@ -963,29 +910,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// reference numbers (`lib/queue-restore`). Nothing is sent, and nothing the draft held is replaced.
 	// An IME composition in flight finishes first and a held draft waits for its release, so the restore never splits either.
 	useEffect(() => subscribeQueuedForEditing(entries => {
-		cell.perform<string | null>(draft => {
-			const held = draft.images.length;
-			const heldDocuments = draft.documents.length;
-			const wasEmpty = draft.text.trim().length === 0 && held === 0 && heldDocuments === 0;
-			const merged = mergeRestoredQueued({ text: draft.text, images: draft.images, documents: draft.documents, nextNumber: draft.next.image, nextDocumentNumber: draft.next.document, nextId: draft.next.key }, entries);
-			const present = referencedNumbers(merged.text, "image", (kind, number) => kind === "image" && merged.images.some(image => image.number === number));
-			const images = pruneInactive(merged.images, number => present.has(number), new Set(merged.images.slice(held).map(image => image.number)), MAX_DRAFT_BYTES);
-			const presentFiles = referencedNumbers(merged.text, "file", (kind, number, name) => kind === "file" && isKnownDocument(merged.documents, number, name));
-			const documents = pruneInactiveDocuments(merged.documents, number => presentFiles.has(number), new Set(merged.documents.slice(heldDocuments).map(document => document.number)));
-			// A taken-back message that filled an empty composer on its own: Undo of its move clears it while it is unedited
-			// (`unedited`, as after Rewind). Never a typed draft, and never a refill that also carries messages the Stop
-			// took out of OMP's queue: they exist nowhere else.
-			const latch = wasEmpty && entries.length === 1 && entries[0]!.withdrawn === true ? { unedited: draft.revision + 1 } : {};
-			const sentences = [...(merged.imagesLost > 0 ? [`${merged.imagesLost} image${merged.imagesLost === 1 ? "" : "s"} of the edited message could not be attached (unsupported format).`] : []), ...merged.notes];
-			return {
-				change: {
-					draft: withState(draft, { text: merged.text, images, documents, next: { ...draft.next, image: merged.nextNumber, document: merged.nextDocumentNumber, key: merged.nextId }, ...latch }),
-					writes: [{ kind: "text", text: merged.text, caret: merged.text.length, history: "record", focus: true }],
-				},
-				result: sentences.length > 0 ? sentences.join(" ") : null,
-			};
-		}, { composing: "wait", held: "wait" }, outcome => {
-			if (outcome.kind === "applied") setAttachError(outcome.result);
+		cell.perform(restoreQueued(entries), { composing: "wait", held: "wait" }, outcome => {
+			if (outcome.kind === "applied" && outcome.result.attach !== undefined) setAttachError(outcome.result.attach);
 		});
 	}), [cell]);
 
@@ -995,47 +921,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// palette Rewind lands here too.
 	useEffect(() => client.subscribeNavigations(answer => {
 		if (answer.status !== "done") return;
-		cell.perform<{ attach?: string | null; send?: string | null }>(draft => {
-			const unedited = draft.unedited !== null && draft.unedited === draft.revision;
-			// Every finished navigation consumes the latch.
-			const consumed = withState(draft, { unedited: null });
-			if (answer.kind === "undo") {
-				if (!unedited) return { change: { draft: consumed, writes: [] }, result: {} };
-				return {
-					change: { draft: withState(consumed, { text: "", images: [], documents: [], next: { ...draft.next, image: 1, document: 1 } }), writes: [{ kind: "text", text: "", history: "reset", focus: false }] },
-					result: { attach: null },
-				};
-			}
-			const prompt = answer.draft;
-			if (answer.kind !== "rewind" || prompt === undefined) return { change: { draft: consumed, writes: [] }, result: {} };
-			const held = compactForSend(draft.text, draft.images);
-			const heldFiles = activeDocuments(draft.text, draft.documents);
-			const heldText = composeFileBlocks(held.text.trim(), heldFiles.flatMap(file => (file.source.kind === "held" ? [{ number: file.number, name: file.name, label: file.source.label, content: file.source.content }] : [])));
-			let cards = draft.recoverable;
-			let card = draft.next.card;
-			if (heldText.length > 0 || held.images.length > 0) {
-				const images: ImageContent[] = held.images.map(image => ({ type: "image", mimeType: image.mimeType, data: image.data }));
-				const linkedFiles = heldFiles.filter(file => file.source.kind === "linked").length;
-				cards = [...cards, { id: card++, text: heldText, images, reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", unconfirmed: false, ...(linkedFiles > 0 ? { lostFiles: linkedFiles } : {}) }];
-			}
-			const merged = mergeRestoredQueued({ text: "", images: [], documents: [], nextNumber: 1, nextDocumentNumber: 1, nextId: draft.next.key }, [{ text: prompt.text, images: prompt.images }]);
-			const lost = merged.imagesLost + prompt.unavailableImages;
-			return {
-				change: {
-					draft: withState(consumed, {
-						text: merged.text,
-						images: pruneInactive(merged.images, () => true, new Set(merged.images.map(image => image.number)), MAX_DRAFT_BYTES),
-						documents: merged.documents,
-						walk: null,
-						recoverable: cards,
-						next: { image: merged.nextNumber, document: merged.nextDocumentNumber, key: merged.nextId, card },
-						unedited: draft.revision + 1,
-					}),
-					writes: [{ kind: "text", text: merged.text, caret: merged.text.length, history: "reset", focus: true }],
-				},
-				result: { attach: lost > 0 ? `${lost} image${lost === 1 ? "" : "s"} of the rewound message could not be restored.` : null, send: null },
-			};
-		}, { composing: "wait", held: "wait" }, outcome => {
+		cell.perform(rewind(answer), { composing: "wait", held: "wait" }, outcome => {
 			if (outcome.kind !== "applied") return;
 			if (outcome.result.attach !== undefined) setAttachError(outcome.result.attach);
 			if (outcome.result.send !== undefined) setSendError(outcome.result.send);
@@ -1135,11 +1021,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// Quoting (docs/designs/2026-10-15-quote-chat-selection.md): every trigger asks this composer through the sink, so the refusals, the edit and the notice are the same whoever asked.
 	const quoteSettling = snapshot.phase === "starting" || snapshot.phase === "attaching" || snapshot.phase === "resyncing";
 	const { quote } = useQuoteDraft({
-		surface: () => surfaceRef.current,
-		captured: () => cell.getState().held,
-		composing: () => composingRef.current,
-		// A quote waits for the composition in this editor; it checks the hand-off itself when it runs.
-		defer: work => { cell.perform(() => { work(); return null; }, { composing: "wait", held: "wait" }); },
+		cell,
 		writable: () => canPrompt,
 		settling: () => quoteSettling,
 		notify: (text, level) => client.notices.post({ key: "quote", text, level, ttlMs: QUOTE_NOTICE_MS }),
@@ -1147,20 +1029,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	useEffect(() => provideQuoteSink(quote), [quote]);
 
 	/** Remove quote: the run that starts at `start` and its line break, one undo step; an open composition finishes first. The surface applies it and echoes it to the cell like any edit. */
-	const removeQuote = useCallback((start: number): void => {
-		cell.perform(() => {
-			const surface = surfaceRef.current;
-			if (surface === null) return null;
-			const current = surface.text;
-			const run = findQuoteRuns(current, findFencedBlocks(current)).runs.find(candidate => candidate.start === start);
-			if (run === undefined) return null;
-			const range = removalRange(current, run);
-			surface.apply({ from: range.from, to: range.to, insert: "", selection: { anchor: range.from, focus: range.from } }, "replace");
-			// The button that was pressed is gone (and a press on it never moved the focus into the field), so without this the
-			// focus would sit on the page body and Ctrl+Z would reach nobody: the field takes the focus, the caret where the quote was.
-			surface.focus();
-			return null;
-		}, { composing: "wait", held: "drop" });
+	const removeQuoteAt = useCallback((start: number): void => {
+		cell.perform(removeQuote(start), { composing: "wait", held: "drop" });
 	}, [cell]);
 
 	// A prompt picked in the host's history search (`Ctrl+Alt+Y`) joins the draft like an edited queued message.
@@ -1213,44 +1083,15 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const surface = surfaceRef.current;
 			if (surface === null) return;
 			const composing = event.isComposing || composingRef.current;
-			const text = surface.text;
 			const start = surface.selectionStart;
 			const end = surface.selectionEnd;
-			/** A block edit is one undo step, with the selection where the edit says. */
-			const applyBlockEdit = (edit: TextEdit): void => {
-				surface.apply({ from: edit.from, to: edit.to, insert: edit.insert, selection: { anchor: edit.selectionStart, focus: edit.selectionEnd } }, "block");
-			};
-			// Inside a fenced code block Enter and Tab are an editor's (docs/designs/2026-10-15-composer-code-blocks.md); the chord that
-			// sends there is Ctrl+Enter, which falls through to the rules below. An IME composition and a held draft are left alone.
-			const block = composing || event.keyCode === 229 || cell.getState().held
-				? null
-				: blockContaining(findFencedBlocks(text), start, end);
-			if (block !== null) {
-				if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey) {
-					const edit = event.shiftKey ? outdentEdit(text, block, start, end) : indentEdit(text, block, start, end);
-					// Shift+Tab with nothing left to outdent is the way out of the block, backwards, and is the only Tab that moves the focus.
-					if (edit === null && event.shiftKey) return;
-					event.preventDefault();
-					if (edit !== null) applyBlockEdit(edit);
-					return;
-				}
-				if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
-					event.preventDefault();
-					applyBlockEdit(newlineEdit(text, block, start, end));
-					return;
-				}
+			const claim = keyEdit(cell.read(), { anchor: start, focus: end }, event, { composing, held: cell.getState().held, sendWith });
+			if (claim.claimed) {
+				event.preventDefault();
+				if (claim.change !== null) cell.commit(claim.change);
+				return;
 			}
-			// A quote line follows the code block's keys (docs/designs/2026-10-15-quote-chat-selection.md, Section 4): Enter is a new line that carries the prefix (an empty quote line lets go of it), Shift+Tab leaves the quote, Backspace and Delete take the prefix with them. Ctrl+Enter sends from here through the rules below.
-			// In Shift+Enter mode a plain Shift+Enter in a quote sends (the quote rules treat it as a new line otherwise); a plain Enter is the quote's new line in both.
-			if (block === null && !composing && event.keyCode !== 229 && !cell.getState().held && !(sendWith === "shiftEnter" && event.key === "Enter" && event.shiftKey && !event.altKey)) {
-				const blocksNow = findFencedBlocks(text);
-				const quoteEdit = quoteKeyEdit(text, findQuoteRuns(text, blocksNow), event, start, end);
-				if (quoteEdit !== null) {
-					event.preventDefault();
-					applyBlockEdit(quoteEdit);
-					return;
-				}
-			}
+			const inBlock = claim.inBlock;
 			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
 			// belongs to Stop (`ompDesk.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
@@ -1261,7 +1102,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					return;
 				}
 			}
-			if (suggestionsOpen && !composing && block === null) {
+			if (suggestionsOpen && !composing && !inBlock) {
 				if (visible.length > 0 && (event.key === "Home" || event.key === "End")) {
 					event.preventDefault(); event.stopPropagation();
 					selectSuggestion(event.key === "Home" ? 0 : visible.length - 1); return;
@@ -1289,20 +1130,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				// History takes the arrow only when the browser would have no row left to move the caret to: soft-wrapped rows count, not just newlines.
 				const edges = start === end ? surface.rowEdges(start) : null;
 				const edge = edges !== null && (event.key === "ArrowUp" ? edges.first : edges.last);
-				if (edge && cell.read().images.length === 0 && !cell.getState().held) {
-					// A prompt that carried files is walked by its prose; the history cursor owns the documents it placed and swaps them on
-					// each step, so ↑ then ↓ returns the draft.
-					const prompts = sessionPrompts(client.getSnapshot().entries);
-					const step = historyStep(prompts.map(prompt => draftFromSentText(prompt).text), cell.read().walk, event.key === "ArrowUp" ? "older" : "newer", text);
-					if (step !== null) {
+				if (edge) {
+					const change = recall(cell.read(), sessionPrompts(client.getSnapshot().entries), event.key === "ArrowUp" ? "older" : "newer", cell.getState().held);
+					if (change !== null) {
 						event.preventDefault();
-						const recalled = step.cursor === null ? null : draftFromSentText(prompts[prompts.length - step.cursor.index]!);
-						const placed = recalled?.documents ?? [];
-						const now = cell.read();
-						cell.commit({
-							draft: withState(now, { walk: step.cursor, text: step.text, documents: placed, next: { ...now.next, document: placed.reduce((next, document) => Math.max(next, document.number + 1), 1) } }),
-							writes: [{ kind: "text", text: step.text, caret: step.text.length, history: "record", focus: true }],
-						});
+						cell.commit(change);
 						return;
 					}
 				}
@@ -1471,7 +1303,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				{lostAttachments} image{lostAttachments === 1 ? "" : "s"} could not be carried to this document. Reattach them before sending.
 				<button type="button" className="omp-btn" disabled={captureLocked} aria-label="Dismiss attachment warning" onClick={() => {
 					if (cell.getState().held) return;
-					cell.commit({ draft: withState(cell.read(), { lostImages: 0 }), writes: [] });
+					cell.commit(dismissLost(cell.read()));
 				}}>Dismiss</button>
 			</div>}
 			{dialog ?? <>
@@ -1514,8 +1346,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					}}>Add to draft</button>
 					<button type="button" className="omp-btn" disabled={captureLocked} aria-label="Dismiss recoverable message" onClick={() => {
 						if (cell.getState().held) return;
-						const now = cell.read();
-						cell.commit({ draft: withState(now, { recoverable: now.recoverable.filter(item => item.id !== entry.id) }), writes: [] });
+						cell.commit(dismissRecoverable(cell.read(), entry.id));
 					}}>Dismiss</button>
 				</div>
 			))}
@@ -1545,7 +1376,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						}}
 						options={{ rules, onEdit: cell.edited, onSelection: cell.moved, onKeyDown: onPromptKeyDown, onWindowOpen: cell.windowOpened, onSettled: cell.settled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
 					/>
-					{quoteLayout.runs.length > 0 && <QuoteRemoveButtons surfaceRef={surfaceRef} text={text} runs={quoteLayout.runs} disabled={captureLocked} onRemove={removeQuote} />}
+					{quoteLayout.runs.length > 0 && <QuoteRemoveButtons surfaceRef={surfaceRef} text={text} runs={quoteLayout.runs} disabled={captureLocked} onRemove={removeQuoteAt} />}
 					{suggestionsOpen && (
 						<ul id={suggestionListId} role="listbox" aria-label={argument !== null ? "Command arguments" : slash !== null ? (slash.skillsOnly ? "Skills" : "Slash commands") : "Workspace files"} className="omp-suggest-list">
 							{argumentHint && <li role="presentation" className="omp-suggest-option omp-native-muted omp-slash-hint">{argumentHint}{argument?.hint.requirement === "optional" ? " · optional" : argument?.hint.requirement === "required" ? " · required" : ""}</li>}

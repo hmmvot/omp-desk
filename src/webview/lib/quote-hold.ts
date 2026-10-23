@@ -4,14 +4,14 @@
  * the quote ("This session cannot take a message") although the session was seconds from live. The composer holds it instead
  * and places it, by the usual rules, once the session has settled.
  */
-import type { QuoteRequest } from "./quote-sink.ts";
+import type { QuoteRequest } from "./draft/draft.ts";
 
 /** How many quotes may wait; older ones are dropped first. */
 export const MAX_HELD_QUOTES = 8;
 
 export interface QuoteHold {
-	/** Holds `request` when it is a host-sent editor quote and the session is settling; returns whether it was held. */
-	hold(request: QuoteRequest, settling: boolean): boolean;
+	/** Holds `request` until the session has settled (the Draft's `quote` says which requests wait). */
+	hold(request: QuoteRequest): void;
 	/** The held quotes in arrival order, emptying the hold. */
 	release(): QuoteRequest[];
 }
@@ -19,11 +19,9 @@ export interface QuoteHold {
 export function createQuoteHold(): QuoteHold {
 	const held: QuoteRequest[] = [];
 	return {
-		hold(request, settling) {
-			if (request.kind !== "editor" || !settling) return false;
+		hold(request) {
 			held.push(request);
 			while (held.length > MAX_HELD_QUOTES) held.shift();
-			return true;
 		},
 		release: () => held.splice(0),
 	};

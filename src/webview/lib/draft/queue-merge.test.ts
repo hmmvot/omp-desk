@@ -1,13 +1,13 @@
 /**
  * Dequeued messages going back into the composer draft: appended after an existing draft, images re-attached under
- * fresh reference numbers, nothing the draft already held changed. Runner: `node --test src/webview/lib/queue-restore.test.ts`.
+ * fresh reference numbers, nothing the draft already held changed. Runner: `node --test src/webview/lib/draft/queue-merge.test.ts`.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compactForSend } from "./draft/image-references.ts";
-import { composeFileBlocks, fileMarker } from "../../shared/file-blocks.ts";
-import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing, type DraftState, type RestoredQueued } from "./queue-restore.ts";
-import type { DraftImage } from "./draft/draft.ts";
+import { compactForSend } from "./image-references.ts";
+import { composeFileBlocks, fileMarker } from "../../../shared/file-blocks.ts";
+import { mergeRestoredQueued, type DraftState, type RestoredQueued } from "./queue-merge.ts";
+import type { DraftImage } from "./value.ts";
 
 const PNG = "iVBORw0KGgo=";
 const image = (number: number): DraftImage => ({ id: number, name: `draft-${number}`, mimeType: "image/png", bytes: 8, data: `draft-bytes-${number}`, number });
@@ -148,23 +148,5 @@ describe("mergeRestoredQueued", () => {
 			assert.deepEqual(merged.documents.map(document => document.number), [2]);
 			assert.equal(merged.text, `x [File #1: stray.md] ${fileMarker(2, "real.md")}`);
 		});
-	});
-});
-
-describe("the hand-over registry", () => {
-	it("delivers to the mounted composer at once and to a later composer in order", () => {
-		const first: RestoredQueued[][] = [];
-		const release = subscribeQueuedForEditing(entries => first.push([...entries]));
-		offerQueuedForEditing([{ text: "now", images: [] }]);
-		assert.deepEqual(first, [[{ text: "now", images: [] }]]);
-		release();
-		offerQueuedForEditing([{ text: "held one", images: [] }]);
-		offerQueuedForEditing([{ text: "held two", images: [] }]);
-		const later: string[] = [];
-		const releaseLater = subscribeQueuedForEditing(entries => later.push(...entries.map(entry => entry.text)));
-		assert.deepEqual(later, ["held one", "held two"]);
-		offerQueuedForEditing([]);
-		assert.deepEqual(later, ["held one", "held two"], "an empty hand-over is not delivered");
-		releaseLater();
 	});
 });
