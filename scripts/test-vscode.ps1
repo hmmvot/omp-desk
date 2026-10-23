@@ -63,7 +63,7 @@ param(
 	[switch] $KeepProviderKeys,
 	# Launch with USERPROFILE and HOME (and HOMEDRIVE/HOMEPATH) set to <Root>\<Name>\home: nothing of the real home folder is read or written. -Reset deletes it too.
 	[switch] $IsolateHome,
-	# Stop the running window for -Name (its Code.exe processes, and any bun.exe broker, with their children) and start nothing.
+	# Stop everything of the environment -Name and start nothing: every process whose command line names <Root>\<Name> (Code.exe, bun.exe or Code.exe Chat brokers, OMP) and what those started, until a new look finds none; fails when one cannot be ended.
 	[switch] $Stop,
 	# Chrome DevTools Protocol port on 127.0.0.1 for automated UI checks; applies only when this VS Code starts.
 	[ValidateRange(1024, 65535)] [int] $RemoteDebuggingPort,
@@ -75,6 +75,77 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+$base = Join-Path ([IO.Path]::GetFullPath($Root)) $Name
+$data = Join-Path $base 'data'
+$extensions = Join-Path $base 'ext'
+$agent = Join-Path $base 'agent'
+
+# Everything that belongs to this environment, whatever its image: Code.exe (windows, helpers, crashpad), the bun.exe or
+# Code.exe brokers of the Chats (ADR-0074: they outlive the window and are not its children), the OMP processes under
+# them (`--cwd` names the environment's folder) and everything those started (ConPTY consoles, tools). A process belongs
+# when its command line names the environment's folder as a path of its own, or it descends from one that does (a
+# child never starts before its parent, so a pid that was reused by an unrelated process is not followed).
+# This process and its ancestors are never part of it: a caller's own command line may name the folder.
+function Test-NamesPath([string] $CommandLine, [string] $Path) {
+	if (-not $CommandLine) { return $false }
+	$line = $CommandLine.Replace('/', '\')
+	for ($at = $line.IndexOf($Path, [StringComparison]::OrdinalIgnoreCase); $at -ge 0; $at = $line.IndexOf($Path, $at + 1, [StringComparison]::OrdinalIgnoreCase)) {
+		$end = $at + $Path.Length
+		if ($end -ge $line.Length) { return $true }
+		if ('\', '"', "'", ' ' -contains [string] $line[$end]) { return $true }
+	}
+	$false
+}
+function Get-EnvironmentProcess([string] $Path) {
+	$all = @(Get-CimInstance Win32_Process)
+	$byId = @{}
+	foreach ($process in $all) { $byId[[int] $process.ProcessId] = $process }
+	$excluded = [Collections.Generic.HashSet[int]]::new()
+	for ($id = $PID; $id -and $byId.ContainsKey($id) -and $excluded.Add($id); $id = [int] $byId[$id].ParentProcessId) { }
+	$members = @{}
+	foreach ($process in $all) {
+		if (-not $excluded.Contains([int] $process.ProcessId) -and (Test-NamesPath $process.CommandLine $Path)) { $members[[int] $process.ProcessId] = $process }
+	}
+	do {
+		$added = $false
+		foreach ($process in $all) {
+			$id = [int] $process.ProcessId
+			if ($members.ContainsKey($id) -or $excluded.Contains($id)) { continue }
+			$parent = $members[[int] $process.ParentProcessId]
+			if ($parent -and $process.CreationDate -ge $parent.CreationDate) { $members[$id] = $process; $added = $true }
+		}
+	} while ($added)
+	@($members.Values)
+}
+
+# A running window for this environment keeps its environment, and deleting state under it breaks the open sessions.
+$running = @(Get-EnvironmentProcess $base)
+if ($running.Count -gt 0 -and -not $Stop) {
+	if ($Reset -or $ResetVsCode) { throw "VS Code for '$Name' is running. Stop it (-Stop), then reset." }
+	Write-Warning "VS Code for '$Name' is already running; it keeps the environment it started with."
+}
+
+if ($Stop) {
+	# One kill of everything found, then a new look: a broker or OMP that was starting while the first list was made shows up
+	# in the next one. The environment is stopped only when a look finds nothing; a process that cannot be ended fails the
+	# script (exit 1) with its name instead of passing silently. The limit is below the 120 s the e2e suite gives this call.
+	$deadline = [DateTime]::UtcNow.AddSeconds(90)
+	$ended = 0
+	while ($running.Count -gt 0) {
+		if ([DateTime]::UtcNow -gt $deadline) {
+			throw "Could not stop everything of '$Name' in 90 s: $(($running | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ') still run."
+		}
+		Stop-Process -Id @($running | ForEach-Object { $_.ProcessId }) -Force -ErrorAction SilentlyContinue
+		$ended += $running.Count
+		Start-Sleep -Milliseconds 300
+		$running = @(Get-EnvironmentProcess $base)
+	}
+	if ($ended -eq 0) { Write-Host "VS Code for '$Name' is not running." }
+	else { Write-Host "Stopped VS Code for '$Name' ($ended processes)." }
+	return
+}
+
+# Stopping needs no VS Code install; everything below does.
 if ($VsCodeDir) {
 	$code = Join-Path ([IO.Path]::GetFullPath($VsCodeDir)) 'bin\code.cmd'
 	if (-not (Test-Path $code)) { throw "bin\code.cmd not found in -VsCodeDir '$VsCodeDir'." }
@@ -83,28 +154,6 @@ else {
 	$command = Get-Command code.cmd -ErrorAction SilentlyContinue
 	if (-not $command) { throw 'code.cmd is not on PATH. Install VS Code with "Add to PATH", or add its bin folder.' }
 	$code = $command.Source
-}
-
-$base = Join-Path ([IO.Path]::GetFullPath($Root)) $Name
-$data = Join-Path $base 'data'
-$extensions = Join-Path $base 'ext'
-$agent = Join-Path $base 'agent'
-
-# A running window for this environment keeps its environment, and deleting state under it breaks the open sessions.
-# A Chat's background broker may run on bun.exe (ADR-0074), outliving the window it was started from: its command line
-# names this environment's data directory too, and it belongs to the environment as much as a Code.exe does.
-$running = @(Get-CimInstance Win32_Process -Filter "Name = 'Code.exe' OR Name = 'bun.exe'" |
-	Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($data, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
-if ($running.Count -gt 0 -and -not $Stop) {
-	if ($Reset -or $ResetVsCode) { throw "VS Code for '$Name' is running. Stop it (-Stop), then reset." }
-	Write-Warning "VS Code for '$Name' is already running; it keeps the environment it started with."
-}
-
-if ($Stop) {
-	if ($running.Count -eq 0) { Write-Host "VS Code for '$Name' is not running."; return }
-	foreach ($process in $running) { cmd /c "taskkill /PID $($process.ProcessId) /T /F >nul 2>&1" }
-	Write-Host "Stopped VS Code for '$Name'."
-	return
 }
 
 if ($ResetVsCode) { foreach ($dir in $data, $extensions) { if (Test-Path $dir) { Remove-Item -Recurse -Force $dir } } }

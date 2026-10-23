@@ -3,7 +3,7 @@
  * desktop (never on the user's), with its own user data, extensions and OMP agent directory. Nothing here uses
  * `code.cmd`, `Start-Process` or any other launcher.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { sleep } from "./time.ts";
@@ -63,9 +63,27 @@ export function startVsCode(options: LaunchOptions): Promise<RunResult> {
 	return launcher(args);
 }
 
-/** Ends every Code.exe of the environment and what it started. Safe when nothing runs. */
+/** Ends every process of the environment (see `-Stop` in the script: Code.exe, brokers, OMP, whatever those started) and fails when one cannot be ended. Safe when nothing runs. */
 export function stopVsCode(name: string, root: string): Promise<RunResult> {
-	return launcher(["-Name", name, "-Root", root, "-Stop"], 120_000);
+	// The script gives up after 90 s of its own; this limit only covers a PowerShell that does not start.
+	return launcher(["-Name", name, "-Root", root, "-Stop"], 150_000);
+}
+
+/** `stopVsCode` for a process that is exiting: nothing asynchronous runs any more. */
+export function stopVsCodeSync(name: string, root: string): void {
+	spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", LAUNCHER, "-Name", name, "-Root", root, "-Stop"], { cwd: REPO_ROOT, windowsHide: true, stdio: "ignore", timeout: 150_000 });
+}
+
+/**
+ * Starts `test/e2e/reaper.ps1`, which stops the environment `reapFile` names if this process dies while the file exists,
+ * and ends by itself when the file is deleted. It must not be a child of this process: Node ends its children together
+ * with itself, so it is started through `cmd /c start`, which leaves it without a parent in that job.
+ */
+export function startReaper(reapFile: string): void {
+	const script = join(REPO_ROOT, "test", "e2e", "reaper.ps1");
+	const starter = spawn("cmd.exe", ["/d", "/c", "start", "", "/b", "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-ParentPid", String(process.pid), "-ReapFile", reapFile], { cwd: REPO_ROOT, windowsHide: true, stdio: "ignore" });
+	starter.once("error", () => {});
+	starter.unref();
 }
 
 export async function freePort(): Promise<number> {
