@@ -27,24 +27,30 @@ export interface LoopLagOptions {
 	/** CPU milliseconds (user + system) this process has used. Default `process.cpuUsage`. */
 	readonly cpuMs?: () => number;
 	/**
-	 * Cumulative CPU split and main-thread busy time, in milliseconds. Default: `process.cpuUsage` and the event loop's
-	 * utilization, used only when `cpuMs` is not replaced. A stall whose process CPU roughly equals its length with
-	 * the loop busy is one thread spinning; high CPU with an idle loop is another thread of the process; mostly system
-	 * time points at the OS (file system, page faults) and not at JavaScript.
+	 * Cumulative CPU split and page faults, in milliseconds and counts. Default: `process.cpuUsage` and
+	 * `process.resourceUsage`, used only when `cpuMs` is not replaced. A stall whose process CPU roughly equals its length
+	 * is a thread of this process spinning; mostly system time points at the OS (file system, page faults) and not at
+	 * JavaScript; many page faults with little CPU is the process waiting for memory the OS took away from it.
 	 */
 	readonly split?: () => CpuSplit;
 }
 
-/** Cumulative CPU time of this process by mode, and the time the event loop was not waiting. */
+/** Cumulative CPU time of this process by mode, and the page faults it has taken (soft and hard). */
 export interface CpuSplit {
 	readonly userMs: number;
 	readonly systemMs: number;
-	readonly busyMs: number;
+	readonly pageFaults: number;
 }
 
+/**
+ * The event loop's own utilization (`performance.eventLoopUtilization`) is not used: in the extension host (an Electron utility
+ * process) it read 0 in every stall, also in one where a 1.7 s synchronous catalog read was logged next to `event loop busy 0 ms`,
+ * while plain Node and Electron-as-Node count it. Windows reports the page-fault count in either of the two fields, so both are added.
+ */
 function processSplit(): CpuSplit {
 	const usage = process.cpuUsage();
-	return { userMs: usage.user / 1000, systemMs: usage.system / 1000, busyMs: performance.eventLoopUtilization().active };
+	const resources = process.resourceUsage();
+	return { userMs: usage.user / 1000, systemMs: usage.system / 1000, pageFaults: resources.minorPageFault + resources.majorPageFault };
 }
 
 /** One marked operation: running while `end` is `null`. */
@@ -156,7 +162,7 @@ export class EventLoopLagMonitor {
 		if (lag < this.#thresholdMs || lag > SUSPEND_MS) return;
 		const modes = split === null || before === null
 			? ""
-			: `; user ${Math.round(split.userMs - before.userMs)} ms, system ${Math.round(split.systemMs - before.systemMs)} ms, event loop busy ${Math.round(split.busyMs - before.busyMs)} ms`;
+			: `; user ${Math.round(split.userMs - before.userMs)} ms, system ${Math.round(split.systemMs - before.systemMs)} ms, page faults ${Math.round(split.pageFaults - before.pageFaults)}`;
 		const text = `event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms${modes}): ${this.#describe(from, at)}`;
 		if (lag >= LOOP_LAG_WARN_MS) this.#log.warn(text);
 		else this.#log.debug(text);

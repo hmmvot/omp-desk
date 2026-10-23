@@ -38,15 +38,31 @@ describe("event loop lag monitor", () => {
 		assert.match(m.lines[0]!, /process CPU 40 ms in 1334 ms/);
 	});
 
-	it("splits the process CPU by mode and says how long the event loop was busy, so a spinning thread is told from the OS", () => {
-		let split = { userMs: 0, systemMs: 0, busyMs: 0 };
+	it("splits the process CPU by mode and counts the page faults of the stall, so a spinning thread is told from the OS and from memory taken away", () => {
+		let split = { userMs: 0, systemMs: 0, pageFaults: 0 };
 		let now = 1000;
 		const logged: LoggedLine[] = [];
 		const instance = new EventLoopLagMonitor({ log: recordingLogger(logged), now: () => now, cpuMs: () => split.userMs + split.systemMs, split: () => split });
-		split = { userMs: 300, systemMs: 700, busyMs: 1200 };
+		split = { userMs: 300, systemMs: 700, pageFaults: 4200 };
 		now += 1334;
 		instance.sample();
-		assert.match(logged[0]!.message, /process CPU 1000 ms in 1334 ms; user 300 ms, system 700 ms, event loop busy 1200 ms\)/);
+		assert.match(logged[0]!.message, /process CPU 1000 ms in 1334 ms; user 300 ms, system 700 ms, page faults 4200\)/);
+		assert.doesNotMatch(logged[0]!.message, /event loop busy/);
+	});
+
+	it("counts real page faults by default: touching new memory between two samples shows in the line", () => {
+		let now = 1000;
+		const logged: LoggedLine[] = [];
+		const instance = new EventLoopLagMonitor({ log: recordingLogger(logged), now: () => now });
+		const stop = instance.start();
+		stop();
+		const touched = Buffer.alloc(64 * 1024 * 1024, 1);
+		now += 1334;
+		instance.sample();
+		assert.ok(touched.length > 0);
+		const faults = /page faults (\d+)\)/.exec(logged[0]!.message);
+		assert.ok(faults !== null, logged[0]!.message);
+		assert.ok(Number(faults[1]) > 1000, `the 64 MB written between the samples left ${faults[1]} page faults`);
 	});
 
 	it("logs a stall of a second or more as a warning and a shorter one as debug", () => {
