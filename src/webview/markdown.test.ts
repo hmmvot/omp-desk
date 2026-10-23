@@ -140,7 +140,7 @@ test("a different marker type starts a new list and an ordered list keeps its st
 
 test("blank-separated items form a loose list with paragraphs; code fences inside items survive", () => {
 	const html = render("1. first\n\n   ```ts\n   const x = 1;\n   ```\n\n2. second\n\nafter");
-	const codeBlock = '<div class="omp-code-block"><pre><code data-language="ts">const x = 1;</code></pre><button type="button" class="omp-copy-button omp-code-copy" aria-label="Copy code" title="Copy code"><span class="codicon codicon-copy" aria-hidden="true"></span></button></div>';
+	const codeBlock = '<div class="omp-code-block"><pre><code data-language="ts">const x = 1;</code></pre><div class="omp-code-actions"><button type="button" class="omp-copy-button omp-code-copy" aria-label="Copy code" title="Copy code"><span class="codicon codicon-copy" aria-hidden="true"></span></button></div></div>';
 	assert.equal(html, `<div class="omp-md"><ol><li><p>first</p>${codeBlock}</li><li><p>second</p></li></ol><p>after</p></div>`);
 });
 

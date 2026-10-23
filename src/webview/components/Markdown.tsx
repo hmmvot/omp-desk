@@ -535,7 +535,7 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 				) : language.toLowerCase() === "html" && !context.quoted && !context.inList ? (
 					<HtmlPageBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
 				) : (
-					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} leaf={leaf} />
+					<CodeBlock key={`b${key}`} name={`${keyPrefix}${key++}`} language={language} source={text} closed={closed} leaf={leaf} />
 				),
 			);
 			continue;

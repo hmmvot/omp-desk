@@ -4,6 +4,7 @@
  * The browser's native undo cannot serve a surface whose nodes the page replaces, so every edit records a
  * snapshot of the draft and its selection before it is applied. Pure; the clock is passed in.
  */
+import type { EditKind } from "./draft/draft.ts";
 
 export interface DraftSnapshot {
 	readonly text: string;
@@ -12,9 +13,6 @@ export interface DraftSnapshot {
 	/** Selection focus (the caret end), as a model offset. */
 	readonly focus: number;
 }
-
-/** What kind of edit a step records; only `type` and `delete` ever merge into a previous step. */
-export type EditKind = "type" | "delete" | "newline" | "paste" | "cut" | "block" | "marker" | "replace" | "external" | "composition" | "complete";
 
 export interface DraftHistoryLimits {
 	/** Most steps kept (oldest dropped first). */

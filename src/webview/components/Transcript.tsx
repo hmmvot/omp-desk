@@ -43,6 +43,7 @@ import { isHeadNavigation, nextHead } from "../lib/tool-navigation";
 import { NativeMessage } from "./NativeMessage";
 import { EmptyState } from "./EmptyState";
 import { AssistantContentView } from "./MessageContent";
+import { CodeWrapScope } from "./CodeWrapScope";
 import { NativeDisclosure } from "./NativeDisclosure";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
@@ -242,6 +243,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	const rewindState = !picking ? undefined : rewindId !== null && rewindId === rewind.selectedId ? "selected" : props.rewindDimmed?.has(card.id) ? "dimmed" : undefined;
 	const points = props.branchesByCard?.get(card.id);
 	return (
+		<CodeWrapScope id={`${props.conversationKey ?? "chat"}:${card.id}`}>
 		<Row kind={user || message?.role === "custom" && userSkill(message) !== null ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined} actions={actions}
 			findId={(props.depth ?? 0) === 0 && props.findable !== false && (user || card.kind === "assistant" && !card.streaming || card.kind === "tool") ? findIdOf(card) : undefined}
 			rewindState={rewindState} onPick={picking && rewindId !== null ? () => rewind!.onPick(rewindId) : undefined}>
@@ -249,6 +251,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 			{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} served={props.footerByHost.get(card.id)!.entryIds.flatMap(id => props.servedByEntry?.get(id) ?? [])} />}
 			{points?.map(point => <BranchPointMarker key={point.entryId ?? "root"} point={point} onSwitch={rewind?.onSwitch} />)}
 		</Row>
+		</CodeWrapScope>
 	);
 }
 

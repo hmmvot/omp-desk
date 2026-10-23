@@ -4,6 +4,7 @@ import type { ChatContent, MessageContent } from "../../chat/messages.ts";
 import { FileBlockRows } from "./FileBlockRow.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { AssistantReplyContext } from "./FileLinks.tsx";
+import { CodeWrapScope } from "./CodeWrapScope.tsx";
 import { UserImageReferencesContext } from "./ImageReference.tsx";
 import { NativeDisclosure } from "./NativeDisclosure.tsx";
 import { PacedMarkdown } from "./PacedMarkdown.tsx";
@@ -69,7 +70,7 @@ export function MessageContentView({ content, pace, streaming, bypassPacing, ref
 	let imageCount = 0;
 	const blocks = content.map((block, index) => {
 		const imageNumber = references && block.type === "image" ? ++imageCount : undefined;
-		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} emphasis={emphasis} references={references} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} thinkingClock={thinkingClock} />;
+		return <CodeWrapScope key={`${block.type}:${index}`} id={String(index)}><ContentBlock block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} emphasis={emphasis} references={references} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} thinkingClock={thinkingClock} /></CodeWrapScope>;
 	});
 	const body = <div className="omp-native-content">{blocks}</div>;
 	return references ? <UserImageReferencesContext.Provider value={{ count: imageCount, anchor: number => `${base}-image-${number}` }}>{body}</UserImageReferencesContext.Provider> : body;

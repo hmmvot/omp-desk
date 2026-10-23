@@ -10,8 +10,7 @@
  *
  * Everything here is pure except the registry; the composer owns the DOM, selection and focus.
  */
-import type { PendingImage } from "./draft/draft.ts";
-import { draftFromSentText, type DraftDocument } from "./draft/draft.ts";
+import { draftFromSentText, type DraftDocument, type DraftImage } from "./draft/draft.ts";
 import { fileReferencePattern, imageReferenceLabel, imageReferencePattern } from "./draft/draft.ts";
 import { fileMarker, markerName } from "../../shared/file-blocks.ts";
 
@@ -44,13 +43,10 @@ export interface RestoredQueued {
 	withdrawn?: true;
 }
 
-/** An image of the composer's draft: the attachment plus its stable reference number. */
-export type NumberedImage = PendingImage & { number: number };
-
 /** What the merge needs to know about the draft. */
 export interface DraftState {
 	text: string;
-	images: readonly NumberedImage[];
+	images: readonly DraftImage[];
 	documents: readonly DraftDocument[];
 	/** Next unused reference number. */
 	nextNumber: number;
@@ -62,7 +58,7 @@ export interface DraftState {
 
 export interface MergedDraft {
 	text: string;
-	images: NumberedImage[];
+	images: DraftImage[];
 	documents: DraftDocument[];
 	nextNumber: number;
 	nextDocumentNumber: number;
@@ -104,7 +100,7 @@ export function mergeRestoredQueued(draft: DraftState, entries: readonly Restore
 	let nextDocumentNumber = draft.nextDocumentNumber;
 	let nextId = draft.nextId;
 	let imagesLost = 0;
-	const added: NumberedImage[] = [];
+	const added: DraftImage[] = [];
 	const addedDocuments: DraftDocument[] = [];
 	const notes: string[] = [];
 	const orphanNumbers = new Set<number>();
@@ -147,17 +143,17 @@ export function mergeRestoredQueued(draft: DraftState, entries: readonly Restore
 	};
 	const texts: string[] = [];
 	for (const { entry, prose, documents } of parsed) {
-		const mapped = new Map<number, NumberedImage>();
+		const mapped = new Map<number, DraftImage>();
 		entry.images.forEach((image, index) => {
 			if (SUPPORTED[image.mimeType] !== true) {
 				imagesLost += 1;
 				return;
 			}
 			const size = markerSize(prose, index + 1);
-			const attached: NumberedImage = {
+			const attached: DraftImage = {
 				id: nextId++,
 				name: `queued-image-${added.length + 1}`,
-				mimeType: image.mimeType as NumberedImage["mimeType"],
+				mimeType: image.mimeType as DraftImage["mimeType"],
 				bytes: decodedBytes(image.data),
 				data: image.data,
 				...(size === undefined ? {} : size),

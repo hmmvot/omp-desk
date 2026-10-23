@@ -4,9 +4,6 @@ import { composeFileBlocks, fileMarker } from "../../../shared/file-blocks.ts";
 import {
 	activeDocuments,
 	documentChars,
-	documentExtension,
-	documentIcon,
-	documentTooltip,
 	draftFromSentText,
 	isKnownDocument,
 	pruneInactiveDocuments,
@@ -59,24 +56,6 @@ describe("pruneInactiveDocuments", () => {
 		assert.deepEqual(kept.map(document => document.number), [1, 2, 4, 5], "3 is the oldest inactive unprotected one; 4 fits afterwards");
 		const tight = pruneInactiveDocuments(documents, active(1), new Set([2]), 10);
 		assert.deepEqual(tight.map(document => document.number), [1, 2, 5]);
-	});
-});
-
-describe("icon, extension and tooltip", () => {
-	it("chooses the codicon by extension, and a dotfile or a bare name has none", () => {
-		assert.equal(documentIcon("README.MD"), "markdown");
-		assert.equal(documentIcon("a.ts"), "file-code");
-		assert.equal(documentIcon("a.txt"), "file");
-		assert.equal(documentIcon("Makefile"), "file");
-		assert.equal(documentIcon(".env"), "file");
-		assert.equal(documentExtension("a.b.c"), "c");
-		assert.equal(documentExtension("trailing."), "");
-	});
-
-	it("words the tooltip without file text", () => {
-		assert.equal(documentTooltip(linked(1, "a")), "read from disk when sent");
-		assert.equal(documentTooltip(held(1, "a", "secret", "docs/a.md")), "docs/a.md");
-		assert.equal(documentTooltip(held(1, "a", "secret")), "no path: the text is held in the draft");
 	});
 });
 

@@ -5,16 +5,46 @@
  * a page that has no theme; the markup then is the same as it ever was. Colour is added by a later task
  * ({@link useHighlightedRuns}), so a long block never holds up a frame.
  */
+import { useContext, useEffect, useRef, useState } from "react";
+import { codeWrapKey, isCodeWrapped, setCodeWrapped, showsWrapToggle } from "../lib/code-wrap.ts";
 import { useHighlightedRuns } from "../lib/use-highlighted-runs.ts";
 import { CodeRuns } from "./CodeRuns.tsx";
+import { CodeWrapScopeContext } from "./CodeWrapScope.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 
-/** `leaf` is the quote record number of a block in a quotable message (`data-md-leaf`). */
-export function CodeBlock({ language, source, closed, copy = true, leaf }: { language: string; source: string; closed: boolean; copy?: boolean; leaf?: number }) {
+/**
+ * `leaf` is the quote record number of a block in a quotable message (`data-md-leaf`). `name` is the block's place in its Markdown
+ * text: with the row's scope it names the block, so the reader's choice to wrap its lines outlives the row's unmount.
+ */
+export function CodeBlock({ language, source, closed, copy = true, leaf, name }: { language: string; source: string; closed: boolean; copy?: boolean; leaf?: number; name?: string }) {
 	const runs = useHighlightedRuns(language, source, closed);
+	const scope = useContext(CodeWrapScopeContext);
+	const key = name === undefined ? null : codeWrapKey(scope, name);
+	const [wrapped, setWrapped] = useState(() => isCodeWrapped(key));
+	const [overflows, setOverflows] = useState(false);
+	const pre = useRef<HTMLPreElement>(null);
+	// Wider than the box is read where the browser has just laid the block out: a resize of the box and growth of its text (streaming, colour arriving) both resize one of the two observed elements, and nothing is measured per frame otherwise.
+	useEffect(() => {
+		const box = pre.current;
+		const text = box?.firstElementChild;
+		// While wrapped nothing is measured and the last answer stays, so the button does not blink away under the pointer when it unwraps.
+		if (box === null || text === null || text === undefined || wrapped) return;
+		const measure = (): void => setOverflows(showsWrapToggle(false, box.scrollWidth, box.clientWidth));
+		const observer = new ResizeObserver(measure);
+		observer.observe(box);
+		observer.observe(text);
+		measure();
+		return () => observer.disconnect();
+	}, [wrapped]);
+	const toggle = (): void => {
+		const next = !wrapped;
+		setWrapped(next);
+		setCodeWrapped(key, next);
+	};
+	const wrapButton = wrapped || overflows;
 	return (
-		<div className="omp-code-block" data-md-leaf={leaf}>
-			<pre>
+		<div className="omp-code-block" data-md-leaf={leaf} data-wrapped={wrapped ? "" : undefined}>
+			<pre ref={pre}>
 				{runs === null ? (
 					<code data-language={language}>{source}</code>
 				) : (
@@ -23,7 +53,16 @@ export function CodeBlock({ language, source, closed, copy = true, leaf }: { lan
 					</code>
 				)}
 			</pre>
-			{copy && source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
+			{(copy && source.length > 0 || wrapButton) && (
+				<div className="omp-code-actions">
+					{wrapButton && (
+						<button type="button" className="omp-copy-button omp-code-wrap" aria-pressed={wrapped} aria-label="Wrap lines" title={wrapped ? "Wrap lines: on. Press to scroll sideways instead" : "Wrap lines: off. Press to wrap long lines"} onClick={toggle}>
+							<span className="codicon codicon-word-wrap" aria-hidden="true" />
+						</button>
+					)}
+					{copy && source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
+				</div>
+			)}
 		</div>
 	);
 }

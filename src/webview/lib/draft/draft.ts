@@ -5,60 +5,51 @@
  * The module owns the composer's draft rules: markers and attachments, quotes, completions, refills, the hand-off capture and
  * the send composition. It has no React and no DOM; node tests cross this file.
  *
+ * Seams: the cell reaches the field through a `FieldPort` (`lib/draft-write.ts` over the surface of ADR-0077) and `attach` reads files
+ * through an `AttachReader` (`lib/attach-reader.ts`); each has a fake in the node tests.
+ *
  * LEDGER OF TRANSITIONAL EXPORTS. While the design's migration groups land, this file re-exports the helpers that the code
- * outside the module still calls, so that moving a file is a mechanical change. Each line below names the group of the design
+ * outside the module still calls, so that moving a file is a mechanical change. Each section below names the group of the design
  * (section 6) whose commit removes it; after group 3 this file exports only the operations and types of the design's
  * section 4 (`draft.test.ts` pins the list).
  */
 
-// Group 1 removes: the image and document attachment rules become the Draft value and `attach`, `removeAttachment`.
-export {
-	MAX_DRAFT_BYTES,
-	attachGuardRefusal,
-	dragCarries,
-	droppedFileUris,
-	fileFromAttached,
-	filesFrom,
-	rawTotal,
-	readImageAttachment,
-	sizeRejection,
-} from "./attachments.ts";
-export type { PendingImage } from "./attachments.ts";
-export { classifyFile, draftRoomRefusal, readDocumentFile } from "./attached-documents.ts";
-export {
-	activeDocuments,
-	documentChars,
-	documentExtension,
-	documentIcon,
-	documentTooltip,
-	draftFromSentText,
-	isKnownDocument,
-	pruneInactiveDocuments,
-} from "./draft-documents.ts";
+// Kept in the final interface: the value, the cell, the field rules and the attach seam (group 1).
+export { emptyDraft, knowsReference } from "./value.ts";
+export type { Draft, DraftImage, Recoverable } from "./value.ts";
+export { viewOf } from "./view.ts";
+export type { DraftView } from "./view.ts";
+export { createDraftCell } from "./cell.ts";
+export type { DraftCell, DraftCellState } from "./cell.ts";
+export type { Change, EditKind, FieldEdit, FieldPort, HistoryMode, Op, Outcome, Selection, Timing, Write } from "./field.ts";
+export { fieldRules } from "./field-rules.ts";
+export type { FieldRules } from "./field-rules.ts";
+export { attach, readingBy, removeAttachment } from "./attach.ts";
+export type { AttachEntry, AttachEvents, AttachReader, AttachResult } from "./attach.ts";
+export type { DocumentRead, FileClass } from "./attached-documents.ts";
+export type { ImageRead } from "./attachments.ts";
+// The sentence of the attach count guard, which a refused drop of too many files shares (`lib/attach-dom.ts`).
+export { attachGuardRefusal } from "./attachments.ts";
 export type { DraftDocument } from "./draft-documents.ts";
-export {
-	activeImages,
-	compactForSend,
-	deletionRange,
-	fileReferencePattern,
-	findReferences,
-	imageReferenceLabel,
-	imageReferencePattern,
-	pruneInactive,
-	referencedNumbers,
-	repairDamagedReferences,
-	snapSelection,
-} from "./image-references.ts";
 export type { IsKnownReference, ReferenceKind } from "./image-references.ts";
-export { findChips, isBareChip } from "./command-chips.ts";
 export type { ChipSpan } from "./command-chips.ts";
+export { commandResolver } from "./command-chips.ts";
+export type { ResolveCommand } from "./command-chips.ts";
+
+// Group 2 removes: the writers that become operations (queue restore, Rewind, recall, the hand-off restore, completions) call these.
+export { findReferences, imageReferenceLabel, imageReferencePattern, fileReferencePattern, pruneInactive, referencedNumbers } from "./image-references.ts";
+export { draftFromSentText, isKnownDocument, pruneInactiveDocuments } from "./draft-documents.ts";
+export { MAX_DRAFT_BYTES } from "./attachments.ts";
 
 // Group 2 removes: quotes and the key rules of fenced blocks and quote lines become operations of the Draft.
-export { findQuoteRuns, isQuoteLineAt } from "./quote-lines.ts";
+export { findQuoteRuns } from "./quote-lines.ts";
 export type { QuoteLineFlags, QuoteRun } from "./quote-lines.ts";
 export { quoteKeyEdit, quotePasteEdit } from "./quote-edits.ts";
 export { placeQuote, quoteBlock, quoteLineCount, quoteTitle, removalRange } from "./quote-draft.ts";
 
-// Kept in the final interface: the catalogue's resolver of command and skill chips.
-export { commandResolver } from "./command-chips.ts";
-export type { ResolveCommand } from "./command-chips.ts";
+// Group 3 removes: the send composition (compose, settleSend) takes over what the composer does with the lists and the bookkeeping
+// fields when it sends, and with them the transitional `withState`.
+export { withState } from "./value.ts";
+export { activeDocuments, documentChars } from "./draft-documents.ts";
+export { compactForSend } from "./image-references.ts";
+export { rawTotal } from "./attachments.ts";

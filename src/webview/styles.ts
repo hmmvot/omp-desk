@@ -457,15 +457,21 @@ ${ANSI_STYLES}
 	margin: 8px 0;
 }
 .omp-md pre code { color: inherit; background: none; padding: 0; font-size: var(--omp-mono-size); line-height: 1.45; }
+/* The code is a box as wide as its longest line (at least the block), so a resize observer on it sees the text grow while it streams. */
+.omp-md pre code { display: block; width: max-content; min-width: 100%; }
+/* Wrap lines (the reader's choice, per block): long lines break at the box edge, and a word wider than the box breaks too. */
+.omp-code-block[data-wrapped] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.omp-code-block[data-wrapped] pre code { width: auto; }
 /* Coloured code: text no rule colours is the editor's own text colour, as in the editor. */
 .omp-md pre code[data-highlighted] { color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
-/* Hover Copy on fenced code blocks and user messages: hidden until the block is hovered or the button is focused. */
+/* Hover Copy and Wrap lines on fenced code blocks and user messages: hidden until the block is hovered or a button is focused. */
 .omp-code-block { position: relative; }
 .omp-copy-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; font-size: 11px; cursor: pointer; }
 .omp-copy-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .omp-copy-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.omp-code-copy { position: absolute; top: 4px; right: 4px; opacity: 0; }
-.omp-code-block:hover .omp-code-copy, .omp-code-copy:focus-visible, .omp-code-copy:has(.omp-copy-status) { opacity: 1; }
+.omp-copy-button[aria-pressed="true"] { background: var(--vscode-button-secondaryHoverBackground); border-color: var(--vscode-focusBorder); }
+.omp-code-actions { position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; opacity: 0; }
+.omp-code-block:hover .omp-code-actions, .omp-code-actions:focus-within, .omp-code-actions:has(.omp-copy-status), .omp-code-actions:has([aria-pressed="true"]) { opacity: 1; }
 .omp-md blockquote {
 	margin: 8px 0;
 	padding: 0 0 0 12px;

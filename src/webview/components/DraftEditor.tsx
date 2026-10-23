@@ -14,7 +14,7 @@ import { ComposerKeywords } from "../lib/magic-keyword-views";
 export function DraftEditor({ surfaceRef, text, config, options }: {
 	/** Set to the surface while the element is mounted, `null` otherwise. */
 	surfaceRef: MutableRefObject<DraftSurface | null>;
-	/** The draft: seeds the surface when it is created. Later changes reach it through `writeDraft`, never through this prop. */
+	/** The draft: seeds the surface when it is created. Later changes reach it through the Draft cell's port (`lib/draft-write.ts`), never through this prop. */
 	text: string;
 	config: SurfaceConfig;
 	/** Handlers; the latest of each is read when it is called. */
@@ -29,8 +29,8 @@ export function DraftEditor({ surfaceRef, text, config, options }: {
 		const element = elementRef.current;
 		if (element === null) return;
 		const surface = new DraftSurface(element, {
-			isKnownReference: (kind, number, name) => latest.current.options.isKnownReference(kind, number, name),
-			resolveCommand: name => latest.current.options.resolveCommand(name),
+			// The rules are the composer's own and live for the whole mount: their lookups read the cell, not a render.
+			rules: latest.current.options.rules,
 			onEdit: value => latest.current.options.onEdit(value),
 			onSelection: () => latest.current.options.onSelection(),
 			onKeyDown: event => latest.current.options.onKeyDown(event),

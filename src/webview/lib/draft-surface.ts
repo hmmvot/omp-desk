@@ -12,7 +12,7 @@
  * The surface owns every attribute of the element that changes while the user types; React renders the element with a
  * class only and never touches its children or attributes.
  */
-import { findChips, isBareChip, type ChipSpan, type ResolveCommand } from "./draft/draft.ts";
+import type { ChipSpan, EditKind, FieldEdit, FieldRules, HistoryMode, Selection } from "./draft/draft.ts";
 import { findFencedBlocks } from "./code-fence.ts";
 import {
 	LineRenderer,
@@ -26,37 +26,16 @@ import {
 	textLength,
 	type CaretRowEdges,
 } from "./draft-dom.ts";
-import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history.ts";
+import { DraftHistory, type DraftSnapshot } from "./draft-history.ts";
 import { deletionTarget, type DeleteKind } from "./draft-text.ts";
 import { normalizeLineEndings } from "../../shared/text-file.ts";
-import { deletionRange, repairDamagedReferences, snapSelection, type IsKnownReference } from "./draft/draft.ts";
-import { findQuoteRuns } from "./draft/draft.ts";
+import { findQuoteRuns, quotePasteEdit } from "./draft/draft.ts";
 import { isPhysicalKey } from "./physical-keys.ts";
-import { quotePasteEdit } from "./draft/draft.ts";
-
-/** How a write from outside the surface treats the undo stack: one more step, or a fresh start. */
-export type HistoryMode = "record" | "reset";
-
-/** The selection as model offsets; `focus` is the caret end. */
-export interface SurfaceSelection {
-	readonly anchor: number;
-	readonly focus: number;
-}
-
-/** One change of the draft. A missing `selection` leaves a collapsed caret after the inserted text. */
-export interface SurfaceEdit {
-	readonly from: number;
-	readonly to: number;
-	readonly insert: string;
-	readonly selection?: SurfaceSelection;
-}
 
 export interface SurfaceOptions {
-	/** Whether a marker belongs to an attachment of the draft, an image or a file (a marker that does not is ordinary text). */
-	isKnownReference: IsKnownReference;
-	/** Whether a token (the draft's first, without its `/`) names a command or a skill of the session; a token that does not is ordinary text. */
-	resolveCommand: ResolveCommand;
-	/** The draft changed by the user (or a composition settled). Synchronous: the composer updates its own copy now. */
+	/** What the surface asks of the draft's markers and chips: where a caret rests, what a deletion removes, how a damaged marker is repaired. Live lookups, so an attachment published a moment ago is known. */
+	rules: FieldRules;
+	/** The text the surface just applied: the user's edit, a composition that settled, or an edit another writer asked of it. Synchronous: the cell takes it now. */
 	onEdit(text: string): void;
 	/** The caret or selection moved (never during a composition window). */
 	onSelection(): void;
@@ -109,7 +88,7 @@ interface WindowState {
 	deferred: (() => void)[];
 }
 
-const NO_SELECTION: SurfaceSelection = { anchor: 0, focus: 0 };
+const NO_SELECTION: Selection = { anchor: 0, focus: 0 };
 
 function emptyWindow(): WindowState {
 	return { open: false, pre: { text: "", anchor: 0, focus: 0 }, preLines: [], touched: [], queuedText: null, queuedConfig: null, deferred: [] };
@@ -122,7 +101,7 @@ export class DraftSurface {
 	readonly #history = new DraftHistory();
 	readonly #doc: Document;
 	#text = "";
-	#retained: SurfaceSelection = NO_SELECTION;
+	#retained: Selection = NO_SELECTION;
 	#frozen = false;
 	#config: SurfaceConfig = { editable: true, placeholder: "", describedBy: null, controls: null, activeDescendant: null };
 	#window: WindowState = emptyWindow();
@@ -210,7 +189,7 @@ export class DraftSurface {
 	// ---- the selection ---------------------------------------------------------------------------------------------
 
 	/** The live DOM selection in model offsets, or `null` when it is not inside the field. */
-	#domSelection(): { selection: SurfaceSelection; atRoot: boolean } | null {
+	#domSelection(): { selection: Selection; atRoot: boolean } | null {
 		const selection = this.#doc.getSelection();
 		if (selection === null || selection.rangeCount === 0 || selection.anchorNode === null || selection.focusNode === null) return null;
 		if (!this.element.contains(selection.anchorNode) || !this.element.contains(selection.focusNode)) return null;
@@ -224,29 +203,29 @@ export class DraftSurface {
 	}
 
 	/** The selection now: the DOM's while it is inside the field and no window is open, the retained one otherwise. */
-	#selection(): SurfaceSelection {
+	#selection(): Selection {
 		if (this.#window.open) return this.#retained;
 		const live = this.#domSelection();
 		if (live === null) return this.#retained;
 		return this.#clamp(live.selection);
 	}
 
-	#clamp(selection: SurfaceSelection): SurfaceSelection {
+	#clamp(selection: Selection): Selection {
 		const length = this.#text.length;
 		return { anchor: Math.min(Math.max(0, selection.anchor), length), focus: Math.min(Math.max(0, selection.focus), length) };
 	}
 
 	/** Every chip of `text` (the draft by default): attachment markers and the command or skill the draft names. */
 	#markers(text: string = this.#text): ChipSpan[] {
-		return findChips(text, (kind, number, name) => this.#options.isKnownReference(kind, number, name), name => this.#options.resolveCommand(name));
+		return this.#options.rules.chips(text);
 	}
 
 	/** The chips an edit removes whole: every chip except a bare command chip, which is still being typed and so is deleted and cut into like text. */
 	#atomic(text: string = this.#text): ChipSpan[] {
-		return this.#markers(text).filter(span => !isBareChip(span));
+		return this.#options.rules.atomic(text);
 	}
 
-	#writeDomSelection(selection: SurfaceSelection): void {
+	#writeDomSelection(selection: Selection): void {
 		if (this.#window.open || !this.hasFocus) return;
 		const anchor = locate(this.element, selection.anchor);
 		const focus = selection.anchor === selection.focus ? anchor : locate(this.element, selection.focus);
@@ -304,7 +283,7 @@ export class DraftSurface {
 		if (this.#window.open || this.#disposed) return;
 		const before = this.#selection();
 		this.#render();
-		const snapped = snapSelection(this.#markers(), Math.min(before.anchor, before.focus), Math.max(before.anchor, before.focus), null);
+		const snapped = this.#options.rules.snap(this.#text, Math.min(before.anchor, before.focus), Math.max(before.anchor, before.focus), null);
 		this.#retained = this.#clamp(before.focus < before.anchor ? { anchor: snapped.end, focus: snapped.start } : { anchor: snapped.start, focus: snapped.end });
 		this.#writeDomSelection(this.#retained);
 	}
@@ -368,7 +347,7 @@ export class DraftSurface {
 		return { text: this.#text, anchor, focus };
 	}
 
-	#commit(next: string, selection: SurfaceSelection, kind: EditKind): void {
+	#commit(next: string, selection: Selection, kind: EditKind): void {
 		this.#history.record(this.#snapshot(), kind, selection.focus, performance.now());
 		this.#text = next;
 		this.#render();
@@ -383,7 +362,7 @@ export class DraftSurface {
 	 * reports the new text. Refuses (`false`) while the draft is frozen or a composition window is open; the caller defers.
 	 * An edit without a `selection` also widens over any marker it cuts into, so a marker is only ever removed whole.
 	 */
-	apply(edit: SurfaceEdit, kind: EditKind = "replace"): boolean {
+	apply(edit: FieldEdit, kind: EditKind = "replace"): boolean {
 		if (this.#frozen || this.#window.open || this.#disposed) return false;
 		const text = this.#text;
 		let from = Math.min(Math.max(0, edit.from), text.length);
@@ -534,10 +513,10 @@ export class DraftSurface {
 	#delete(event: InputEvent, kind: DeleteKind, edit: EditKind): void {
 		const native = this.#targetRange(event);
 		// The browser takes a non-editable chip whole; a bare command chip is text being typed, so one character goes instead and the chip reverts to text.
-		const bare = this.#markers().find(span => isBareChip(span) && native !== null && span.start === native.from && span.end === native.to);
-		const range = native !== null && native.from !== native.to && (bare === undefined || (kind !== "char-back" && kind !== "char-fwd")) ? native : deletionTarget(this.#text, this.selectionStart, this.selectionEnd, kind);
+		const bare = native !== null && this.#options.rules.bareAt(this.#text, native.from, native.to);
+		const range = native !== null && native.from !== native.to && (!bare || (kind !== "char-back" && kind !== "char-fwd")) ? native : deletionTarget(this.#text, this.selectionStart, this.selectionEnd, kind);
 		if (range === null) return;
-		const widened = deletionRange(this.#atomic(), range.from, range.to, "range");
+		const widened = this.#options.rules.deletion(this.#text, range.from, range.to);
 		this.apply({ from: widened?.start ?? range.from, to: widened?.end ?? range.to, insert: "" }, edit);
 	}
 
@@ -634,7 +613,7 @@ export class DraftSurface {
 		}
 		if (node === null || !this.element.contains(node)) return null;
 		const at = offsetOf(this.element, node, offset);
-		const snapped = snapSelection(this.#markers(), at, at, null);
+		const snapped = this.#options.rules.snap(this.#text, at, at, null);
 		return snapped.start;
 	}
 
@@ -724,15 +703,15 @@ export class DraftSurface {
 	}
 
 	/** Moves selection edges that rest inside a marker to its edge (a caret hops in its direction of travel) and keeps the selection off the root. */
-	#snapAndRetain(live: { selection: SurfaceSelection; atRoot: boolean }, pointer: boolean): void {
+	#snapAndRetain(live: { selection: Selection; atRoot: boolean }, pointer: boolean): void {
 		const clamped = this.#clamp(live.selection);
 		const start = Math.min(clamped.anchor, clamped.focus);
 		const end = Math.max(clamped.anchor, clamped.focus);
 		const previousStart = Math.min(this.#retained.anchor, this.#retained.focus);
 		const forward = pointer || start !== end || start === previousStart ? null : start > previousStart;
-		const next = snapSelection(this.#markers(), start, end, forward);
+		const next = this.#options.rules.snap(this.#text, start, end, forward);
 		const backward = clamped.focus < clamped.anchor;
-		const snapped: SurfaceSelection = backward ? { anchor: next.end, focus: next.start } : { anchor: next.start, focus: next.end };
+		const snapped: Selection = backward ? { anchor: next.end, focus: next.start } : { anchor: next.start, focus: next.end };
 		this.#retained = snapped;
 		if (live.atRoot || snapped.anchor !== clamped.anchor || snapped.focus !== clamped.focus) this.#writeDomSelection(snapped);
 	}
@@ -776,11 +755,10 @@ export class DraftSurface {
 			this.#setTextNow(queuedText.text, queuedText.caret, queuedText.history);
 		} else {
 			let next = domText;
-			let selection: SurfaceSelection = live === null
+			let selection: Selection = live === null
 				? { anchor: Math.min(pre.focus + next.length - pre.text.length, next.length), focus: Math.min(pre.focus + next.length - pre.text.length, next.length) }
 				: live.selection;
-			const damaged = this.#atomic(pre.text);
-			const repaired = repairDamagedReferences(pre.text, next, damaged);
+			const repaired = this.#options.rules.repair(pre.text, next);
 			if (repaired !== null) {
 				next = repaired.text;
 				selection = { anchor: repaired.caret, focus: repaired.caret };

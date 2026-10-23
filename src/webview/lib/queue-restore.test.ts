@@ -6,10 +6,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { compactForSend } from "./draft/image-references.ts";
 import { composeFileBlocks, fileMarker } from "../../shared/file-blocks.ts";
-import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing, type DraftState, type NumberedImage, type RestoredQueued } from "./queue-restore.ts";
+import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing, type DraftState, type RestoredQueued } from "./queue-restore.ts";
+import type { DraftImage } from "./draft/draft.ts";
 
 const PNG = "iVBORw0KGgo=";
-const image = (number: number): NumberedImage => ({ id: number, name: `draft-${number}`, mimeType: "image/png", bytes: 8, data: `draft-bytes-${number}`, number });
+const image = (number: number): DraftImage => ({ id: number, name: `draft-${number}`, mimeType: "image/png", bytes: 8, data: `draft-bytes-${number}`, number });
 const empty: DraftState = { text: "", images: [], documents: [], nextNumber: 1, nextDocumentNumber: 1, nextId: 1 };
 
 describe("mergeRestoredQueued", () => {
