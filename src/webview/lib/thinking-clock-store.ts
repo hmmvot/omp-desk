@@ -1,7 +1,8 @@
 /** The page's thinking clocks (`chat/thinking-clock.ts`), fed by the transcript that watches the stream and read by each thinking block. */
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import type { AssistantMessage } from "../../chat/messages";
 import { ThinkingClocks, thoughtDuration, type ThinkingSpan } from "../../chat/thinking-clock";
+import { useSecondTick } from "./live-clock";
 
 const clocks = new ThinkingClocks();
 const listeners = new Set<() => void>();
@@ -27,12 +28,7 @@ export function useThinkingTitle(ref: ThinkingClockRef | undefined): string {
 	useSyncExternalStore(subscribe, () => revision);
 	const span: ThinkingSpan | undefined = ref === undefined ? undefined : clocks.get(ref.key);
 	const ticking = ref?.live === true && span?.start != null && span.end === undefined;
-	const [, tick] = useState(0);
-	useEffect(() => {
-		if (!ticking) return;
-		const timer = setInterval(() => tick(count => count + 1), 1000);
-		return () => clearInterval(timer);
-	}, [ticking]);
+	useSecondTick(ticking);
 	if (ref?.live === true && span?.end === undefined) {
 		const seconds = span?.start == null ? 0 : Math.floor((Date.now() - span.start) / 1000);
 		return seconds >= 1 ? `Thinking… ${seconds}s` : "Thinking…";

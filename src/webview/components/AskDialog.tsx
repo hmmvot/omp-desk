@@ -18,6 +18,7 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ChatAskAnswer, ChatAskQuestion, ChatUiRequest } from "../../chat/model";
 import { useSendWith } from "../lib/send-with";
+import { useSecondTick } from "../lib/live-clock";
 import { isSendChord } from "../../chat/send-with";
 import { Markdown } from "./Markdown";
 
@@ -124,12 +125,8 @@ function formatCountdown(seconds: number): string {
 /** The countdown to OMP's own timeout: it answers the recommended option of every question and closes the dialog. */
 function AskCountdown({ timeoutMs, expiresAt }: { timeoutMs: number; expiresAt: number | undefined }): ReactNode {
 	const [mountedAt] = useState(() => Date.now());
-	const [now, setNow] = useState(mountedAt);
-	useEffect(() => {
-		const timer = setInterval(() => setNow(Date.now()), 1000);
-		return () => clearInterval(timer);
-	}, []);
-	const seconds = askSecondsLeft(timeoutMs, expiresAt ?? mountedAt + timeoutMs, now);
+	useSecondTick(true);
+	const seconds = askSecondsLeft(timeoutMs, expiresAt ?? mountedAt + timeoutMs, Date.now());
 	return (
 		<div className="omp-ask-timer" role="timer" title="When the time runs out, OMP answers the recommended option of every question">
 			<span className="codicon codicon-clock" aria-hidden="true" /> Answers itself in {formatCountdown(seconds)}

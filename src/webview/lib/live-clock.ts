@@ -1,25 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import type { RunningAgent } from "../../chat/agents";
 import { agentElapsedMs } from "../../chat/hud-summary";
+import { SecondTicker } from "./second-tick";
 
-const TICK_MS = 1000;
-const listeners = new Set<() => void>();
-let timer: number | undefined;
-
-/** One interval for every ticking clock in the page; it exists only while at least one clock is subscribed. */
-function subscribe(listener: () => void): () => void {
-	listeners.add(listener);
-	timer ??= window.setInterval(() => { for (const current of [...listeners]) current(); }, TICK_MS);
-	return () => {
-		listeners.delete(listener);
-		if (listeners.size === 0 && timer !== undefined) { window.clearInterval(timer); timer = undefined; }
-	};
-}
+/** The page's single shared tick; see {@link SecondTicker}. */
+export const pageSecondTicker = new SecondTicker({
+	setInterval: (callback, ms) => window.setInterval(callback, ms),
+	clearInterval: handle => window.clearInterval(handle as number),
+	shown: () => document.visibilityState !== "hidden",
+	onShownChange: listener => { document.addEventListener("visibilitychange", listener); return () => document.removeEventListener("visibilitychange", listener); },
+});
 
 /** Re-renders the caller once a second while `active`, from the page's single shared interval. */
 export function useSecondTick(active: boolean): void {
 	const [, redraw] = useState(0);
-	useEffect(() => active ? subscribe(() => redraw(count => count + 1)) : undefined, [active]);
+	useEffect(() => active ? pageSecondTicker.subscribe(() => redraw(count => count + 1)) : undefined, [active]);
 }
 
 export interface LiveDurationEntry {

@@ -251,13 +251,20 @@ ${ANSI_STYLES}
 .omp-empty-recent-age { font-size: 12px; }
 .omp-working-status { box-sizing: border-box; height: 24px; min-height: 24px; max-height: 24px; display: flex; align-items: center; gap: 8px; overflow: hidden; color: var(--omp-muted); font-size: 12px; line-height: 20px; }
 .omp-working-status-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The row shows that work is going on: an eight-step spinner glyph and a muted-to-foreground sweep across the text. Both stop under reduced motion; the sweep also gives way to plain muted text in High Contrast and forced colors, where text must stay a system colour. */
-.omp-working-status-text:not(:empty)::before { content: "\\eb19"; font-family: codicon; font-size: 14px; display: inline-block; vertical-align: -2px; margin-right: 6px; animation: omp-working-spin 1s steps(8) infinite; }
-.omp-working-status-text { background: linear-gradient(90deg, var(--omp-muted) 35%, var(--vscode-foreground) 50%, var(--omp-muted) 65%) 100% 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: omp-working-shimmer 2s linear infinite; }
+/* The row shows that work is going on: an eight-step spinner glyph and a muted-to-foreground sweep across the text. Both stop under reduced motion; the sweep also gives way to plain muted text in High Contrast and forced colors, where text must stay a system colour. None of the motion in this page is a running CSS animation: one makes the browser draw a frame on every display refresh as long as it lives (for one working page 89 ms of renderer and 100 ms of GPU time per second, measured in Chromium). lib/page-motion.ts writes the custom properties below at 12 steps a second instead (about 2 ms per second) and runs only while a glyph is on screen; the one-millisecond omp-motion-present animation on each glyph is how it hears of one, and is what reduced motion removes. */
+.omp-working-status-text:not(:empty)::before { content: "\\eb19"; font-family: codicon; font-size: 14px; display: inline-block; vertical-align: -2px; margin-right: 6px; animation: omp-motion-present 1ms; }
+.omp-working-status-text { background: linear-gradient(90deg, var(--omp-muted) 35%, var(--vscode-foreground) 50%, var(--omp-muted) 65%) 100% 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: omp-motion-present 1ms; }
 .omp-working-status-text:not(:empty)::before { -webkit-text-fill-color: var(--omp-muted); }
-@keyframes omp-working-spin { to { transform: rotate(360deg); } }
-@keyframes omp-working-shimmer { to { background-position: 0 0; } }
+@keyframes omp-motion-present { from { opacity: 1; } to { opacity: 1; } }
+@media (prefers-reduced-motion: no-preference) {
+	.omp-working-status-text { background-position: var(--omp-sweep, 100%) 0; }
+	.omp-working-status-text:not(:empty)::before { transform: rotate(var(--omp-spin, 0deg)); }
+	.codicon.codicon-loading.codicon-modifier-spin, .codicon.codicon-sync.codicon-modifier-spin, .codicon.codicon-gear.codicon-modifier-spin { transform: rotate(var(--omp-spin, 0deg)); }
+	.omp-turn-progress::before { transform: translateX(calc(-100% + var(--omp-progress, 0) * 534%)); }
+}
 @media (prefers-reduced-motion: reduce) { .omp-working-status-text, .omp-working-status-text:not(:empty)::before { animation: none; } }
+/* The codicon spinners (running tools, jobs, agents, pending buttons) announce themselves to the same module; codicon.css would turn them 20 steps a second as a CSS animation. Reduced motion removes the announcement in the HUD rule, which comes later. */
+.codicon.codicon-loading.codicon-modifier-spin, .codicon.codicon-sync.codicon-modifier-spin, .codicon.codicon-gear.codicon-modifier-spin { animation: omp-motion-present 1ms; }
 .vscode-high-contrast .omp-working-status-text, .vscode-high-contrast-light .omp-working-status-text { background: none; color: var(--omp-muted); animation: none; }
 @media (forced-colors: active) { .omp-working-status-text { background: none; color: inherit; animation: none; } .omp-working-status-text::before { -webkit-text-fill-color: currentColor; } }
 .omp-working-status-elapsed { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
@@ -589,8 +596,7 @@ ${ANSI_STYLES}
 
 .omp-composer { position: relative; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, var(--omp-border))); border-radius: var(--omp-radius-composer); background: var(--vscode-input-background); color: var(--vscode-input-foreground); padding: 10px 12px; width: min(840px, calc(100% - 24px)); min-width: 0; margin: 0 auto 8px; flex: 0 0 auto; overflow: visible; }
 .omp-turn-progress { position: absolute; top: -1px; left: 8px; right: 8px; height: 2px; overflow: hidden; pointer-events: none; }
-.omp-turn-progress::before { content: ""; position: absolute; width: 30%; height: 2px; background: var(--vscode-progressBar-background, var(--vscode-focusBorder)); animation: omp-turn-progress 2s linear infinite; }
-@keyframes omp-turn-progress { from { transform: translateX(-100%); } to { transform: translateX(434%); } }
+.omp-turn-progress::before { content: ""; position: absolute; width: 30%; height: 2px; background: var(--vscode-progressBar-background, var(--vscode-focusBorder)); animation: omp-motion-present 1ms; transform: translateX(-100%); }
 @media (prefers-reduced-motion: reduce) { .omp-turn-progress::before { width: 100%; animation: none; transform: none; } }
 .omp-composer-row { display: flex; gap: 6px; align-items: center; }
 .omp-suggest-wrapper { position: relative; flex: 1 1 auto; min-width: 0; }

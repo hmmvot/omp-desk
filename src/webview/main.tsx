@@ -23,6 +23,7 @@ import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
 import { installSelectionFocusHold } from "./lib/selection-focus";
 import { installPageHealth } from "./lib/page-health";
+import { installPageMotion } from "./lib/page-motion";
 import { DETAIL_META } from "../protocol/detail-target";
 
 function boot(): void {
@@ -34,6 +35,8 @@ function boot(): void {
 	installTypeToFocus(window);
 	// A text selection holds the focus, so VS Code's Copy does not refocus the composer over it.
 	installSelectionFocusHold(window);
+	// The page's spinners, text sweep and progress bar move by custom properties written at a low rate, not by CSS animations that keep the browser drawing.
+	installPageMotion(window);
 	// A visible session page reports to the host that it is alive, so a page whose main thread freezes leaves a trace in the log. A detail
 	// tab is not a session editor and has no slot to be watched under. A diagnostic never stops the page from mounting.
 	if (document.querySelector(`meta[name="${DETAIL_META}"]`) === null) {
