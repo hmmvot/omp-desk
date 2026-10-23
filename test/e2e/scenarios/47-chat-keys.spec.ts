@@ -17,6 +17,7 @@ import { join } from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { deskLogLines } from "../support/desk-log.ts";
 import { expect, test } from "../support/fixtures.ts";
+import { quickOpenFile, runPaletteCommand } from "../support/quick-input.ts";
 
 /** What the host's thinking toggle writes: one line per run, whichever way the command was run. */
 const THINKING_TOGGLED = /thinking blocks: (shown|hidden) by default/;
@@ -24,20 +25,9 @@ const THINKING_TOGGLED = /thinking blocks: (shown|hidden) by default/;
 /** A menu of the menu bar that is open: VS Code marks its top-level button `open` while its dropdown is shown. */
 const OPEN_MENU = ".menubar-menu-button.open";
 
-/** Runs a Command Palette command by the full label of its row (a category, a colon and the title). */
-async function runCommand(page: Page, label: string): Promise<void> {
-	await page.keyboard.press("Control+Shift+p");
-	const input = page.locator(".quick-input-widget input.input");
-	await expect(input).toBeVisible();
-	await input.fill(`>${label}`);
-	const row = page.locator(`.quick-input-widget .monaco-list-row[aria-label^="${label}, "], .quick-input-widget .monaco-list-row[aria-label="${label}"]`);
-	await expect(row).toBeVisible();
-	await row.click();
-}
-
 /** An earlier scenario's tabs would still be visible and take what a command inserts: each scenario starts with no editor open. */
 async function closeAllEditors(page: Page): Promise<void> {
-	await runCommand(page, "View: Close All Editors");
+	await runPaletteCommand(page, "View: Close All Editors");
 	await expect(page.locator(".editor-group-container .tab")).toHaveCount(0);
 }
 
@@ -57,13 +47,7 @@ async function closeShortcuts(page: Page): Promise<void> {
 
 /** Opens `fileName` of the folder through Quick Open and puts the caret in its editor. */
 async function openFile(page: Page, fileName: string): Promise<void> {
-	await page.keyboard.press("Control+p");
-	const input = page.locator(".quick-input-widget input.input");
-	await expect(input).toBeVisible();
-	await input.fill(fileName);
-	await expect(page.locator(".quick-input-widget .monaco-list-row").first()).toContainText(fileName);
-	await page.keyboard.press("Enter");
-	await expect(page.locator(`.tab[aria-label^="${fileName}"]`).first()).toBeVisible();
+	await quickOpenFile(page, fileName);
 	const editor = page.locator(".editor-instance .monaco-editor:visible").first();
 	await expect(editor).toBeVisible();
 	await editor.locator(".view-lines").click();
@@ -156,7 +140,7 @@ test("Alt+Q in a text editor with nothing selected puts the caret line's locatio
 
 	// An untitled document has no location: nothing is inserted, and the reason is shown.
 	const before = await draft();
-	await runCommand(page, "File: New Untitled Text File");
+	await runPaletteCommand(page, "File: New Untitled Text File");
 	await expect(page.locator('.tab[aria-label^="Untitled-1"]').first()).toBeVisible();
 	const editor = page.locator(".editor-instance .monaco-editor:visible").first();
 	await editor.locator(".view-lines").click();

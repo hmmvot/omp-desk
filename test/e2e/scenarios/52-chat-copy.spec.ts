@@ -55,6 +55,15 @@ test("Ctrl+C, Ctrl+Insert, Ctrl+С and the context menu's Copy copy the selected
 		await page.keyboard.press("Control+x");
 		await expect.poll(() => desk.readDraft(box)).toBe("");
 	};
+	/** The page's own copy event, with the selection it found: VS Code's Copy fires it after any refocus of its own. */
+	const watchCopy = async (): Promise<void> => {
+		await box.evaluate(() => {
+			const seen: string[] = [];
+			Object.assign(window, { copyEvents: seen });
+			document.addEventListener("copy", () => { seen.push(getSelection()?.toString() ?? ""); }, { capture: true, once: true });
+		});
+	};
+	const copyEvents = (): Promise<string[]> => box.evaluate(() => Reflect.get(window, "copyEvents") as string[]);
 
 	const cases: { name: string; run: () => Promise<void> }[] = [
 		{ name: "Ctrl+C", run: () => page.keyboard.press("Control+c") },
@@ -75,14 +84,8 @@ test("Ctrl+C, Ctrl+Insert, Ctrl+С and the context menu's Copy copy the selected
 	for (const { name, run } of cases) {
 		await poison();
 		await selectByMouse();
-		// The page's own copy event, with the selection it found: VS Code's Copy fires it after any refocus of its own.
-		await box.evaluate(() => {
-			const seen: string[] = [];
-			Object.assign(window, { copyEvents: seen });
-			document.addEventListener("copy", () => { seen.push(getSelection()?.toString() ?? ""); }, { capture: true, once: true });
-		});
+		await watchCopy();
 		await run();
-		const copyEvents = (): Promise<string[]> => box.evaluate(() => Reflect.get(window, "copyEvents") as string[]);
 		await expect.poll(async () => (await copyEvents()).length, { message: `${name} reached the page as a copy`, timeout: 15_000 }).toBe(1);
 		expect((await copyEvents())[0], `${name} found the selection when the page copied`).toContain("quokka");
 		await expect(box, `${name} did not move the focus to the composer`).not.toBeFocused();
@@ -96,7 +99,10 @@ test("Ctrl+C, Ctrl+Insert, Ctrl+С and the context menu's Copy copy the selected
 		await box.click();
 		await box.fill("text typed in the composer");
 		await page.keyboard.press("Control+a");
+		await watchCopy();
 		await run();
+		// The copy reaches the page after a round trip through VS Code: clearing the field before it did would copy nothing.
+		await expect.poll(async () => (await copyEvents()).length, { message: `${name} reached the page as a copy`, timeout: 15_000 }).toBe(1);
 		await page.keyboard.press("Delete");
 		await expect.poll(() => desk.readDraft(box)).toBe("");
 		await page.keyboard.press("Control+v");

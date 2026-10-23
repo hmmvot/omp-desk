@@ -10,16 +10,11 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { expect, test } from "../support/fixtures.ts";
+import { quickOpenFile, runPaletteCommand } from "../support/quick-input.ts";
 
-/** Opens `fileName` of the folder through Quick Open and waits for its tab. */
+/** Opens `fileName` of the folder through Quick Open and puts the caret in its editor. */
 async function openFile(page: Page, fileName: string): Promise<void> {
-	await page.keyboard.press("Control+p");
-	const input = page.locator(".quick-input-widget input.input");
-	await expect(input).toBeVisible();
-	await input.fill(fileName);
-	await expect(page.locator(".quick-input-widget .monaco-list-row").first()).toContainText(fileName);
-	await page.keyboard.press("Enter");
-	await expect(page.locator(`.tab[aria-label^="${fileName}"]`).first()).toBeVisible();
+	await quickOpenFile(page, fileName);
 	// The window is not the operating system's foreground window, so Monaco never shows its focused class; a click puts the caret, and with it editorTextFocus, in the editor.
 	const editor = page.locator(".editor-instance .monaco-editor:visible").first();
 	await expect(editor).toBeVisible();
@@ -32,26 +27,15 @@ async function acceptPicker(page: Page): Promise<void> {
 	await page.keyboard.press("Enter");
 }
 
-/** Runs a Command Palette command by the full label of its row (a category, a colon and the title). */
-async function runCommand(page: Page, label: string): Promise<void> {
-	await page.keyboard.press("Control+Shift+p");
-	const input = page.locator(".quick-input-widget input.input");
-	await expect(input).toBeVisible();
-	await input.fill(`>${label}`);
-	const row = page.locator(`.quick-input-widget .monaco-list-row[aria-label^="${label}, "], .quick-input-widget .monaco-list-row[aria-label="${label}"]`);
-	await expect(row).toBeVisible();
-	await row.click();
-}
-
 /** An earlier scenario's Chat tabs would still be visible and take the quote: each scenario starts with no editor open. */
 async function closeAllEditors(page: Page): Promise<void> {
-	await runCommand(page, "View: Close All Editors");
+	await runPaletteCommand(page, "View: Close All Editors");
 	await expect(page.locator(".editor-group-container .tab")).toHaveCount(0);
 }
 
 /** The layout depends on where the Chat was placed: join every group into one and put the file's tab in front, so the Chat is open but not shown. */
 async function showFileInOneGroup(page: Page, fileName: string): Promise<void> {
-	await runCommand(page, "View: Join All Editor Groups");
+	await runPaletteCommand(page, "View: Join All Editor Groups");
 	await page.locator(`.tab[aria-label^="${fileName}"]`).first().click();
 	const editor = page.locator(".editor-instance .monaco-editor:visible").first();
 	await expect(editor).toBeVisible();

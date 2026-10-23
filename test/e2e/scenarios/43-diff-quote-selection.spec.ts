@@ -16,30 +16,9 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "../support/fixtures.ts";
+import { quickOpenFile, runPaletteCommand } from "../support/quick-input.ts";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", ["-c", "core.autocrlf=false", ...args], { cwd, encoding: "utf8", windowsHide: true }).trim();
-
-/** Runs a Command Palette command by the full label of its row (a category, a colon and the title). */
-async function runCommand(page: Page, label: string): Promise<void> {
-	await page.keyboard.press("Control+Shift+p");
-	const input = page.locator(".quick-input-widget input.input");
-	await expect(input).toBeVisible();
-	await input.fill(`>${label}`);
-	const row = page.locator(`.quick-input-widget .monaco-list-row[aria-label^="${label}, "], .quick-input-widget .monaco-list-row[aria-label="${label}"]`).first();
-	await expect(row).toBeVisible();
-	await row.click();
-}
-
-/** Opens `fileName` of the folder through Quick Open and waits for its tab. */
-async function openFile(page: Page, fileName: string): Promise<void> {
-	await page.keyboard.press("Control+p");
-	const input = page.locator(".quick-input-widget input.input");
-	await expect(input).toBeVisible();
-	await input.fill(fileName);
-	await expect(page.locator(".quick-input-widget .monaco-list-row").first()).toContainText(fileName);
-	await page.keyboard.press("Enter");
-	await expect(page.locator(`.tab[aria-label^="${fileName}"]`).first()).toBeVisible();
-}
 
 const MAIN_LINES = ["// app", "export const a = 1;", "export function f(x: number) {", "  return x + a;", "}", 'export const tail = "end";', ""];
 
@@ -79,7 +58,7 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 	try {
 		const page = await desk.window("alpha-desk");
 		await desk.ready(page);
-		await runCommand(page, "View: Close All Editors");
+		await runPaletteCommand(page, "View: Close All Editors");
 		const chat = await desk.newChatSession(page, "alpha-desk");
 		const box = desk.composer(chat);
 		const draft = () => desk.readDraft(box);
@@ -156,10 +135,10 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		};
 
 		await test.step("a changed file: the left side is HEAD (the file is not staged), the right side is the file", async () => {
-			await openFile(page, "diff-app.ts");
+			await quickOpenFile(page, "diff-app.ts");
 			// The repository was created after the window started: Git's scan finds it some time later, and until then the command is not even listed. Ask again until the diff is there.
 			await expect(async () => {
-				await runCommand(page, "Git: Open Changes");
+				await runPaletteCommand(page, "Git: Open Changes");
 				await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 10_000 });
 			}).toPass({ timeout: 120_000, intervals: [1_000] });
 			await expect(page.locator(".monaco-diff-editor")).toBeVisible();
@@ -171,8 +150,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		});
 
 		await test.step("a staged file: HEAD on the left, the index on the right", async () => {
-			await openFile(page, "diff-staged.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-staged.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Index"]').first()).toBeVisible({ timeout: 60_000 });
 			await quoteWithKey("original", 2, 2, code(`diff-repo/diff-staged.ts:3-4 @ HEAD (${headShort})`, "export function f(x: number) {", "  return x + a;"));
 			await quoteWithKey("modified", 2, 2, code("diff-repo/diff-staged.ts:3-4 @ index", "export const a = 1;", "export function f(x: number) {"));
@@ -182,8 +161,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		});
 
 		await test.step("a file staged and then changed again: the left side of the working-tree diff is the index", async () => {
-			await openFile(page, "diff-both.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-both.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
 			await quoteWithKey("original", 2, 2, code("diff-repo/diff-both.ts:3-4 @ index", "export const a = 1;", "export function f(x: number) {"));
 			await quoteWithKey("modified", 2, 2, code("diff-repo/diff-both.ts:3-4", "export const a = 1;", "export function f(x: number) {"));
@@ -191,8 +170,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		});
 
 		await test.step("the hunk under the caret, with nothing selected, in the Source Control diffs", async () => {
-			await openFile(page, "diff-app.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-app.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
 			await expect(page.locator(".monaco-diff-editor")).toBeVisible();
 			const changed = hunk(`diff-repo/diff-app.ts:1-7 was diff-repo/diff-app.ts:1-5 @ HEAD (${headShort})`, " // app", "-export const a = 1;", "+// edited", "+// edited again", "+export const a = 2;", " export function f(x: number) {", "   return x + a;", " }");
@@ -206,8 +185,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 			await expect.poll(draft, "an unchanged line is referenced, not quoted").toBe(`\`diff-repo/diff-app.ts:4 @ HEAD (${headShort})\` `);
 			await clear();
 			await closeDiff();
-			await openFile(page, "diff-staged.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-staged.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Index"]').first()).toBeVisible({ timeout: 60_000 });
 			const staged = hunk(`diff-repo/diff-staged.ts:1-5 @ index was diff-repo/diff-staged.ts:1-4 @ HEAD (${headShort})`, "-// app", "+// staged", "+// staged too", " export const a = 1;", " export function f(x: number) {", "   return x + a;");
 			await quoteHunkWithKey("original", 0, staged);
@@ -240,8 +219,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		await test.step("a diff shown inline: the file's lines quote, and the deleted lines are not editor text", async () => {
 			setSettings({ "diffEditor.useInlineViewWhenSpaceIsLimited": false, "diffEditor.renderSideBySide": false });
 			await page.waitForTimeout(2_000);
-			await openFile(page, "diff-app.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-app.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
 			await expect(page.locator(".monaco-diff-editor .editor.modified .view-zones .view-line"), "the deleted line is drawn in a view zone").toHaveCount(1, { timeout: 30_000 });
 			await quoteWithKey("modified", 2, 2, code("diff-repo/diff-app.ts:3-4", "// edited again", "export const a = 2;"));
@@ -270,8 +249,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		});
 
 		await test.step("two plain files: each side is its own file on disk", async () => {
-			await openFile(page, "diff-a.txt");
-			await runCommand(page, "File: Compare Active File With...");
+			await quickOpenFile(page, "diff-a.txt");
+			await runPaletteCommand(page, "File: Compare Active File With...");
 			const input = page.locator(".quick-input-widget input.input");
 			await input.fill("diff-b.txt");
 			await expect(page.locator(".quick-input-widget .monaco-list-row").first()).toContainText("diff-b.txt");
@@ -289,8 +268,8 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		});
 
 		await test.step("a sent Git location is plain code, not a link to the file on disk", async () => {
-			await openFile(page, "diff-app.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-app.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
 			await select("original", 2, 2);
 			await page.keyboard.press("Alt+q");
@@ -306,11 +285,11 @@ test("Alt+Q and the right-click menu quote either side of a diff with its file, 
 		});
 
 		await test.step("a plain editor of the file in another group is not a side of the diff beside it: nothing hijacks its caret-line reference", async () => {
-			await openFile(page, "diff-app.ts");
-			await runCommand(page, "Git: Open Changes");
+			await quickOpenFile(page, "diff-app.ts");
+			await runPaletteCommand(page, "Git: Open Changes");
 			await expect(page.locator('.tab[aria-label*="Working Tree"]').first()).toBeVisible({ timeout: 60_000 });
 			// The diff moves to a group of its own on the right; the plain editor of the same file stays in its group, and the diff is still the visible tab of its group.
-			await runCommand(page, "View: Move Editor into Right Group");
+			await runPaletteCommand(page, "View: Move Editor into Right Group");
 			await expect(page.locator(".monaco-diff-editor")).toBeVisible();
 			const plain = page.locator(".monaco-editor:not(.monaco-diff-editor .monaco-editor) .view-lines").first();
 			await plain.click();

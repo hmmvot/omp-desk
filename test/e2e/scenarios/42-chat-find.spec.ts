@@ -7,6 +7,7 @@
 import type { Page } from "@playwright/test";
 import { deskLogLines } from "../support/desk-log.ts";
 import { expect, test } from "../support/fixtures.ts";
+import { runPaletteCommand } from "../support/quick-input.ts";
 
 /** The line the host's Find in Chat command writes: one per run, whether the key, the palette or the menu ran it. */
 const HOST_RAN = /find-in-chat asked from a VS Code command/;
@@ -76,15 +77,7 @@ test("Ctrl+F opens the Chat find bar from the composer, the transcript, an unfoc
 
 	// The Command Palette entry opens the same bar.
 	const paletteBefore = hostRuns();
-	// F1 is swallowed while a webview holds the keyboard (and a palette opened from it can lose the focus back to the page): the title bar takes the focus first.
-	await page.locator("[id='workbench.parts.titlebar']").click({ position: { x: 5, y: 5 } });
-	await page.keyboard.press("F1");
-	const picker = page.locator(".quick-input-widget input.input");
-	await expect(picker, "F1 opens the Command Palette").toBeVisible({ timeout: 10_000 });
-	await picker.fill(">OMP Desk: Find in Chat");
-	const row = page.locator('.quick-input-widget .monaco-list-row[aria-label^="OMP Desk: Find in Chat, "], .quick-input-widget .monaco-list-row[aria-label="OMP Desk: Find in Chat"]');
-	await expect(row).toBeVisible({ timeout: 10_000 });
-	await row.click();
+	await runPaletteCommand(page, "OMP Desk: Find in Chat");
 	await expect(find, "the palette command opens the bar").toBeVisible({ timeout: 10_000 });
 	await expect.poll(hostRuns, { timeout: 10_000 }).toBeGreaterThan(paletteBefore);
 });
