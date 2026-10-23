@@ -19,7 +19,7 @@ import type { ConfigRecord } from "../protocol/settings-model.ts";
  * information for the page, never a gate: an installed OMP is judged by the runtime shape checks below, which fail
  * closed (ADR-0011, ADR-0071).
  */
-export const VERIFIED_OMP_VERSION = "18.11.1";
+export const VERIFIED_OMP_VERSION = "18.12.6";
 const MAX_TEXT = 4096;
 const MAX_LIST = 256;
 const MAX_OPTIONS = 256;

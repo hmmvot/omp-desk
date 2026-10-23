@@ -203,7 +203,7 @@ Preview limit is 12 rows unless noted; "tail" shows the last rows. Input blocks 
 | edit | none (hashline script under `⋯`) | head of the diff, `⋯` gaps, per-file header rows | |
 | grep / ast_grep | none | head, grouped per file, match rows tinted | |
 | glob / find | none | head | |
-| eval | code (cap 8) | tail; `display()` JSON as a tree | |
+| eval | code (cap 8) | tail of the printed text (OMP 18.12.1 removed `display()`; the tables, trees and figures it now shows for a printed value are not drawn in Chat) | |
 | task / wait | shared context, clamped | agent cards or job rows; a long report clamped at about 14 lines with a reveal | rich renderers unchanged |
 | web_search / URL | none | answer clamped, sources list | |
 | ask / todo | none | in full (short) | unchanged |

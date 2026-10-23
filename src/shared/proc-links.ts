@@ -1,7 +1,8 @@
 /**
- * OMP's `proc://` addresses of background jobs (`proc-protocol.ts` of OMP 18.11.1): `proc://` lists them, `proc://<id>` reads one,
- * `proc://<id>/kill` is a write that cancels it, `proc://<id>/mode` sets a service's lifetime. An id is a job id (`bg_30`), the name
- * of a task's agent or of a launched service.
+ * OMP's `proc://` addresses of background jobs (`proc-protocol.ts` of OMP 18.12.6): `proc://` lists them, `proc://<id>` reads one,
+ * `proc://<id>/streams` lists a bash job's pipes and `proc://<id>/streams/<n>` reads one (new in OMP 18.12.3), `proc://<id>/kill`
+ * is a write that cancels it, `proc://<id>/mode` sets a service's lifetime. An id is a job id (`bg_30`), the name of a task's agent
+ * or of a launched service.
  *
  * Chat links such an address to the Jobs row and never acts on it: the suffix says what OMP would do with a write, not what a click
  * does.
@@ -9,14 +10,14 @@
 
 /** What a `proc://` id and a job id may be: a word OMP minted, never one that could change a `/jobs kill` command. */
 const ID = "[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}";
-const WHOLE = new RegExp(`^proc://(${ID})?(?:/(kill|mode))?$`);
-const IN_TEXT = new RegExp(`(?<![A-Za-z0-9_./:-])proc://(?:${ID})?(?:/(?:kill|mode))?(?![A-Za-z0-9_/])`, "g");
+const WHOLE = new RegExp(`^proc://(${ID})?(?:/(kill|mode|streams(?:/[0-9]+)?))?$`);
+const IN_TEXT = new RegExp(`(?<![A-Za-z0-9_./:-])proc://(?:${ID})?(?:/(?:kill|mode|streams(?:/[0-9]+)?))?(?![A-Za-z0-9_/])`, "g");
 const JOB_ID = new RegExp(`^${ID}$`);
 
 /** What a `proc://` address names. `id` is null for the bare listing. */
 export interface ProcLink {
 	id: string | null;
-	suffix: "kill" | "mode" | null;
+	suffix: "kill" | "mode" | "streams" | null;
 }
 
 /** Whether `id` is a word OMP could have given a job. */
@@ -29,7 +30,7 @@ export function parseProcLink(text: string): ProcLink | null {
 	const match = WHOLE.exec(text.trim());
 	if (match === null) return null;
 	const id = match[1] ?? null;
-	const suffix = match[2] === "kill" || match[2] === "mode" ? match[2] : null;
+	const suffix = match[2] === "kill" || match[2] === "mode" ? match[2] : match[2] !== undefined ? "streams" : null;
 	// A suffix needs an id: `proc:///kill` names nothing.
 	return suffix !== null && id === null ? null : { id, suffix };
 }

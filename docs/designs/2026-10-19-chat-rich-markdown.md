@@ -61,7 +61,7 @@ OMP's terminal UI (TUI) draws three things from an assistant's Markdown that Cha
 
 ## Risks and Open Questions
 
-- A table chart that the TUI would draw as a special kind is missing in Chat, and a table the TUI declines is also declined here; the thresholds are copied from OMP 18.11.1 and may drift in later OMP versions.
+- A table chart that the TUI would draw as a special kind is missing in Chat, and a table the TUI declines is also declined here; the thresholds are copied from OMP 18.11.1 and may drift in later OMP versions. Measured at the 18.12.6 adoption: `charts/table-data.ts` changed once, and only in cell reading (a whole number grouped by spaces, `1 988`, also U+00A0 and U+202F, is now one number, with exactly three digits per group). The TUI therefore charts a column written that way and Chat reads it as text and draws nothing: fewer charts, never different ones, as designed; the port was not widened.
 - The streaming tail uses a 600 ms settle timer; a reply that ends with a table shows the chart 600 ms after its last row. The tests prove the settle constant (600) and that a static render of a tail table draws no chart; the timer firing itself is not exercised (the owned headless-Chromium suite `table-chart-ui.test.ts` could wait it out; not done).
 - The inline grammar is per line: a `\(…\)` span across a soft-wrapped line is raw text, and math in a link label is not converted.
 - Models rarely write ```` ```svg ```` unless invited: OMP puts the invitation in the system prompt of a TUI transcript only. Chat shows figures a reply or a resumed session contains; a prompt rule would be a separate decision.

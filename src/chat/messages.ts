@@ -134,13 +134,21 @@ export type ChatEntry = MessageEntry | CustomMessageEntry | CompactionEntry | Br
 const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const text = (value: unknown): value is string => typeof value === "string";
 
-/** Retain unrecognized provider blocks for reconciliation without displaying internal payloads. */
+/**
+ * Retain unrecognized provider blocks for reconciliation without displaying internal payloads. A thinking block OMP marks
+ * `narration` (OMP 18.12: prose the model addressed to the user between tool calls, which the provider returned as a signed
+ * thinking block) is shown as answer text, as OMP's own surfaces do (`presentNarrationAsAnswer`); Desk never replays a
+ * message, so the signature is not needed here. OMP sets the flag when the block ends, so a streaming block turns from
+ * reasoning into text when that update arrives.
+ */
 export function parseChatContent(value: unknown): ChatContent | null {
 	if (!isRecord(value) || !text(value.type)) return null;
 	switch (value.type) {
 		case "text": return text(value.text) ? value as unknown as TextContent : null;
 		case "image": return text(value.data) && text(value.mimeType) && /^image\/[a-z0-9.+-]+$/i.test(value.mimeType) ? value as unknown as ImageContent : null;
-		case "thinking": return text(value.thinking) ? value as unknown as ThinkingContent : null;
+		case "thinking":
+			if (!text(value.thinking)) return null;
+			return value.narration === true ? { type: "text", text: value.thinking } : value as unknown as ThinkingContent;
 		case "redactedThinking": return text(value.data) ? value as unknown as RedactedThinkingContent : null;
 		case "toolCall": return text(value.id) && text(value.name) && isRecord(value.arguments) ? value as unknown as ToolCallContent : null;
 		case "fallback": return isRecord(value.from) && text(value.from.model) && isRecord(value.to) && text(value.to.model) ? value as unknown as FallbackContent : null;

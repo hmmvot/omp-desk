@@ -1,5 +1,5 @@
 /**
- * What OMP acts on in a `prompt` that it does not act on in a `steer` or `follow_up` (installed OMP 18.11.1): a `/skill:<name>`
+ * What OMP acts on in a `prompt` that it does not act on in a `steer` or `follow_up` (installed OMP 18.12.6, unchanged since 18.11.1): a `/skill:<name>`
  * invocation (`coding-agent` `extensibility/skills.ts` `parseSkillInvocation` with `pi-tui` `prompt/skill-tokens`) and a
  * leading slash command (`rpc-mode.ts` `dispatchOrderedUserInput`: `executeAcpBuiltinSlashCommand` for a builtin, `session.prompt`
  * for an extension, custom or file command, which a `steer` would queue as text or refuse). While a turn runs the host therefore sends

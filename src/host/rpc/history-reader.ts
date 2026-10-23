@@ -65,6 +65,12 @@ interface IndexEntry {
 	todoCandidate: boolean;
 	/** A `todo_hud_state` custom entry (OMP's record of a cleared or revealed TODO row). */
 	hudCandidate: boolean;
+	/**
+	 * OMP's `activeLeafId` (18.12): the leaf that was active when an entry was written off the active branch (late usage,
+	 * a background result routed to the branch it started on); replay selects it instead of the entry. Absent on every
+	 * other entry, `null` when the leaf was cleared.
+	 */
+	activeLeafId?: string | null;
 }
 
 export interface HistorySnapshot {
@@ -179,6 +185,16 @@ function factsOf(line: Buffer): LineFacts | null {
 	};
 }
 
+/** OMP writes `activeLeafId` as the last key of an entry (`appendMessageToBranch`, `appendModelUsage`), so the end of the line is enough. */
+const ACTIVE_LEAF_TAIL = /,"activeLeafId":(?:null|"([^"\\]*)")\}$/;
+const ACTIVE_LEAF_TAIL_BYTES = 256;
+
+/** `undefined` for an entry without the key, `null` for a cleared leaf, else the leaf id OMP replays instead of the entry itself. */
+function activeLeafOf(line: Buffer): string | null | undefined {
+	const match = ACTIVE_LEAF_TAIL.exec(line.toString("utf8", Math.max(0, line.length - ACTIVE_LEAF_TAIL_BYTES)));
+	return match === null ? undefined : match[1] ?? null;
+}
+
 async function readRange(handle: FileHandle, offset: number, length: number): Promise<Buffer> {
 	const buffer = Buffer.allocUnsafe(length);
 	let done = 0;
@@ -201,7 +217,7 @@ export class HistoryReader {
 	#byId = new Map<string, number>();
 	#indexedBytes = 0;
 	#badLines = 0;
-	#pathCache: number[] | null = null;
+	#pathCache: { leaf: number; path: number[] } | null = null;
 	#lastTag: { offset: number; length: number; text: string } | null = null;
 
 	private constructor(path: string) {
@@ -247,7 +263,7 @@ export class HistoryReader {
 		if (header === null) throw new HistoryReadError("no-header");
 		const legacy = this.#version === null || this.#version < 3;
 		const wanted = legacy || leafId === undefined || leafId === null ? undefined : this.#byId.get(leafId);
-		const leaf = wanted ?? this.#entries.length - 1;
+		const leaf = wanted ?? this.#fileLeaf(legacy);
 		const path = this.#pathTo(leaf);
 		// Legacy files have no parent links, hence no branches.
 		const points = legacy ? [] : computeBranchPoints(this.#entries, path.map(position => this.#entries[position]!.id));
@@ -386,7 +402,8 @@ export class HistoryReader {
 		const position = this.#entries.length;
 		const renders = rendersByFacts(facts);
 		// Legacy files (version < 3) may carry no parent links; the active path is then the file order.
-		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate, hudCandidate: facts.hudCandidate });
+		const activeLeafId = activeLeafOf(content);
+		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate, hudCandidate: facts.hudCandidate, ...(activeLeafId === undefined ? {} : { activeLeafId }) });
 		this.#byId.set(facts.id, position);
 		this.#pathCache = null;
 		this.#lastTag = { offset, length: line.length, text: line.toString("utf8", 0, Math.min(line.length, 128)) };
@@ -416,12 +433,30 @@ export class HistoryReader {
 		};
 	}
 
-	/** Positions from the root to `leaf` (an index position), oldest first; the file-order leaf's path is cached. */
-	#pathTo(leaf: number): number[] {
+	/**
+	 * The index position OMP's loader would leave as the active leaf: the last entry in file order selects `activeLeafId`
+	 * when it carries one, itself otherwise (`resolveSessionLeafId`). A captured leaf that is not in the file (rolled
+	 * back, rewritten away) falls back to the newest entry that selects itself; a cleared leaf is -1, the empty path.
+	 */
+	#fileLeaf(legacy: boolean): number {
 		const last = this.#entries.length - 1;
-		if (leaf === last && this.#pathCache !== null) return this.#pathCache;
+		if (legacy || last < 0) return last;
+		const captured = this.#entries[last]!.activeLeafId;
+		if (captured === undefined) return last;
+		if (captured === null) return -1;
+		const position = this.#byId.get(captured);
+		if (position !== undefined) return position;
+		for (let index = last; index >= 0; index -= 1) if (this.#entries[index]!.activeLeafId === undefined) return index;
+		return -1;
+	}
+
+	/** Positions from the root to `leaf` (an index position), oldest first; the file's own leaf path is cached. */
+	#pathTo(leaf: number): number[] {
+		const legacy = this.#version === null || this.#version < 3;
+		const own = this.#fileLeaf(legacy);
+		if (leaf === own && this.#pathCache !== null && this.#pathCache.leaf === leaf) return this.#pathCache.path;
 		let result: number[];
-		if (this.#version === null || this.#version < 3) {
+		if (legacy) {
 			result = [];
 			for (let index = 0; index <= leaf; index += 1) result.push(index);
 		} else {
@@ -436,7 +471,7 @@ export class HistoryReader {
 			}
 			result.reverse();
 		}
-		if (leaf === last) this.#pathCache = result;
+		if (leaf === own) this.#pathCache = { leaf, path: result };
 		return result;
 	}
 

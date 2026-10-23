@@ -182,7 +182,7 @@ test("baselines hold only registered, non-credential values", () => {
 
 test("a setting the installed OMP no longer has is not shown, whatever the user's files still hold for it", () => {
   const stale = { providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["read"] } } };
-  assert.ok(!recording.settings.some(setting => setting.id.startsWith("providers.openai-codex.codeMode")), "the recorded OMP (18.11.1) dropped these settings");
+  assert.ok(!recording.settings.some(setting => setting.id.startsWith("providers.openai-codex.codeMode")), "the recorded OMP (18.12.6) lacks these settings (18.11.1 dropped them)");
   const clean = projectSnapshot(fakeSchema(recording));
   const snapshot = projectSnapshot(fakeSchema(recording, { global: stale, project: stale, otherProject: stale, lowerProject: stale }));
   assert.deepEqual(snapshot.entries.map(item => item.id), clean.entries.map(item => item.id), "no entry appears for a key only the files hold");

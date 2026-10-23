@@ -82,7 +82,7 @@ test("roles resolve through OMP's own functions: layers, followed roles, built-i
     assert.equal(tiny.resolved, "fx-ok/fast"); assert.deepEqual(tiny.resolution.thinking, { level: "low", source: "role" });
     assert.deepEqual(role(snapshot, "memory").resolution.follows, ["tiny", "smol"]);
     assert.deepEqual(role(snapshot, "advisor").resolution.follows, ["slow"], "advisor follows slow only while slow is set");
-    assert.deepEqual([...role(snapshot, "smol").resolution.followers].sort(), ["memory", "tiny"]);
+    assert.deepEqual([...role(snapshot, "smol").resolution.followers].sort(), ["memory", "tiny", "widget"]);
     assert.equal(role(snapshot, "commit").resolution.source, "none"); assert.equal(role(snapshot, "commit").resolution.model.status, "none");
     assert.equal(role(snapshot, "plan").resolution.source, "none");
     const vision = role(snapshot, "vision").resolution;

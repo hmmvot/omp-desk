@@ -183,14 +183,15 @@ export const PTY_DEFAULT_STOP_TIMEOUT_MS = 20_000;
  * `node`/`code` started inside it this extension's runtime instead of the user's.
  * The rest are OMP's own runtime markers (verified in OMP 18.8.5): it sets
  * `PI_NO_PTY`/`PI_NO_TITLE` on itself in protocol modes, `PI_NOTIFICATIONS=off` in
- * RPC mode, the `PI_*` eval bridge variables for its kernels, and this extension
+ * RPC mode, the `PI_*` eval bridge variables for its kernels, `PI_SESSION_ID` and `PI_SESSION_FILE` in the
+ * environment of every bash and eval command (the id since OMP 18.12.4), and this extension
  * sets the host-control pair for a native child. A VS Code started from inside an
  * OMP session would otherwise launch native sessions without PTY bash or titles.
  */
 export const SCRUBBED_INHERITED_ENV: Readonly<Record<string, true>> = {
 	ELECTRON_RUN_AS_NODE: true,
 	PI_NO_PTY: true, PI_NO_TITLE: true, PI_NOTIFICATIONS: true,
-	PI_SESSION_FILE: true, PI_ARTIFACTS_DIR: true, PI_TOOL_BRIDGE_URL: true, PI_TOOL_BRIDGE_TOKEN: true, PI_TOOL_BRIDGE_SESSION: true, PI_EVAL_LOCAL_ROOTS: true,
+	PI_SESSION_ID: true, PI_SESSION_FILE: true, PI_ARTIFACTS_DIR: true, PI_TOOL_BRIDGE_URL: true, PI_TOOL_BRIDGE_TOKEN: true, PI_TOOL_BRIDGE_SESSION: true, PI_EVAL_LOCAL_ROOTS: true,
 	OMP_VSCODE_CONTROL_DIR: true, OMP_VSCODE_CONTROL_SLOT: true,
 };
 

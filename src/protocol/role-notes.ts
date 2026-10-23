@@ -36,6 +36,8 @@ export const ROLE_NOTES: Readonly<Record<string, RoleNote>> = {
     details: "An agent whose definition says @task runs on the model of the session that spawns it, else on the default role." },
   advisor: { list: true, summary: "not assigned · uses slow if set, else OMP's thinking list",
     details: "The advisor (off by default) uses the slow role when it is set, else OMP's built-in thinking-model list. It never inherits the default role or the main model. With no candidate it is skipped." },
+  widget: { list: true, summary: "not assigned · follows smol",
+    details: "Authors the live widgets of background jobs (`async.widgets`, on by default; OMP 18.12.3). It resolves exactly like smol until assigned: the smol role even when smol is unset (then default, then OMP's fast list)." },
   image: { list: true, chain: true, summary: "not assigned · OMP's image model list",
     details: "Image generation (off by default) tries OMP's built-in image models in order and skips ones without credentials; if none is usable it fails." },
   web: { list: true, chain: true, summary: "not assigned · OMP's web search providers",

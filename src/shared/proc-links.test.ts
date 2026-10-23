@@ -17,10 +17,12 @@ describe("parseProcLink", () => {
 		assert.deepEqual(parseProcLink("proc://bg_3"), { id: "bg_3", suffix: null });
 		assert.deepEqual(parseProcLink("proc://bg_3/kill"), { id: "bg_3", suffix: "kill" });
 		assert.deepEqual(parseProcLink("  proc://svc/mode "), { id: "svc", suffix: "mode" });
+		assert.deepEqual(parseProcLink("proc://bg_3/streams"), { id: "bg_3", suffix: "streams" });
+		assert.deepEqual(parseProcLink("proc://bg_3/streams/2"), { id: "bg_3", suffix: "streams" });
 	});
 
 	it("refuses a suffix without an id, unknown suffixes and anything that is not the whole text", () => {
-		for (const text of ["proc:///kill", "proc:///mode", "proc://bg_1/other", "proc://bg_1/kill/x", "see proc://bg_1", "proc://bg_1 now", "http://bg_1", "proc://x;y", ""]) assert.equal(parseProcLink(text), null, text);
+		for (const text of ["proc:///kill", "proc:///mode", "proc:///streams", "proc://bg_1/other", "proc://bg_1/kill/x", "proc://bg_1/streams/x", "proc://bg_1/streams/1/2", "see proc://bg_1", "proc://bg_1 now", "http://bg_1", "proc://x;y", ""]) assert.equal(parseProcLink(text), null, text);
 	});
 });
 
@@ -33,6 +35,10 @@ describe("detectProcLinks", () => {
 			{ id: "bg_1", suffix: "kill", text: "proc://bg_1/kill" },
 			{ id: "bg_2", suffix: null, text: "proc://bg_2" },
 			{ id: null, suffix: null, text: "proc://" },
+		]);
+		assert.deepEqual(spans("Follow proc://bg_4/streams/1, then proc://bg_4/streams."), [
+			{ id: "bg_4", suffix: "streams", text: "proc://bg_4/streams/1" },
+			{ id: "bg_4", suffix: "streams", text: "proc://bg_4/streams" },
 		]);
 	});
 

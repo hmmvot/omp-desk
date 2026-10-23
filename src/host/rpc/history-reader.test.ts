@@ -135,6 +135,31 @@ describe("HistoryReader", () => {
 		assert.equal(snap.olderCount, 2);
 	});
 
+	it("replays the active leaf an off-branch entry captured (OMP 18.12 activeLeafId), as OMP's loader does", async () => {
+		const dir = await scratch();
+		const rows: ChatEntry[] = [...conversation(1), messageEntry("u1", "a0", userMessage("next", 3_000))];
+		const usage = { type: "model_usage", id: "mu", parentId: "a0", timestamp: "2026-01-01T00:00:00.000Z", purpose: "x", activeLeafId: "u1" };
+		const late = { ...messageEntry("late", "a0", assistantMessage("late result", 4_000)), activeLeafId: "u1" };
+		const file = await dir.file("g.jsonl", sessionFileText({ entries: [...rows, usage, late as unknown as ChatEntry] }));
+		const reader = await HistoryReader.open(file);
+		const snap = await reader.snapshot(10);
+		assert.equal(snap.leafId, "u1", "the entries written off the active branch do not become the leaf");
+		assert.deepEqual(snap.entries.map(entry => entry.id), ["u0", "a0", "u1"]);
+		assert.equal(snap.lastId, "late", "the get_entries cursor stays the last line of the file");
+	});
+
+	it("falls back to the newest self-selecting entry when the captured leaf is gone, and to no leaf when it was cleared", async () => {
+		const dir = await scratch();
+		const rows: ChatEntry[] = [...conversation(1), messageEntry("u1", "a0", userMessage("next", 3_000))];
+		const gone = { type: "model_usage", id: "mu", parentId: "a0", timestamp: "2026-01-01T00:00:00.000Z", purpose: "x", activeLeafId: "rolled-back" };
+		const goneSnap = await (await HistoryReader.open(await dir.file("h.jsonl", sessionFileText({ entries: [...rows, gone] })))).snapshot(10);
+		assert.equal(goneSnap.leafId, "u1");
+		const cleared = { ...gone, activeLeafId: null };
+		const clearedSnap = await (await HistoryReader.open(await dir.file("i.jsonl", sessionFileText({ entries: [...rows, cleared] })))).snapshot(10);
+		assert.equal(clearedSnap.leafId, null);
+		assert.deepEqual(clearedSnap.entries, []);
+	});
+
 	it("keeps rows off the active path out of the window", async () => {
 		const dir = await scratch();
 		const rows: ChatEntry[] = [

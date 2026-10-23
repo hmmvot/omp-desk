@@ -25,6 +25,7 @@ OMP Desk gives OMP's own configuration a VS Code interface. Models, Agents and O
 - Credentials are never shown (set them with `omp config set` in a terminal); lists and mappings open their YAML at the key.
 - It needs Bun and the installed OMP's source files, which a Bun or npm global install has and OMP's standalone program (winget, the `omp.sh` binary install, mise) does not; for that program it says so and points to `/settings` in the session's Terminal view. An OMP whose settings schema it does not recognise is refused without changing anything.
 - Project settings are saved at the root of the version-control checkout your folder lies in ([`ompDesk.runSessionsAtRepositoryRoot`](settings.md)).
+- The editor was checked against OMP 18.12.6. The header names the OMP it reads, and adds "(not verified with this release)" for any other; that release is read through the same checks, and a setting whose shape the editor does not know is shown read-only.
 
 OMP's models, tools, skills and MCP servers live in OMP's files; the Models and Agents editors and the views below cover them.
 

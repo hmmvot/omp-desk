@@ -8,7 +8,7 @@ import type { NativeModules, NativeSettings } from "./settings-contracts.ts";
 const root = process.argv[2];
 if (!root) throw new Error("package root missing");
 const resolver = await import(pathToFileURL(path.join(root, "src", "config", "model-resolver.ts")).href) as NativeModules["config/model-resolver.ts"];
-const roleIds = ["default", "smol", "slow", "tiny", "memory", "advisor", "commit", "plan", "vision", "task", "judge", "image", "web", "speech", "dictation", "custom"];
+const roleIds = ["default", "smol", "slow", "tiny", "memory", "advisor", "widget", "commit", "plan", "vision", "task", "judge", "image", "web", "speech", "dictation", "custom"];
 const varied = ["default", "smol", "slow", "tiny", "memory", "custom"];
 const problems: string[] = [];
 let checked = 0;
