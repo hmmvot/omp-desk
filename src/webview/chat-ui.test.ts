@@ -7126,6 +7126,24 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("Up while the hand-off holds the draft changes nothing: no recalled prompt hides in the draft the release gives back", async () => {
+			await reset("history-while-held");
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:2,working:false,settled:true});
+			 window.composer.focus()`);
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('first prompt')");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:71})");
+			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===71&&message.captured===true)");
+			await press("ArrowUp", "ArrowUp", 38);
+			await settleFrames();
+			assert.equal(await draftValue(), "", "the field shows the empty draft");
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').disabled"), true, "and nothing is behind it that a send would carry");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:71})");
+			await ui.wait("!window.composer.readOnly()");
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').disabled"), true, "after the release too");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("Up and Down leave history while the caret has a visual row to move to: a soft-wrapped prompt is several rows, not one line", async () => {
 			await reset("quick-history-wrapped");
 			const long = Array.from({ length: 60 }, (_, index) => `word${index}`).join(" ");

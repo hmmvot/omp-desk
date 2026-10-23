@@ -1614,7 +1614,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				// History takes the arrow only when the browser would have no row left to move the caret to: soft-wrapped rows count, not just newlines.
 				const edges = start === end ? surface.rowEdges(start) : null;
 				const edge = edges !== null && (event.key === "ArrowUp" ? edges.first : edges.last);
-				if (edge && imagesRef.current.length === 0) {
+				if (edge && imagesRef.current.length === 0 && captureRef.current === null) {
 					// A prompt that carried files is walked by its prose; the history cursor owns the documents it placed and swaps them on
 					// each step, so ↑ then ↓ returns the draft.
 					const prompts = sessionPrompts(client.getSnapshot().entries);
