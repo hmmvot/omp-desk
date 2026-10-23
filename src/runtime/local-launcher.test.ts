@@ -95,6 +95,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		} as never,
 		brokerSlots,
 		brokerClient: async () => ({}) as never,
+		chatBrokerClient: async () => ({}) as never,
 		attachBrokerClient: async () => options.attachable === true ? ({} as never) : null,
 		brokerUnavailableReason: () => null,
 		brokerWatches: new WeakMap(),
@@ -184,6 +185,50 @@ describe("launch", () => {
 		const result = await f.launcher.launch(request);
 		assert.equal(result.state, "not-started");
 		assert.ok(!f.events.includes("storeRecipient"));
+	});
+
+	describe("the broker client of a launch", () => {
+		/** A launcher whose two clients record who asked, and whose clients are the given answers. */
+		function asking(answers: { readonly terminal?: null; readonly chat?: null } = {}) {
+			const f = fixture();
+			const asked: string[] = [];
+			const terminalClient = { kind: "full-proof client" } as never;
+			const chatClient = { kind: "chat client" } as never;
+			const launched: unknown[] = [];
+			const launcher = new LocalLauncher({
+				...f.deps,
+				brokerClient: async () => { asked.push("full"); return answers.terminal === null ? null : terminalClient; },
+				chatBrokerClient: async () => { asked.push("chat"); return answers.chat === null ? null : chatClient; },
+				hosts: {
+					...f.deps.hosts,
+					launchRpc: async (_request: unknown, client: unknown) => { launched.push(client); return { state: "not-started", reason: "stub", runtime: null }; },
+					launchNative: async (_request: unknown, client: unknown) => { launched.push(client); return { state: "not-started", reason: "stub", runtime: null }; },
+				} as never,
+			});
+			return { launcher, asked, launched, terminalClient, chatClient };
+		}
+
+		it("is the one that does not wait for the full runtime proof for a Chat, and the one that does for a terminal", async () => {
+			const chat = asking();
+			await chat.launcher.launch(request);
+			assert.deepEqual(chat.asked, ["chat"], "a Chat never asks for the full-proof client");
+			assert.deepEqual(chat.launched, [chat.chatClient]);
+
+			const terminal = asking();
+			await terminal.launcher.launch({ ...request, transport: "native" });
+			assert.deepEqual(terminal.asked, ["full"], "a terminal still waits for the full-proof client");
+			assert.deepEqual(terminal.launched, [terminal.terminalClient]);
+		});
+
+		it("refuses a launch whose client is not available, naming the broker, and starts nothing", async () => {
+			for (const [transport, answers] of [["rpc", { chat: null }], ["native", { terminal: null }]] as const) {
+				const f = asking(answers);
+				const result = await f.launcher.launch({ ...request, transport });
+				assert.equal(result.state, "not-started", transport);
+				assert.match(result.reason, /The extension-owned PTY broker is not available in this build/, transport);
+				assert.deepEqual(f.launched, [], transport);
+			}
+		});
 	});
 
 	it("releases the reserved slot only when the host reported nothing was started", async () => {

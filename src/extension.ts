@@ -4274,6 +4274,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     hosts: { launchRpc: launchRpcHost, launchNative: launchNativeHost, attachRpc: attachRpcHost, attachNative: attachNativeHost },
     brokerSlots: s.brokerSlots,
     brokerClient,
+    chatBrokerClient,
     attachBrokerClient,
     brokerUnavailableReason: () => windowState().ptyGate?.reason(),
     brokerWatches: s.brokerWatches,
@@ -4827,8 +4828,8 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
     s.startupRestoreOver.resolve();
     // Rows that said "Restoring" for the length of the pass are re-derived now.
     refreshLauncher();
-    // Start the full runtime proof now that the attach work is done, so the first launch
-    // finds it ready. It is a readiness check only: no broker, host or session starts.
+    // Start the full runtime proof now that the attach work is done, so the first terminal or fallback launch
+    // finds it ready (a Chat on Bun does not wait for it). It is a readiness check only: no broker, host or session starts.
     void s.ptyGate?.client();
     // Records a window that is gone left behind for rows no window here holds are settled once, after the restore and
     // off its critical path: it starts nothing and never changes a run intent (`SessionIndex.sweepGoneRecords`).
@@ -11453,8 +11454,8 @@ function shellSerializerFor(context: vscode.ExtensionContext, index: SessionInde
 /**
  * The broker client, with its staged runtime proven ready to *start* a child.
  *
- * Used by every path that launches (a new session, a relaunch, a folder shell). A proven
- * runtime is kept for the activation; a *failed* readiness check is not, because the client
+ * Used by the paths that start a child on the full runtime proof: a terminal, a folder shell and Stats (a Chat starts through
+ * {@link chatBrokerClient}). A proven runtime is kept for the activation; a *failed* readiness check is not, because the client
  * retries a staging or self-check failure that a later attempt would not hit — latching it
  * for the window's lifetime would make a surviving broker look unavailable to every
  * ownership recheck after a full VS Code restart. The proof is started in the background
@@ -11467,6 +11468,21 @@ async function brokerClient(): Promise<PtyBrokerClient | null> {
   const gate = s.ptyGate;
   if (gate === undefined) return null;
   return await gate.client();
+}
+
+/**
+ * The broker client of a Chat launch: it does not wait for the full runtime proof, which is the console-child proof a terminal
+ * needs. Every broker start is gated inside the client by the proof of the runtime it starts on (a Chat on Bun by its own
+ * pipe-only proof, a Chat that falls back to `Code.exe` by the full proof, awaited there), so the launcher's wait for the full
+ * proof only delayed a Chat that never uses it (the first self-check after an update outlives its 15 s deadline). The
+ * ADR-0068 settings barrier applies as for every launch.
+ */
+async function chatBrokerClient(): Promise<PtyBrokerClient | null> {
+  const s = windowState();
+  await legacySettingsSettled(s);
+  const gate = s.ptyGate;
+  if (gate === undefined) return null;
+  return await gate.chatLaunchClient();
 }
 
 /**
@@ -11490,7 +11506,8 @@ async function legacySettingsSettled(s: WindowState): Promise<void> {
  * amendment 2026-10-13), and a kernel creation-time reading only for what is not attested
  * (older brokers, pseudo-console children). It needs only an attach-ready client, never the
  * staged tree's staging or self-check, and none of it executes the staged tree, so restore
- * does not wait for the runtime proof.
+ * does not wait for the runtime proof. A Chat launch also starts from an attach-ready client
+ * ({@link chatBrokerClient}), because the client gates every start itself.
  */
 async function attachBrokerClient(): Promise<PtyBrokerClient | null> {
   const s = windowState();

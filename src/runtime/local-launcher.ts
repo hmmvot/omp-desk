@@ -97,7 +97,10 @@ export interface LocalLauncherDeps {
 	};
 	/** The durable broker slot table, `undefined` before activation created it. */
 	readonly brokerSlots: BrokerSlotStore | undefined;
+	/** The client a terminal starts its broker through: ready after the full runtime proof (the console-child proof a terminal needs). */
 	readonly brokerClient: () => Promise<PtyBrokerClient | null>;
+	/** The client a Chat starts its broker through: it does not wait for the full runtime proof, which the client gates itself on the path that needs it (see `PtyReadinessGate.chatLaunchClient`). */
+	readonly chatBrokerClient: () => Promise<PtyBrokerClient | null>;
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	/** Why the broker is unavailable, when it is. */
 	readonly brokerUnavailableReason: () => string | null | undefined;
@@ -380,8 +383,10 @@ export class LocalLauncher implements OmpHostLauncher {
 			return { state: "not-started", reason };
 		};
 		// One writer, started by the extension-owned broker (ADR-0024/0038).
-		const client = await this.#deps.brokerClient();
-		// The broker client waits for the runtime proof the first launch of a window runs, so that wait shows in this lap.
+		// A terminal's launch waits for the full runtime proof here, and that wait shows in the next lap. A Chat does not: the
+		// client gates every start by the proof of the runtime it starts on (a Chat on Bun by its own pipe-only proof, which is
+		// the broker's `runtime check` phase), so this lap is a few milliseconds for it.
+		const client = await (request.transport === "native" ? this.#deps.brokerClient() : this.#deps.chatBrokerClient());
 		timeline?.lap(request.tabId, "runtime proof");
 		if (client === null) {
 			return notStarted(

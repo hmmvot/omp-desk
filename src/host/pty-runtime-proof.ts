@@ -85,6 +85,16 @@ export class PtyRuntimeProof {
 		return this.proven;
 	}
 
+	/** Whether this window's first probe is running now (read-only: asking never starts one). */
+	probing(): boolean {
+		return this.first !== null;
+	}
+
+	/** Settles when the first probe that is running now has answered, whatever it answered; at once when none is. Never starts a probe. */
+	async settled(): Promise<void> {
+		await this.first?.then(() => undefined, () => undefined);
+	}
+
 	/**
 	 * Stop believing a proof that was read from an earlier window's store, because a launch that
 	 * relied on it failed before a broker existed. Returns what was withdrawn (so the caller can

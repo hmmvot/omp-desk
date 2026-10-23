@@ -239,3 +239,42 @@ describe("PtyRuntimeProof", () => {
 		assert.deepEqual(deadlines, [undefined, SELF_CHECK_EXTENDED_DEADLINE_MS, SELF_CHECK_EXTENDED_DEADLINE_MS, SELF_CHECK_EXTENDED_DEADLINE_MS, undefined]);
 	});
 });
+
+describe("PtyRuntimeProof first probe visibility", () => {
+	it("says a first probe is running while it runs, lets a caller wait for its answer, and never starts one itself", async () => {
+		const release = Promise.withResolvers<PtyRuntimeReadiness>();
+		let probes = 0;
+		const proof = new PtyRuntimeProof({ probe: () => { probes += 1; return release.promise; } });
+
+		assert.equal(proof.probing(), false);
+		await proof.settled();
+		assert.equal(probes, 0, "asking whether a probe runs, or waiting for one, starts none");
+
+		const ready = proof.ready();
+		assert.equal(proof.probing(), true);
+		let settled = false;
+		const waiting = proof.settled().then(() => { settled = true; });
+		await Promise.resolve();
+		assert.equal(settled, false, "settled waits for the running probe");
+
+		release.resolve(proven);
+		await ready;
+		await waiting;
+		assert.equal(settled, true);
+		assert.equal(proof.probing(), false);
+		assert.equal(probes, 1);
+	});
+
+	it("settles when the running probe throws or is refused, and a refusal that is not held leaves nothing running", async () => {
+		const failing = new PtyRuntimeProof({ probe: async () => { throw new Error("could not be checked"); } });
+		const ready = failing.ready().catch(() => undefined);
+		await failing.settled();
+		await ready;
+		assert.equal(failing.probing(), false);
+
+		const refusing = new PtyRuntimeProof({ probe: async () => refused });
+		await refusing.ready();
+		await refusing.settled();
+		assert.equal(refusing.probing(), false);
+	});
+});

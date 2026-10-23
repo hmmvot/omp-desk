@@ -32,7 +32,7 @@ export interface PtyReadinessGate {
 	/** The client when a broker may be started from the runtime now (proven, or admitted provisionally), or `null` when not (yet). */
 	client(): Promise<PtyBrokerClient | null>;
 	/**
-	 * The client when it can re-adopt an already-running broker, or `null` when it cannot (yet).
+	 * The client when it can re-adopt an already-running broker (and the first stop of {@link chatLaunchClient}), or `null` when it cannot (yet).
 	 *
 	 * Weaker than {@link client} on purpose: an attach needs only this build's tree digest and
 	 * runtime version (hashed in place, nothing staged), so it waits for neither the broker
@@ -41,6 +41,17 @@ export interface PtyReadinessGate {
 	 * runtime answers here too.
 	 */
 	attachClient(): Promise<PtyBrokerClient | null>;
+	/**
+	 * The client a Chat launch starts its broker through, which does not wait for the full runtime proof: the attach client
+	 * when it can answer, else {@link client}.
+	 *
+	 * Safe because every broker start is gated inside `PtyBrokerClient.startBrokerOn` by the proof of the runtime it starts on
+	 * (ADR-0032): a Chat on Bun by its own pipe-only proof (ADR-0074), a Chat that falls back to `Code.exe` by awaiting the full
+	 * proof there. The full proof is the console-child proof a terminal needs; a Chat on Bun has no use for it, and waiting for it
+	 * here only delayed the start (up to the whole first self-check after an update). A terminal, a folder shell and Stats keep
+	 * {@link client}.
+	 */
+	chatLaunchClient(): Promise<PtyBrokerClient | null>;
 	/** Why the last check did not prove the runtime, or `null` when it did. */
 	reason(): string | null;
 	/**
@@ -116,21 +127,25 @@ export function createPtyReadinessGate(input: {
 		}
 	};
 
+	const client = async (): Promise<PtyBrokerClient | null> => {
+		if (proven) return input.client;
+		// A failure this window just saw is not retried per caller: a pass over many
+		// rows must not run one staging attempt per row.
+		if (attempt === null && now() < retryAt) return null;
+		const pending = attempt ?? (attempt = check());
+		return (await pending) ? input.client : null;
+	};
+	const attachClient = async (): Promise<PtyBrokerClient | null> => {
+		if (proven || attachProven) return input.client;
+		if (attachAttempt === null && now() < attachRetryAt) return null;
+		const pending = attachAttempt ?? (attachAttempt = checkAttach());
+		return (await pending) ? input.client : null;
+	};
+
 	return {
-		async client(): Promise<PtyBrokerClient | null> {
-			if (proven) return input.client;
-			// A failure this window just saw is not retried per caller: a pass over many
-			// rows must not run one staging attempt per row.
-			if (attempt === null && now() < retryAt) return null;
-			const pending = attempt ?? (attempt = check());
-			return (await pending) ? input.client : null;
-		},
-		async attachClient(): Promise<PtyBrokerClient | null> {
-			if (proven || attachProven) return input.client;
-			if (attachAttempt === null && now() < attachRetryAt) return null;
-			const pending = attachAttempt ?? (attachAttempt = checkAttach());
-			return (await pending) ? input.client : null;
-		},
+		client,
+		attachClient,
+		chatLaunchClient: async () => (await attachClient()) ?? (await client()),
 		reason: () => reason,
 		invalidate: () => {
 			if (!proven) retryAt = 0;

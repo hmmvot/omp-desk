@@ -355,6 +355,7 @@ export const harness = {
     w.staging = { entries: async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' }, runtimeProbe: { path: 'fixture-runtime-probe.mjs' } }), native: async () => null };
     w.ptyGate = { client: async () => ({}) };
     w.ptyGate.attachClient = async () => ({ fixture: true });
+    w.ptyGate.chatLaunchClient = async () => await w.ptyGate.client();
     w.ptyGate.invalidate = () => {};
     // The fixture's runtimes carry process ids no real process has: a root is running unless a case says it ended.
     w.rootGone = async () => false;

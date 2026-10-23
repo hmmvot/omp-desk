@@ -62,6 +62,7 @@ import {
 } from "./pty-protocol.ts";
 import { BrokerHandle, type BrokerHandleEvent, type SnapshotCollector } from "./broker-handle.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, type PtyIdentityReading } from "./pty-identity.ts";
+import { proveBunRuntime } from "./pty-bun-proof.ts";
 import { connectPtyBroker, type PtyClientSideConnection } from "./pty-ipc.ts";
 import {
 	acquirePtySlotLock,
@@ -849,18 +850,26 @@ export class PtyBrokerClient {
 			if (held.until === null || (this.options.now ?? Date.now)() < held.until) return { kind: "vscode", fallback: held.fallback };
 			this.bunHeld.delete(key);
 		}
-		const [trust, readiness] = await Promise.all([
+		// The pipe-only check overlaps the window's first full proof when a Chat starts before that has answered; an inconclusive
+		// answer that came meanwhile is not acted on (it runs once more after the full proof, `proveBunRuntime`).
+		const [trust, proved] = await Promise.all([
 			verifyExecutableTrust(executable, policy.trust),
-			ensurePtyRuntime({
-				storageDir: this.options.storageDir,
-				extensionRoot: this.options.extensionRoot,
-				nodePath: executable,
-				pipeOnly: true,
-				runtimeArgs: BUN_RUNTIME_ARGS,
-				...(this.options.env === undefined ? {} : { env: this.options.env }),
-				...(this.options.access === undefined ? {} : { access: this.options.access }),
+			proveBunRuntime({
+				prove: () =>
+					ensurePtyRuntime({
+						storageDir: this.options.storageDir,
+						extensionRoot: this.options.extensionRoot,
+						nodePath: executable,
+						pipeOnly: true,
+						runtimeArgs: BUN_RUNTIME_ARGS,
+						...(this.options.env === undefined ? {} : { env: this.options.env }),
+						...(this.options.access === undefined ? {} : { access: this.options.access }),
+					}),
+				fullProbeRunning: () => this.proof.probing(),
+				fullProbeSettled: () => this.proof.settled(),
 			}),
 		]);
+		const readiness = proved.readiness;
 		if (!trust.ok) return refuse("trust", `${executable} is not trusted to host a broker: ${trust.reason}`);
 		if (!readiness.ready || readiness.runtime === null) {
 			return refuse("proof", `the pipe-only self-check on ${executable} refused it: ${readiness.reason ?? "no reason given"}`);
@@ -868,9 +877,10 @@ export class PtyBrokerClient {
 		if (!readiness.proven) {
 			const fallback: ChatBrokerFallback = {
 				code: "proof",
-				detail: `the pipe-only self-check on ${executable} did not finish in time (${readiness.reason ?? "inconclusive"})`,
+				detail: `the pipe-only self-check on ${executable} did not finish in time${proved.retried ? ", and again after the full runtime proof had answered" : ""} (${readiness.reason ?? "inconclusive"})`,
 			};
-			this.bunHeld.set(key, { until: (this.options.now ?? Date.now)() + BUN_INCONCLUSIVE_HOLD_MS, fallback });
+			// After a repeat that overlapped the full proof the second answer may itself have been contended: it falls back for this launch and does not keep the file off Bun for ten minutes.
+			if (!proved.retried) this.bunHeld.set(key, { until: (this.options.now ?? Date.now)() + BUN_INCONCLUSIVE_HOLD_MS, fallback });
 			return { kind: "vscode", fallback };
 		}
 		const answer = readiness.runtime.selfCheck;
@@ -1026,6 +1036,8 @@ export class PtyBrokerClient {
 				if (started.refused.code === "start") this.holdBun(plan, started.refused, null);
 			} else {
 				this.logChatBrokerChoice(plan);
+				// A plan that spent time before it fell back (the trust read, the pipe-only check) is part of the start, not a gap in it.
+				if (plan.fallback.code === "trust" || plan.fallback.code === "proof" || plan.fallback.code === "runtime-mismatch" || plan.fallback.code === "version") bunAttemptMs = Date.now() - planStartedAt;
 			}
 		}
 		const started = await this.startBrokerOn(spec, launcherId, attach, null, Date.now());

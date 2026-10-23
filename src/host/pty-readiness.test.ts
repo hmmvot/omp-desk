@@ -239,3 +239,40 @@ describe("attach readiness in the gate", () => {
 		assert.equal(calls, 2);
 	});
 });
+
+describe("the client of a Chat launch in the gate", () => {
+	it("is answered while the full proof is still running, and does not start or latch it", async () => {
+		const proof = Promise.withResolvers<{ readonly ready: boolean; readonly reason: null }>();
+		let fullCalls = 0;
+		const client = {
+			ready: () => { fullCalls += 1; return proof.promise; },
+			attachIdentity: async () => ({ ready: true, reason: null, treeDigest: "d" }),
+		} as unknown as PtyBrokerClient;
+		const gate = createPtyReadinessGate({ client });
+
+		assert.equal(await gate.chatLaunchClient(), client, "a Chat gets the client without the full proof");
+		assert.equal(fullCalls, 0, "asking for it neither starts nor waits for the full proof");
+
+		const terminal = gate.client();
+		assert.equal(await gate.chatLaunchClient(), client, "nor while a terminal's launch is waiting for it");
+		assert.equal(fullCalls, 1, "the terminal's wait is the only full check");
+		proof.resolve({ ready: true, reason: null });
+		assert.equal(await terminal, client);
+	});
+
+	it("asks the full gate when the attach check cannot answer, keeping that failure's message and back-off", async () => {
+		let time = 1_000;
+		const failures: string[] = [];
+		const client = {
+			ready: async () => ({ ready: false, proven: false, reason: "the staged runtime did not prove itself" }),
+			attachIdentity: async () => ({ ready: false, reason: "the packaged broker tree could not be read", treeDigest: null }),
+		} as unknown as PtyBrokerClient;
+		const gate = createPtyReadinessGate({ client, onFailure: reason => failures.push(reason), now: () => time });
+
+		assert.equal(await gate.chatLaunchClient(), null);
+		assert.deepEqual(failures, ["the packaged broker tree could not be read", "the staged runtime did not prove itself"], "each check reports its own failure");
+		assert.match(gate.reason() ?? "", /did not prove itself/);
+		assert.equal(await gate.chatLaunchClient(), null, "inside the retry window nothing is attempted again");
+		assert.equal(failures.length, 2);
+	});
+});

@@ -277,6 +277,8 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 			assert.ok((lines[0] ?? "").toLowerCase().includes((await realpath(REAL.executable)).toLowerCase()));
 			assert.match(lines[0] ?? "", /a VS Code update does not end it/);
 			assert.equal(levelOfRuntimeLine(window, "a VS Code update does not end it"), "info");
+			// The full proof is the console-child proof a terminal needs: a Chat on Bun neither runs nor waits for it, so the window logged none of its lines.
+			assert.deepEqual(window.events.filter(line => /PTY runtime (proved itself|admitted unproven|proof reused)/.test(line)), [], "a Bun start touched the full runtime proof");
 			// The trust read covered the executable and the directories above it, never the volume root.
 			assert.equal(window.trustReads.length, 1);
 			assert.equal((window.trustReads[0] ?? [])[0]?.toLowerCase(), (await realpath(REAL.executable)).toLowerCase());

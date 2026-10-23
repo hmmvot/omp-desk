@@ -57,6 +57,10 @@ Chosen: Chat (`managed-rpc`) brokers start on the `bun.exe` of the session's own
 
 This amendment adds no decision beyond the launcher-kind message, the `runtime-mismatch` reason and the log levels. Review: independent architecture review (one pass) of the composition; its text corrections are applied.
 
+## Amendment (2026-10-23, a Chat start does not wait for the full PTY proof)
+
+Decision 4 (an inconclusive pipe-only check falls back and is held for 10 minutes) gains one exception: an inconclusive answer that came while this window's first full runtime proof was running (or was running when the check began) is not acted on. The check waits for the full proof to answer and runs once more; the second answer is judged by the rules above, except that a second inconclusive answer falls back for that launch without the 10-minute hold, because it may itself have been contended. A refusal or a proof is never re-checked. The reason is that a Chat start no longer waits for the full proof ([design](../designs/2026-10-23-chat-start-does-not-wait-for-the-full-pty-proof.md)), so on a cold build the two self-checks overlap on an already slow machine, and the overlap alone must not move a Chat off Bun. The log line of a Chat that falls back after the second check says so, and the time the plan spent is part of the `bun attempt` phase of the timing line.
+
 ## Related Documents
 
 - [Design: Chat brokers on the session's own Bun runtime](../designs/2026-10-14-chat-brokers-on-the-session-bun-runtime.md)

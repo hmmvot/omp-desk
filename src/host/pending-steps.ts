@@ -22,7 +22,7 @@ export const STEP_AFTER_LAP: Record<LaunchLap, PendingStep | null> = {
 	admission: "prepare",
 	stage: "prepare",
 	"host control keys": "runtime",
-	// The broker client waits for the PTY runtime proof, then the editor document and the broker slot are prepared.
+	// A terminal's broker client waits for the full PTY runtime proof (a Chat's does not), then the editor document and the broker slot are prepared.
 	"runtime proof": "runtime",
 	"editor document": "runtime",
 	// The broker launch call follows: resolution, the Bun probe and trust read, the spawn and the handshake.
