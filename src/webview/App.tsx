@@ -53,6 +53,7 @@ import { setToolIntentFirst } from "./lib/tool-intent-first";
 import { setHtmlPagesEnabled } from "./lib/html-pages-enabled";
 import { setSendWith } from "./lib/send-with";
 import { ArtifactEpochContext } from "./lib/artifact-opener";
+import { notePageEvent } from "./lib/page-health";
 
 export function App({ client }: { client: ChatClient }): ReactNode {
 	if (!guestTransport.hosted) {
@@ -145,6 +146,8 @@ function useRouteKind(): GuestRouteKind {
 
 function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const snapshot = useChatSnapshot(client);
+	// One commit of the conversation view is one event of the page's liveness report (a counter in a ring; it paints nothing).
+	useEffect(() => notePageEvent("render"));
 	// Counts the reader's own submissions: the transcript returns to the tail and follows it again for each one.
 	const [followLatest, setFollowLatest] = useState(0);
 	const followOwnSubmit = useCallback(() => setFollowLatest(count => count + 1), []);

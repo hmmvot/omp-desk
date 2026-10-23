@@ -22,6 +22,8 @@ import { restoreFocusTakenByHost } from "./lib/frame-focus";
 import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
 import { installSelectionFocusHold } from "./lib/selection-focus";
+import { installPageHealth } from "./lib/page-health";
+import { DETAIL_META } from "../protocol/detail-target";
 
 function boot(): void {
 	// A composer that loses focus without the user moving it is reported to the OMP Desk output, with what the page saw.
@@ -32,6 +34,15 @@ function boot(): void {
 	installTypeToFocus(window);
 	// A text selection holds the focus, so VS Code's Copy does not refocus the composer over it.
 	installSelectionFocusHold(window);
+	// A visible session page reports to the host that it is alive, so a page whose main thread freezes leaves a trace in the log. A detail
+	// tab is not a session editor and has no slot to be watched under. A diagnostic never stops the page from mounting.
+	if (document.querySelector(`meta[name="${DETAIL_META}"]`) === null) {
+		try {
+			installPageHealth(window, guestTransport);
+		} catch {
+			// The page works without its liveness report.
+		}
+	}
 	const nonce = readCspNonce();
 	adoptNonceForCreatedStyles(nonce);
 	injectGuestStyles(nonce);

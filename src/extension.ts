@@ -123,6 +123,7 @@ import type { PendingEnd, PendingKind, PendingOrigin, PendingStep } from "./shar
 import { pendingDisplayShell } from "./wiring/pending-shell";
 import { PersistFailureReporter } from "./host/persist-report";
 import { holderSeemsAlive } from "./host/holder-liveness";
+import { PageHealthMonitor } from "./host/page-health";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
 import { EditorSlotPruner, EditorSlotWatch } from "./host/editor-slot-prune";
@@ -750,6 +751,8 @@ interface WindowState {
   readonly guestDispatcher: GuestDispatcher<TabState>;
   /** Tabs whose composer currently shows its `@`-completion popup (reported by the page). */
   readonly composerPopupTabs: Set<string>;
+  /** Watches the liveness reports of this window's Chat pages and logs a page that stops answering (one timer, only while a page is watched). */
+  readonly pageHealth: PageHealthMonitor;
   /** Drafts captured from a replaced document, waiting for its successor to be ready (by editor slot). */
   readonly draftRestores: Map<string, CarriedDraft<TabState>>;
   /**
@@ -1368,6 +1371,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     // Guest dispatch
     guestDispatcher: registerGuestDispatcher(guestDispatcherDeps()),
     composerPopupTabs: new Set<string>(),
+    pageHealth: new PageHealthMonitor({ log }),
     draftRestores: new Map<string, CarriedDraft<TabState>>(),
     slashRegistry: null,
     slashRegistryFailedKey: null,
@@ -1546,6 +1550,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // The frame server of a reply's HTML page (ADR-0079): bound from here, awaited before any panel is restored (the chat document's
   // policy names its port); only while the setting is on, and closed with the window.
   context.subscriptions.push({ dispose: () => void s.htmlPageServer.close() });
+  context.subscriptions.push({ dispose: () => s.pageHealth.dispose() });
   const htmlPageServerBound = chatHtmlPagesEnabled() ? s.htmlPageServer.ensure() : Promise.resolve(null);
   // The `omp-artifact:` and `omp-session-file:` schemes first, synchronously: an editor tab of either that Reload Window restores is served as soon as the window has the provider.
   s.artifactDocuments = registerArtifactDocuments(context.subscriptions);
@@ -10221,6 +10226,33 @@ function registerPanelLifecycle(
       log.warn(`slot ${slot}: the chat page did not start (${reason ?? "unknown reason"}); the installed package ${packageChangedOnDisk() ? "changed" : "did not change"} on disk since this window started`);
       return;
     }
+    // A page's liveness report is the host monitor's alone: the editor's own handlers never see it, whichever editor the page belongs to.
+    if (typeof message === "object" && message !== null && "type" in message && message.type === "omp:page-health") {
+      const report = parseGuestWebviewMessage(message);
+      const reported = state.document;
+      if (report?.type === "omp:page-health" && reported?.kind === "guest") {
+        // Watched only while this very document is the visible one of the panel: a document the host replaced meanwhile (a mode switch,
+        // an explanation page that loads no bundle) is not a silent page.
+        const showing = (): boolean => {
+          try {
+            const current = s.tabs.get(slot);
+            return current?.panel === panel && current.document === reported && panel.visible;
+          } catch {
+            return false;
+          }
+        };
+        // The user is here when the window has the focus and this tab is the active editor of its group.
+        const userHere = (): boolean => {
+          try {
+            return vscode.window.state.focused && panel.active;
+          } catch {
+            return false;
+          }
+        };
+        s.pageHealth.note(slot, { panel, document: reported, label: `tab ${state.tabId}`, visible: showing, windowFocused: userHere }, report);
+      }
+      return;
+    }
     // The Reload Window button of the updated-on-disk page (honoured only while the installed package really changed under
     // this host) and of a chat page that could not start (the page shows it only after a failed start, drift or not).
     if (typeof message === "object" && message !== null && "type" in message && message.type === UNAVAILABLE_RELOAD_MESSAGE && (state.document?.kind === "guest" || (state.document?.kind === "unavailable" && packageChangedOnDisk()))) {
@@ -10233,6 +10265,7 @@ function registerPanelLifecycle(
     });
   });
   panel.onDidDispose(() => {
+    s.pageHealth.forget(slot, panel);
     const current = s.tabs.get(slot);
     if (current === undefined || current.panel !== panel) {
       // A superseded panel. This slot is bound to the panel that replaced it, and

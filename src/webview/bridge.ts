@@ -83,6 +83,8 @@ interface TransportState {
 	routeListeners: Set<(kind: GuestRouteKind) => void>;
 	/** The document's own strictly increasing mutation sequence. */
 	actionSeq: number;
+	/** Observers told the type of every validated host message, before any listener handles it (the page's liveness report). */
+	inboundTaps: Set<(type: string) => void>;
 	/** Whether a connection that was up has been lost; chat commands are refused meanwhile. */
 	hostLink: HostLink;
 }
@@ -143,6 +145,7 @@ const state: TransportState = {
 	routeListeners: new Set(),
 	actionSeq: 0,
 	hostLink: new HostLink(),
+	inboundTaps: new Set(),
 };
 
 /**
@@ -193,6 +196,13 @@ type InboundSource = "panel" | "bridge";
 function deliverRaw(payload: unknown, source: InboundSource): void {
 	const parsed = parseGuestHostMessage(payload);
 	if (parsed === null) return;
+	for (const tap of state.inboundTaps) {
+		try {
+			tap(parsed.type);
+		} catch {
+			// A diagnostic observer must never stop a host message from being handled.
+		}
+	}
 	if (parsed.type === "omp:route-offer") {
 		handleRouteOffer(parsed, source);
 		return;
@@ -485,6 +495,13 @@ export const guestTransport = {
 		};
 	},
 	post,
+	/** Observe the type of every validated host message as it arrives, before the listeners handle it; returns the function that stops observing. */
+	observeInbound(tap: (type: string) => void): () => void {
+		state.inboundTaps.add(tap);
+		return () => {
+			state.inboundTaps.delete(tap);
+		};
+	},
 	carries,
 	/** The document's own strictly increasing sequence for irreversible changes. */
 	nextActionSeq,

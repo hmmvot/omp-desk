@@ -54,6 +54,8 @@ import { parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRe
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "../shared/code-symbols.ts";
 import { parseCommitLinksChanged } from "../shared/commit-links.ts";
 import type { CommitLinksChanged } from "../shared/commit-links.ts";
+import { parsePageHealthMessage } from "./page-health.ts";
+import type { GuestPageHealthMessage } from "./page-health.ts";
 
 /** Provider-qualified model display shape shared with the host. */
 export type { ControlModelRef };
@@ -1236,6 +1238,7 @@ export type GuestWebviewMessage =
 	| GuestControlRequestMessage
 	| GuestComposerPopupMessage
 	| GuestFocusTraceMessage
+	| GuestPageHealthMessage
 	| GuestTerminalAttachMessage
 	| GuestTerminalProbeMessage
 	| GuestTerminalCopyReplyMessage
@@ -1785,6 +1788,8 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 			if (!isBoundedText(value.detail, MAX_FOCUS_TRACE_DETAIL_LENGTH) || value.detail.length === 0) return null;
 			return { type: "omp:focus-trace", detail: value.detail };
 		}
+		case "omp:page-health":
+			return parsePageHealthMessage(value);
 		case "omp:terminal-attach": {
 			const { generation, cols, rows } = value;
 			// `null` is the pane saying it holds no generation; anything else must be one
