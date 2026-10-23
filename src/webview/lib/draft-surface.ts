@@ -12,7 +12,7 @@
  * The surface owns every attribute of the element that changes while the user types; React renders the element with a
  * class only and never touches its children or attributes.
  */
-import { findChips, isBareChip, type ChipSpan, type ResolveCommand } from "./command-chips.ts";
+import { findChips, isBareChip, type ChipSpan, type ResolveCommand } from "./draft/draft.ts";
 import { findFencedBlocks } from "./code-fence.ts";
 import {
 	LineRenderer,
@@ -29,10 +29,10 @@ import {
 import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history.ts";
 import { deletionTarget, type DeleteKind } from "./draft-text.ts";
 import { normalizeLineEndings } from "../../shared/text-file.ts";
-import { deletionRange, repairDamagedReferences, snapSelection, type IsKnownReference } from "./image-references.ts";
-import { findQuoteRuns } from "./quote-lines.ts";
+import { deletionRange, repairDamagedReferences, snapSelection, type IsKnownReference } from "./draft/draft.ts";
+import { findQuoteRuns } from "./draft/draft.ts";
 import { isPhysicalKey } from "./physical-keys.ts";
-import { quotePasteEdit } from "./quote-edits.ts";
+import { quotePasteEdit } from "./draft/draft.ts";
 
 /** How a write from outside the surface treats the undo stack: one more step, or a fresh start. */
 export type HistoryMode = "record" | "reset";

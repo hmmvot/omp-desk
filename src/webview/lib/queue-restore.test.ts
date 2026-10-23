@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compactForSend } from "./image-references.ts";
+import { compactForSend } from "./draft/image-references.ts";
 import { composeFileBlocks, fileMarker } from "../../shared/file-blocks.ts";
 import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing, type DraftState, type NumberedImage, type RestoredQueued } from "./queue-restore.ts";
 

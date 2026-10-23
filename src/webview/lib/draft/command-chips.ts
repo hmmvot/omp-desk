@@ -20,10 +20,10 @@
  * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it, except for a token
  * that ends the draft (leading or mid-text), which is a (bare) chip the moment its name is exactly a command or a skill.
  */
-import type { ChatSlashCommand } from "../../chat/model.ts";
-import { embeddedSkillAllowed, SKILL_PREFIX, SKILL_TOKEN } from "../../chat/prompt-routing.ts";
+import type { ChatSlashCommand } from "../../../chat/model.ts";
+import { embeddedSkillAllowed, SKILL_PREFIX, SKILL_TOKEN } from "../../../chat/prompt-routing.ts";
 import { findReferences, type IsKnownReference, type ReferenceSpan } from "./image-references.ts";
-import { slashCatalogue } from "./slash-completion.ts";
+import { slashCatalogue } from "../slash-completion.ts";
 
 /** A skill is drawn with a book, any other command with a terminal prompt; the chip is the same otherwise. */
 export type CommandKind = "command" | "skill";

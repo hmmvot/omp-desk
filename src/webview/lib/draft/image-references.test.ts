@@ -11,7 +11,7 @@ import {
 	repairDamagedReferences,
 	snapSelection,
 } from "./image-references.ts";
-import { fileMarker } from "../../shared/file-blocks.ts";
+import { fileMarker } from "../../../shared/file-blocks.ts";
 
 const all = (): boolean => true;
 const image = (number: number, bytes = 10): { number: number; bytes: number } => ({ number, bytes });

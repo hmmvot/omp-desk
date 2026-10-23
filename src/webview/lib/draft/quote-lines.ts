@@ -6,7 +6,7 @@
  * from these flags exactly as it draws one from the fenced blocks; nothing here is stored, so the string stays the
  * single source of truth.
  */
-import { fenceCloses, fenceOpening, type FencedBlock } from "./code-fence.ts";
+import { fenceCloses, fenceOpening, type FencedBlock } from "../code-fence.ts";
 
 /** The prefix of a quote line: up to three blanks, one `>` per nesting level, each optionally followed by one blank. */
 const QUOTE_PREFIX = /^ {0,3}>(?:[ \t]?>)*[ \t]?/;

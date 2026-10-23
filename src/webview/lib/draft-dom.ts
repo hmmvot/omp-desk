@@ -7,9 +7,9 @@
  * the literal marker or token: an image or a file marker, a leading command or a skill). An empty line is a lone `<br>`; a line
  * that ends in a chip carries a trailing `<br>` so the caret has a position after it. That `<br>` is a rendering filler and never part of the model.
  */
-import type { ChipSpan } from "./command-chips.ts";
+import type { ChipSpan } from "./draft/draft.ts";
 import type { FencedBlock } from "./code-fence.ts";
-import type { QuoteLineFlags } from "./quote-lines.ts";
+import type { QuoteLineFlags } from "./draft/draft.ts";
 
 export const LINE_CLASS = "omp-line";
 export const CODE_LINE_CLASS = "omp-line--code";

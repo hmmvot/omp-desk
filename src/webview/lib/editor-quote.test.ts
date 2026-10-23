@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import type { GuestEditorQuote } from "../../protocol/messages.ts";
 import { codeSpan } from "../../shared/code-span.ts";
 import { editorQuoteMarkdown, editorQuoteRequest } from "./editor-quote.ts";
-import { quoteBlock } from "./quote-draft.ts";
+import { quoteBlock } from "./draft/quote-draft.ts";
 
 const quote = (over: Partial<GuestEditorQuote> = {}): GuestEditorQuote => ({ location: "src/app.ts:42-43", fileName: "app.ts", languageId: "typescript", text: "const x = 1;\nconst y = 2;", ...over });
 

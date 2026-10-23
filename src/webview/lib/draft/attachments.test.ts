@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
+import { MAX_ATTACH_ITEMS } from "../../../shared/attach-limits.ts";
 import { attachGuardRefusal, droppedFileUris } from "./attachments.ts";
 
 /** The two methods `droppedFileUris` calls on a drag; the rest of `DataTransfer` is not read. */

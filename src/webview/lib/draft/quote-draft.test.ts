@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { MAX_CHAT_TEXT_LENGTH } from "../../protocol/chat-messages.ts";
-import { findFencedBlocks } from "./code-fence.ts";
+import { MAX_CHAT_TEXT_LENGTH } from "../../../protocol/chat-messages.ts";
+import { findFencedBlocks } from "../code-fence.ts";
 import { neutraliseImageMarkers, placeQuote, quoteBlock, quoteLineCount, quoteTitle, removalRange } from "./quote-draft.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 

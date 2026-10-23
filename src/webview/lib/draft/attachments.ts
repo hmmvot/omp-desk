@@ -32,10 +32,10 @@
  * here, which the composer drops on send, removal, and unmount.
  */
 
-import { formatBytes } from "../../shared/file-size.ts";
-import { sniffImageMimeType } from "../../shared/image-sniff.ts";
-import { MAX_CHAT_IMAGES_BYTES, MAX_CHAT_IMAGE_BYTES } from "../../protocol/chat-messages.ts";
-import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
+import { formatBytes } from "../../../shared/file-size.ts";
+import { sniffImageMimeType } from "../../../shared/image-sniff.ts";
+import { MAX_CHAT_IMAGES_BYTES, MAX_CHAT_IMAGE_BYTES } from "../../../protocol/chat-messages.ts";
+import { MAX_ATTACH_ITEMS } from "../../../shared/attach-limits.ts";
 
 /** Formats the host accepts for image input (pi-utils `SUPPORTED_IMAGE_MIME_TYPES`). */
 export const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;

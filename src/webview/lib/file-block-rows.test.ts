@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { composeFileBlocks, fileMarker } from "../../shared/file-blocks.ts";
-import { lineCount, sentTextOf, splitUserText, utf8Length } from "./file-block-rows.ts";
+import { lineCount, sentTextOf, splitUserText } from "./file-block-rows.ts";
 
 const NOTES = "first line\nask @src/a.ts and /skill:review ^fast +500k\n</file>\nlast line\n";
 const PLAN = "no sigils here";
@@ -43,13 +43,6 @@ test("lineCount treats a final newline as the end of the last line", () => {
 	assert.equal(lineCount("a\nb\n"), 2);
 	assert.equal(lineCount("\n"), 1);
 	assert.equal(lineCount("a\n\n"), 2);
-});
-
-test("utf8Length is the byte length TextEncoder gives, for ASCII, two-, three- and four-byte characters and a lone surrogate", () => {
-	const encoder = new TextEncoder();
-	for (const text of ["", "plain", "é", "日本語", "😀 emoji", "tab\tand\nnewline", "\ud800", "a\udc00b", "\ud83d"]) {
-		assert.equal(utf8Length(text), encoder.encode(text).length, JSON.stringify(text));
-	}
 });
 
 test("Copy of a message with files is its prose, as the text was sent; a message that does not parse is copied whole", () => {

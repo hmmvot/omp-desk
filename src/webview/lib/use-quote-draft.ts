@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { ChatNoticeLevel } from "./chat-notices.ts";
 import type { DraftSurface } from "./draft-surface.ts";
 import { quoteSizeRefusal } from "../../shared/quote-limit.ts";
-import { placeQuote, quoteBlock, quoteLineCount } from "./quote-draft.ts";
+import { placeQuote, quoteBlock, quoteLineCount } from "./draft/draft.ts";
 import { createQuoteHold } from "./quote-hold.ts";
 import type { QuoteRequest } from "./quote-sink.ts";
 

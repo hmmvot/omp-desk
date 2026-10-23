@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { findFencedBlocks, type TextEdit } from "./code-fence.ts";
+import { findFencedBlocks, type TextEdit } from "../code-fence.ts";
 import { quoteKeyEdit, quotePasteEdit, type QuoteKey } from "./quote-edits.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 

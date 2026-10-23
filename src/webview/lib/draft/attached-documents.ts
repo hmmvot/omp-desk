@@ -5,10 +5,10 @@
  * (`src/host/attached-files.ts`), through the same `src/shared/text-file.ts`, so a file is refused with the same sentence
  * whichever way it arrived.
  */
-import { MAX_DOCUMENT_BYTES, MAX_MESSAGE_CHARS } from "../../shared/attach-limits.ts";
-import { formatBytes, groupedCount } from "../../shared/file-size.ts";
-import { sniffImageMimeType, sniffUnsupportedImageMimeType } from "../../shared/image-sniff.ts";
-import { TEXT_SNIFF_BYTES, decodeTextFile, sniffTextFile, textFileRefusalSentence } from "../../shared/text-file.ts";
+import { MAX_DOCUMENT_BYTES, MAX_MESSAGE_CHARS } from "../../../shared/attach-limits.ts";
+import { formatBytes, groupedCount } from "../../../shared/file-size.ts";
+import { sniffImageMimeType, sniffUnsupportedImageMimeType } from "../../../shared/image-sniff.ts";
+import { TEXT_SNIFF_BYTES, decodeTextFile, sniffTextFile, textFileRefusalSentence } from "../../../shared/text-file.ts";
 
 const FORMATS = "PNG, JPEG, GIF, or WebP";
 

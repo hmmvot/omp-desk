@@ -9,9 +9,9 @@
  *
  * Everything here is pure; the composer owns the state.
  */
-import { MAX_MESSAGE_CHARS } from "../../shared/attach-limits.ts";
-import { markerName, splitFileBlocks } from "../../shared/file-blocks.ts";
-import { utf8Length } from "./file-block-rows.ts";
+import { MAX_MESSAGE_CHARS } from "../../../shared/attach-limits.ts";
+import { markerName, splitFileBlocks } from "../../../shared/file-blocks.ts";
+import { utf8Length } from "../../../shared/utf8-length.ts";
 import { findReferences } from "./image-references.ts";
 
 /** A file the host attached by path: the page knows its reference and its size, never its path or text. */

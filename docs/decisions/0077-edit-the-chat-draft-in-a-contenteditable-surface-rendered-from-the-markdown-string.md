@@ -36,6 +36,15 @@ The prototype measured the native-undo limitation that forces the own stack and 
 - Negative: the page owns undo and redo, so Edit > Undo and Edit > Redo are inert for the composer (verified mechanism, not a possibility); in-editor drag-move of selected text and native spell-check suggestions are lost; prompt-history recall, queued-message restore, `set_editor_text`, accepted completions and Commands-row inserts become undoable steps; plain-text drop at the pointer is new; a contenteditable is a less forgiving IME and screen-reader host than a textarea, so real-IME and assistive-technology checks are a standing cost; roughly 1 000 lines of editing code and a test migration replace a short native implementation.
 - Rollback: revert the change. The stored and sent string is unchanged, so no data migration exists.
 
+### Amendment 2026-10-23: the draft's rules live in one Draft module, and the surface stays its field adapter
+
+The surface stays exactly as decided: the Markdown string is the only source of truth, the surface owns the string in the DOM, the selection and the text-only undo history, and every programmatic write states `record` or `reset`. What changes is where the rules around it live ([design](../designs/2026-10-23-composer-draft-module.md), accepted after two independent architecture review passes): the draft value (text, attachments, counters), the pure operations that change it, the send composition and the one cell that decides when a change may be written and writes it through a port move into `src/webview/lib/draft/`, behind one entry, `draft.ts`. Two build-checked import rules in `scripts/check-imports.mjs` keep the boundary:
+
+- **R-draft-1.** A non-test file outside `src/webview/lib/draft/` may import from that directory only `draft/draft.ts`.
+- **R-draft-2.** A non-test file inside it may import only files of the directory, `src/shared`, `src/protocol`, `src/chat`, `slash-completion.ts` and `code-fence.ts` (grammar and catalogue modules the transcript's quote capture and the command list share), and type-only `@oh-my-pi/pi-wire`; never React, a `.tsx` file, a component, the bridge, the client or a surface file.
+
+Test files are exempt from both (internal seams are tested beside the module). The surface reaches the module's pure rules through the entry; the Draft never imports the surface.
+
 ## Related Documents
 
 - [Composer contenteditable surface design](../designs/2026-10-15-composer-contenteditable-surface.md)

@@ -6,8 +6,8 @@
  * `Backspace` and `Delete` take the prefix with them. Every rule reads the line itself (nothing is stored) and returns
  * `null` when the browser's own behaviour is the right one. Pure text arithmetic: the composer applies an {@link TextEdit} as one undo step.
  */
-import type { TextEdit } from "./code-fence.ts";
-import { normalizeLineEndings } from "../../shared/text-file.ts";
+import type { TextEdit } from "../code-fence.ts";
+import { normalizeLineEndings } from "../../../shared/text-file.ts";
 import { quotePrefixLength, type QuoteLayout, lineIndexAt } from "./quote-lines.ts";
 
 /** The modifiers of a key press that matter here. */

@@ -10,9 +10,9 @@
  *
  * Everything here is pure except the registry; the composer owns the DOM, selection and focus.
  */
-import type { PendingImage } from "./attachments.ts";
-import { draftFromSentText, type DraftDocument } from "./draft-documents.ts";
-import { fileReferencePattern, imageReferenceLabel, imageReferencePattern } from "./image-references.ts";
+import type { PendingImage } from "./draft/draft.ts";
+import { draftFromSentText, type DraftDocument } from "./draft/draft.ts";
+import { fileReferencePattern, imageReferenceLabel, imageReferencePattern } from "./draft/draft.ts";
 import { fileMarker, markerName } from "../../shared/file-blocks.ts";
 
 /** One image of a dequeued message, as OMP's queue returned it. */

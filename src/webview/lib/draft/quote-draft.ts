@@ -6,8 +6,8 @@
  * end of the draft and the caret is left on the line right under it, so the comment is written straight under the quote.
  * A blank line goes before it, which is also what keeps two quotes two runs.
  */
-import { MAX_CHAT_TEXT_LENGTH } from "../../protocol/chat-messages.ts";
-import { findFencedBlocks } from "./code-fence.ts";
+import { MAX_CHAT_TEXT_LENGTH } from "../../../protocol/chat-messages.ts";
+import { findFencedBlocks } from "../code-fence.ts";
 import type { QuoteRun } from "./quote-lines.ts";
 
 /**

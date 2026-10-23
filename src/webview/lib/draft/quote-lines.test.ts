@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { findFencedBlocks } from "./code-fence.ts";
+import { findFencedBlocks } from "../code-fence.ts";
 import { findQuoteRuns, isQuoteLineAt, lineIndexAt, quotePrefixLength } from "./quote-lines.ts";
 
 /** The run line ranges and the per-line flags as short strings: `-` plain, `q` quote, `c` nested code (quote and code). */

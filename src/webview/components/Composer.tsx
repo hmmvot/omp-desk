@@ -63,20 +63,20 @@ import {
 	readImageAttachment,
 	sizeRejection,
 	type PendingImage,
-} from "../lib/attachments";
-import { classifyFile, draftRoomRefusal, readDocumentFile } from "../lib/attached-documents";
-import { activeDocuments, documentChars, documentExtension, documentIcon, documentTooltip, draftFromSentText, isKnownDocument, pruneInactiveDocuments, type DraftDocument } from "../lib/draft-documents";
+} from "../lib/draft/draft";
+import { classifyFile, draftRoomRefusal, readDocumentFile } from "../lib/draft/draft";
+import { activeDocuments, documentChars, documentExtension, documentIcon, documentTooltip, draftFromSentText, isKnownDocument, pruneInactiveDocuments, type DraftDocument } from "../lib/draft/draft";
 import { readLinkedFiles } from "../lib/read-linked";
 import { AskDialog, AskOptionRow } from "./AskDialog";
 import { DraftEditor } from "./DraftEditor";
 import type { ChatModel, ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
-import { findQuoteRuns, isQuoteLineAt } from "../lib/quote-lines";
-import { quoteKeyEdit } from "../lib/quote-edits";
+import { findQuoteRuns, isQuoteLineAt } from "../lib/draft/draft";
+import { quoteKeyEdit } from "../lib/draft/draft";
 import { useSendWith } from "../lib/send-with";
 import { isSendChord, SEND_KEY_LABELS, type ChatSendWith } from "../../chat/send-with";
-import { removalRange } from "../lib/quote-draft";
+import { removalRange } from "../lib/draft/draft";
 import { provideQuoteSink } from "../lib/quote-sink";
 import { quoteSelectionIntoDraft } from "../lib/quote-selection";
 import { useQuoteDraft } from "../lib/use-quote-draft";
@@ -105,8 +105,8 @@ import {
 	pruneInactive,
 	referencedNumbers,
 	type ReferenceKind,
-} from "../lib/image-references";
-import { commandResolver } from "../lib/command-chips";
+} from "../lib/draft/draft";
+import { commandResolver } from "../lib/draft/draft";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";

@@ -288,6 +288,65 @@ test("the port module refuses value imports, inline type modifiers, star re-expo
   );
 });
 
+test("outside the Draft module only its entry may be imported (R-draft-1); the module's own tests and files inside it are exempt", () => {
+  const root = fixture({
+    "src/webview/lib/draft/draft.ts": 'import { inner } from "./inner.ts";\nexport const d = inner;\n',
+    "src/webview/lib/draft/inner.ts": "export const inner = 1;\n",
+    "src/webview/lib/draft/inner.test.ts": 'import { inner } from "./inner.ts";\nexport const t = inner;\n',
+    "src/webview/lib/surface.ts": 'import { d } from "./draft/draft.ts";\nimport { inner } from "./draft/inner.ts";\nexport const s = [d, inner];\n',
+    "src/webview/lib/surface.test.ts": 'import { inner } from "./draft/inner.ts";\nexport const st = inner;\n',
+    "src/webview/components/View.tsx": 'import { inner } from "../lib/draft/inner";\nexport const v = inner;\n',
+  });
+  try {
+    const { status, lines } = run(root);
+    assert.equal(status, 1);
+    assert.deepEqual(lines, [
+      "src/webview/components/View.tsx:1 imports src/webview/lib/draft/inner.ts: outside src/webview/lib/draft/ only draft.ts may be imported from it (R-draft-1)",
+      "src/webview/lib/surface.ts:2 imports src/webview/lib/draft/inner.ts: outside src/webview/lib/draft/ only draft.ts may be imported from it (R-draft-1)",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the Draft module reaches only its directory, shared, protocol, chat, two grammar modules and type-only pi-wire (R-draft-2)", () => {
+  const root = fixture({
+    "src/webview/lib/draft/draft.ts": [
+      'import { ok } from "../../../shared/ok.ts";',
+      'import { slash } from "../slash-completion.ts";',
+      'import { fence } from "../code-fence.ts";',
+      'import type { ImageContent } from "@oh-my-pi/pi-wire";',
+      'import { surface } from "../draft-surface.ts";',
+      'import { View } from "../../components/View.tsx";',
+      'import { useState } from "react";',
+      'import { image } from "@oh-my-pi/pi-wire";',
+      'import "react-dom";',
+      "export const d = [ok, slash, fence, surface, View, useState, image];",
+      "export type I = ImageContent;",
+      "",
+    ].join("\n"),
+    "src/webview/lib/draft/draft.test.ts": 'import { useState } from "react";\nexport const t = useState;\n',
+    "src/shared/ok.ts": "export const ok = 1;\n",
+    "src/webview/lib/slash-completion.ts": "export const slash = 1;\n",
+    "src/webview/lib/code-fence.ts": "export const fence = 1;\n",
+    "src/webview/lib/draft-surface.ts": "export const surface = 1;\n",
+    "src/webview/components/View.tsx": "export const View = 1;\n",
+  });
+  try {
+    const { status, lines } = run(root);
+    assert.equal(status, 1);
+    assert.deepEqual(lines, [
+      "src/webview/lib/draft/draft.ts:5 imports src/webview/lib/draft-surface.ts: the Draft module may import only its own directory, shared, protocol, chat, slash-completion.ts and code-fence.ts (R-draft-2)",
+      "src/webview/lib/draft/draft.ts:6 imports src/webview/components/View.tsx: the Draft module may import only its own directory, shared, protocol, chat, slash-completion.ts and code-fence.ts (R-draft-2)",
+      "src/webview/lib/draft/draft.ts:7 imports react: the Draft module may import only type-only @oh-my-pi/pi-wire besides relative files (R-draft-2)",
+      "src/webview/lib/draft/draft.ts:8 imports @oh-my-pi/pi-wire: the Draft module may import only type-only @oh-my-pi/pi-wire besides relative files (R-draft-2)",
+      "src/webview/lib/draft/draft.ts:9 imports react-dom: the Draft module may import only type-only @oh-my-pi/pi-wire besides relative files (R-draft-2)",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the repository tree passes", () => {
   const result = spawnSync(process.execPath, [script], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);

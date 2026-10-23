@@ -217,6 +217,39 @@ for (const rel of nodes) {
   if (match !== null) findings.push(`${rel}:${lineOf(texts.get(rel), match.index)} loads a native addon: only src/host/win32-native.ts may call dlopen`);
 }
 
+// R-draft-1 / R-draft-2: the Draft module (docs/designs/2026-10-23-composer-draft-module.md, ADR-0077 amendment).
+// R-draft-1: outside `src/webview/lib/draft/`, a non-test file may import only its entry, `draft.ts`.
+// R-draft-2: inside it, a non-test file may import only the directory itself, `src/shared`, `src/protocol`, `src/chat`, the two
+// grammar and catalogue modules the transcript's quote capture and the command list share with it, and type-only
+// `@oh-my-pi/pi-wire`; so it never reaches React, a `.tsx` file, a component, the bridge, the client or a surface file.
+const DRAFT_DIR = "src/webview/lib/draft/";
+const DRAFT_ENTRY = "src/webview/lib/draft/draft.ts";
+const DRAFT_OUTSIDE_PREFIXES = ["src/shared/", "src/protocol/", "src/chat/"];
+const DRAFT_OUTSIDE_FILES = new Set(["src/webview/lib/slash-completion.ts", "src/webview/lib/code-fence.ts"]);
+const DRAFT_BARE_TYPE_ONLY = new Set(["@oh-my-pi/pi-wire"]);
+const BARE_SPECIFIER = /^[ \t]*(?:(import|export)\b([^'";]*?)\bfrom|import)\s*(['"])([^'".\/][^'"\n]*)\3/gm;
+for (const rel of nodes) {
+  if (isTestFile(rel)) continue;
+  const inside = rel.startsWith(DRAFT_DIR);
+  for (const { to, line } of graph.get(rel)) {
+    if (!inside) {
+      if (to.startsWith(DRAFT_DIR) && to !== DRAFT_ENTRY) findings.push(`${rel}:${line} imports ${to}: outside ${DRAFT_DIR} only draft.ts may be imported from it (R-draft-1)`);
+      continue;
+    }
+    if (to.startsWith(DRAFT_DIR) || DRAFT_OUTSIDE_PREFIXES.some((prefix) => to.startsWith(prefix)) || DRAFT_OUTSIDE_FILES.has(to)) continue;
+    findings.push(`${rel}:${line} imports ${to}: the Draft module may import only its own directory, shared, protocol, chat, slash-completion.ts and code-fence.ts (R-draft-2)`);
+  }
+  if (!inside) continue;
+  const text = texts.get(rel) ?? "";
+  BARE_SPECIFIER.lastIndex = 0;
+  for (const match of text.matchAll(BARE_SPECIFIER)) {
+    const specifier = match[4];
+    const typeOnly = /^\s*type\b/.test(match[2] ?? "");
+    if (DRAFT_BARE_TYPE_ONLY.has(specifier) && typeOnly) continue;
+    findings.push(`${rel}:${lineOf(text, match.index)} imports ${specifier}: the Draft module may import only type-only ${[...DRAFT_BARE_TYPE_ONLY].join(", ")} besides relative files (R-draft-2)`);
+  }
+}
+
 // R-runtime-2: the port module declares data only. It uses statement-level `import type` and
 // `export type ... from`, every source and name is on this list, so a live object (an index, a
 // handle, a client, the chat runtime) cannot become part of the port's contract by a type import.

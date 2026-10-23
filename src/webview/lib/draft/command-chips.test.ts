@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ChatSlashCommand } from "../../chat/model.ts";
+import type { ChatSlashCommand } from "../../../chat/model.ts";
 import { commandResolver, findChips, findCommandChips, isBareChip, type ResolveCommand } from "./command-chips.ts";
 import { deletionRange, snapSelection } from "./image-references.ts";
 

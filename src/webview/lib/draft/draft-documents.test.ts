@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { composeFileBlocks, fileMarker } from "../../shared/file-blocks.ts";
+import { composeFileBlocks, fileMarker } from "../../../shared/file-blocks.ts";
 import {
 	activeDocuments,
 	documentChars,

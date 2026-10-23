@@ -8,8 +8,8 @@
 import type { ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { DraftSurface } from "../lib/draft-surface";
-import { quoteTitle } from "../lib/quote-draft";
-import type { QuoteRun } from "../lib/quote-lines";
+import { quoteTitle } from "../lib/draft/draft";
+import type { QuoteRun } from "../lib/draft/draft";
 
 /** The button's box: one text line high. */
 const BUTTON_SIZE = 20;
