@@ -58,7 +58,7 @@ import {
 	type ChatPendingControl,
 	type ChatPendingModel,
 } from "../../chat/model.ts";
-import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
+import { entryMessage, isUserSkillInvocation, parseChatEntry, skillPromptText, type ChatEntry } from "../../chat/messages.ts";
 import {
 	CLEAR_COMMAND,
 	CLEAR_DEFER_MS,
@@ -688,6 +688,7 @@ async function defaultFileExists(file: string): Promise<boolean> {
 }
 
 function userMessageText(entry: ChatEntry): string | null {
+	if (isUserSkillInvocation(entry)) return skillPromptText(entry.type === "custom_message" ? entry.details : entry.type === "message" && "details" in entry.message ? entry.message.details : undefined);
 	if (entry.type !== "message" || entry.message.role !== "user") return null;
 	const content = entry.message.content;
 	if (typeof content === "string") return content;
@@ -3226,7 +3227,7 @@ export class RpcSession {
 			if (!entry.unconfirmed) continue;
 			const delivered = this.#model.entries.some(row => {
 				const text = userMessageText(row);
-				return text !== null && text === entry.text && row.type === "message" && row.message.timestamp >= entry.sentAt - 5_000;
+				return text !== null && text === entry.text && (entryMessage(row)?.timestamp ?? 0) >= entry.sentAt - 5_000;
 			});
 			this.#ledger.splice(this.#ledger.indexOf(entry), 1);
 			if (!delivered) this.#emit({ type: "prompt-lost", requestId: entry.requestId });

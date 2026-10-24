@@ -8,7 +8,7 @@
  * stored here. Pure: the composer owns the textarea, the caret rule and the state.
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
-import type { ChatEntry } from "./messages.ts";
+import { isUserSkillInvocation, skillPromptText, type ChatEntry } from "./messages.ts";
 import { messageText } from "../shared/format.ts";
 
 /** Where a walk through the history stands. */
@@ -21,12 +21,16 @@ export interface HistoryCursor {
 	readonly draft: string;
 }
 
-/** The user prompts of the loaded rows, oldest first, an immediate repeat listed once. Image-only prompts are skipped. */
+/** The user prompts of the loaded rows, oldest first, an immediate repeat listed once. A typed skill invocation is listed as typed; image-only prompts are skipped. */
 export function sessionPrompts(entries: readonly ChatEntry[]): string[] {
 	const prompts: string[] = [];
 	for (const entry of entries) {
-		if (entry.type !== "message" || entry.message.role !== "user" || entry.message.synthetic === true) continue;
-		const text = messageText(entry.message.content);
+		let text: string;
+		if (isUserSkillInvocation(entry)) {
+			text = skillPromptText(entry.type === "custom_message" ? entry.details : entry.type === "message" && "details" in entry.message ? entry.message.details : undefined);
+		} else if (entry.type === "message" && entry.message.role === "user" && entry.message.synthetic !== true) {
+			text = messageText(entry.message.content);
+		} else continue;
 		if (text.trim().length === 0 || prompts[prompts.length - 1] === text) continue;
 		prompts.push(text);
 	}

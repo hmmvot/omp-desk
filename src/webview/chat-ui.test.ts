@@ -7006,6 +7006,24 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("Up recalls a skill invocation between two messages as typed, and the skill chip forms from it", async () => {
+			await reset("history-skill-invocation");
+			// OMP stores a typed skill invocation as a `skill-prompt` entry attributed to the user, not as a user message.
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),
+			  {type:'custom_message',id:'s1',parentId:'u1',timestamp:'2026-10-01T00:00:00.000Z',customType:'skill-prompt',content:'Expanded skill body',display:true,attribution:'user',details:{name:'docs-review',prompt:'/skill:docs-review the changelog'}},
+			  row('u2',{role:'user',timestamp:3,content:'last prompt'})],durableCount:3,working:false,settled:true});
+			 window.composer.focus()`);
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('last prompt')");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("window.composer.value()==='last prompt'");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("window.composer.value()==='/skill:docs-review the changelog'");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("window.composer.value()==='first prompt'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("Up while the hand-off holds the draft changes nothing: no recalled prompt hides in the draft the release gives back", async () => {
 			await reset("history-while-held");
 			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});

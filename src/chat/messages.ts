@@ -267,6 +267,15 @@ export function userSkill(message: CustomMessage): UserSkill | null {
 	return { name, args: argumentsText, prompt: typeof prompt === "string" ? prompt : `Invoked /skill:${name}${argumentsText ? ` · ${argumentsText}` : ""}`, reconstructed: prompt === undefined };
 }
 
+/** What the user typed for a skill invocation: OMP's `details.prompt` verbatim, else `/skill:name args` rebuilt from the name and arguments of an entry that kept no prompt. */
+export function skillPromptText(details: unknown): string {
+	if (!isRecord(details)) return "";
+	if (typeof details.prompt === "string" && details.prompt.trim().length > 0) return details.prompt;
+	if (typeof details.name !== "string" || details.name.trim().length === 0) return "";
+	const args = typeof details.args === "string" ? details.args.trim() : "";
+	return `/skill:${details.name}${args.length > 0 ? ` ${args}` : ""}`;
+}
+
 /**
  * A skill invocation the user typed (OMP's `isUserInvokedSkillPrompt`): a request like a user message, which OMP
  * stores as a `skill-prompt` custom message attributed to `user` instead of a user message. Reads a parsed entry or

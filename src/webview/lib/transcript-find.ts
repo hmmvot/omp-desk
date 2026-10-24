@@ -10,7 +10,7 @@
  * Not searched: notices, summaries, attachments' file text, the history before a context reset, rows still on disk, and the reply
  * still being written (it is read once it is complete, not again for every delta).
  */
-import { entryMessage, type ChatContent } from "../../chat/messages.ts";
+import { entryMessage, userSkill, type ChatContent } from "../../chat/messages.ts";
 import { stripAnsi } from "../../chat/ansi.ts";
 import { toolPresentation } from "../../chat/tool-presentation.ts";
 import type { ProjectedTool, TranscriptCard } from "../../chat/transcript.ts";
@@ -118,6 +118,15 @@ export function findUnitsOf(cards: readonly TranscriptCard[], cwd: string | unde
 		switch (card.kind) {
 			case "entry": {
 				const message = entryMessage(card.entry);
+				if (message?.role === "custom") {
+					const invocation = userSkill(message);
+					if (invocation === null) break;
+					units.push(cached(card.entry, [card.entry], () => ({
+						id: card.id, cardId: card.id, sources: [card.id, ...card.sourceIds],
+						segments: [{ part: "text", text: shown(splitUserText(invocation.prompt).prose, false, markdown) }],
+					})));
+					break;
+				}
 				if (message?.role !== "user" || message.synthetic === true) break;
 				const content = message.content;
 				units.push(cached(card.entry, [card.entry], () => ({

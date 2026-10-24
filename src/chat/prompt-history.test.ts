@@ -18,6 +18,14 @@ describe("prompt history", () => {
 		assert.deepEqual(sessionPrompts(entries), ["first", "second", "third\nline"]);
 	});
 
+	it("lists a typed skill invocation as typed, in both entry shapes, and not one the agent invoked", () => {
+		const skill = (id: string, attribution: string, details: unknown): ChatEntry =>
+			({ type: "custom_message", id, parentId: null, timestamp: "2026-01-01T00:00:00.000Z", customType: "skill-prompt", attribution, display: true, content: "expanded", details }) as unknown as ChatEntry;
+		const wrapped = { type: "message", id: "w", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", message: { role: "custom", customType: "skill-prompt", attribution: "user", display: true, content: "expanded", timestamp: 1, details: { name: "plan", args: "  ship it " } } } as unknown as ChatEntry;
+		const entries = [user("1", "before"), skill("s", "user", { name: "review", args: "src", prompt: "/skill:review  src" }), wrapped, skill("x", "agent", { name: "no", prompt: "/skill:no" }), user("2", "after")];
+		assert.deepEqual(sessionPrompts(entries), ["before", "/skill:review  src", "/skill:plan ship it", "after"]);
+	});
+
 	it("walks back from an empty draft and forward to the draft it started from", () => {
 		const list = ["one", "two", "three"];
 		let cursor: HistoryCursor | null = null;

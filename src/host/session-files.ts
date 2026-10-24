@@ -13,6 +13,7 @@ import type { Readable } from "node:stream";
 import { createInterface } from "node:readline";
 import * as path from "node:path";
 import { normalizeClaimIdentity } from "./session-claim.ts";
+import { isUserSkillInvocation, skillPromptText } from "../chat/messages.ts";
 
 /** How much of a session file is read to find its JSONL header. */
 const SESSION_HEADER_SCAN_BYTES = 64 * 1024;
@@ -175,13 +176,20 @@ export function parseSessionFileHeader(content: string): SessionFileHeader | nul
 }
 
 function firstPromptTitle(entry: unknown): string | undefined {
-	if (typeof entry !== "object" || entry === null || !("type" in entry) || entry.type !== "message" || !("message" in entry)) return undefined;
-	const message = entry.message;
-	if (typeof message !== "object" || message === null || !("role" in message) || message.role !== "user" || !("content" in message)) return undefined;
-	const content = message.content;
-	const text = typeof content === "string" ? content : Array.isArray(content)
-		? content.filter((part: unknown): part is { type: "text"; text: string } => typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string").map(part => part.text).join(" ")
-		: "";
+	if (typeof entry !== "object" || entry === null || !("type" in entry)) return undefined;
+	let text: string;
+	if (isUserSkillInvocation(entry)) {
+		const details = entry.type === "custom_message" ? ("details" in entry ? entry.details : undefined) : "message" in entry && typeof entry.message === "object" && entry.message !== null && "details" in entry.message ? entry.message.details : undefined;
+		text = skillPromptText(details);
+	} else {
+		if (entry.type !== "message" || !("message" in entry)) return undefined;
+		const message = entry.message;
+		if (typeof message !== "object" || message === null || !("role" in message) || message.role !== "user" || !("content" in message)) return undefined;
+		const content = message.content;
+		text = typeof content === "string" ? content : Array.isArray(content)
+			? content.filter((part: unknown): part is { type: "text"; text: string } => typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string").map(part => part.text).join(" ")
+			: "";
+	}
 	const title = text.replace(/\s+/g, " ").trim();
 	return title.length > 60 ? `${title.slice(0, 59).trimEnd()}…` : title;
 }

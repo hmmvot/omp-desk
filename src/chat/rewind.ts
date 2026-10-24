@@ -8,7 +8,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { isRecord } from "../shared/guards.ts";
-import { entryMessage, isUserSkillInvocation, userSkill, type ChatEntry, type MessageContent } from "./messages.ts";
+import { entryMessage, isUserSkillInvocation, skillPromptText, userSkill, type ChatEntry, type MessageContent } from "./messages.ts";
 import { confirmedClearBoundaryIndex } from "./cleared-history.ts";
 import { toolPresentation } from "./tool-presentation.ts";
 import { projectTranscript, rendersTranscriptEntry, type ProjectedTool } from "./transcript.ts";
@@ -185,15 +185,6 @@ export function isRewindTarget(entry: ChatEntry): boolean {
 	if (!isUserSkillInvocation(entry)) return false;
 	const message = entryMessage(entry);
 	return message?.role === "custom" && userSkill(message) !== null;
-}
-
-/** What the user typed for a skill invocation: OMP's `details.prompt` verbatim, else `/skill:name args` rebuilt from the name and arguments of an entry that kept no prompt. */
-function skillPromptText(details: unknown): string {
-	if (!isRecord(details)) return "";
-	if (typeof details.prompt === "string" && details.prompt.trim().length > 0) return details.prompt;
-	if (typeof details.name !== "string" || details.name.trim().length === 0) return "";
-	const args = typeof details.args === "string" ? details.args.trim() : "";
-	return `/skill:${details.name}${args.length > 0 ? ` ${args}` : ""}`;
 }
 
 /**
