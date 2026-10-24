@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ChatSlashCommand } from "../../../chat/model.ts";
+import { parseCommands } from "../../../protocol/rpc.ts";
 import { commandResolver, findChips, findCommandChips, isBareChip, type ResolveCommand } from "./command-chips.ts";
 import { deletionRange, snapSelection } from "./image-references.ts";
 
@@ -114,4 +116,22 @@ test("the same catalogue gives the same chips whether or not a turn runs: the ho
 	assert.equal(resolve("REWIND"), "command");
 	assert.deepEqual(findCommandChips("/compact x", resolve).map(chip => chip.kind), ["command"]);
 	assert.deepEqual(findCommandChips("see /skill:review now", resolve).map(chip => chip.kind), ["skill"]);
+});
+
+test("the catalogue a real OMP 18.11.1 session advertises (86 skills as `skill:<name>`, nested names, builtins with aliases) draws every skill and command as a chip, once the catalogue has arrived", () => {
+	const wire: unknown[] = JSON.parse(readFileSync(new URL("../../test-support/available-commands-18.11.1.json", import.meta.url), "utf8"));
+	const real = commandResolver(parseCommands(wire));
+	const chips = (text: string, resolver: ResolveCommand = real): [string, string][] => findCommandChips(text, resolver).map(chip => [chip.kind, text.slice(chip.start, chip.end)]);
+	assert.deepEqual(chips("/skill:backlog first look", commandResolver([])), [], "the draft was restored before the session listed its commands: no chip until the catalogue arrives");
+	assert.deepEqual(chips("/skill:backlog first look"), [["skill", "/skill:backlog "]]);
+	for (const [draft, kind, text] of [
+		["/skill:agents/tracker-cli check it", "skill", "/skill:agents/tracker-cli "],
+		["/skill:brainstorm", "skill", "/skill:brainstorm"],
+		["/compact keep files", "command", "/compact "],
+		["/review focus", "command", "/review "],
+		["/security scan", "command", "/security "],
+		["/model gpt", "command", "/model "],
+		["read it with /skill:create-plan now", "skill", "/skill:create-plan "],
+		["/skill:brainstorm ", "skill", "/skill:brainstorm "],
+	] as const) assert.deepEqual(chips(draft), [[kind, text]], draft);
 });

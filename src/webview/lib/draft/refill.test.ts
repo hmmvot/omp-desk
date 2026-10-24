@@ -15,6 +15,7 @@ import { stubPort, type StubPort } from "./draft-test-stub.ts";
 import { captureOf, addRecoverable, dismissLost, dismissRecoverable, restoreHandoff } from "./handoff.ts";
 import { clearText, cleared, insertText, restoreQueued, rewind, setEditorText, spaceInsertion } from "./refill.ts";
 import { withState, type DraftImage } from "./value.ts";
+import { viewOf } from "./view.ts";
 
 const PNG = "iVBORw0KGgo=";
 const image = (number: number): DraftImage => ({ id: number, name: `draft-${number}`, mimeType: "image/png", bytes: 8, data: `bytes-${number}`, number });
@@ -330,5 +331,115 @@ describe("the hand-off", () => {
 		assert.equal(captureOf(cell.read()).documents[0]?.ref, "AbCdEf012345");
 		assert.deepEqual(heldMessage(cell.read()), { text: "[File #1: a.md] x", images: [], lostFiles: 1 });
 		assert.equal(heldMessage(open("   ").cell.read()), null);
+	});
+});
+
+describe("what a Stop hands back (restoreQueued)", () => {
+	it("a message taken back fills an empty composer as it is, with no alert, and is not a send", () => {
+		const { cell, port } = open("");
+		let attach: string | null | undefined;
+		cell.perform(restoreQueued([{ text: "fix the typo", images: [], withdrawn: true }]), WAIT, outcome => { if (outcome.kind === "applied") attach = outcome.result.attach; });
+		assert.equal(cell.read().text, "fix the typo");
+		assert.equal(attach, null);
+		assert.deepEqual(port.calls, ['write text "fix the typo" caret 12 record focus']);
+	});
+
+	it("keeps a typed draft, puts the taken-back message after it and the queued messages after that", () => {
+		const { cell } = open("new draft");
+		cell.perform(restoreQueued([{ text: "fix the typo", images: [], withdrawn: true }, { text: "queued steer", images: [] }]), WAIT);
+		const merged = cell.read().text;
+		assert.equal(merged, "new draft\n\nfix the typo\n\nqueued steer");
+		assert.ok(merged.indexOf("new draft") < merged.indexOf("fix the typo") && merged.indexOf("fix the typo") < merged.indexOf("queued steer"));
+	});
+
+	it("the still-queued messages come back after what is typed, in their queue order", () => {
+		const { cell } = open("typed");
+		cell.perform(restoreQueued([{ text: "queued steer", images: [] }, { text: "queued follow-up", images: [] }]), WAIT);
+		const restored = cell.read().text;
+		assert.ok(restored.startsWith("typed"), restored);
+		assert.ok(restored.indexOf("queued steer") < restored.indexOf("queued follow-up"), restored);
+		assert.equal(restored, "typed\n\nqueued steer\n\nqueued follow-up");
+	});
+});
+
+describe("Undo of the Stop's move (the navigation answer of kind undo)", () => {
+	const undo = (cell: DraftCell): void => cell.perform(rewind({ kind: "undo" }), WAIT);
+
+	it("clears the unedited refill of an empty composer", () => {
+		const { cell } = open("");
+		cell.perform(restoreQueued([{ text: "fix the typo", images: [], withdrawn: true }]), WAIT);
+		assert.equal(cell.read().text, "fix the typo");
+		undo(cell);
+		assert.equal(cell.read().text, "");
+		assert.equal(cell.read().unedited, null);
+	});
+
+	it("leaves a refill the user edited", () => {
+		const { cell } = open("");
+		cell.perform(restoreQueued([{ text: "fix the typo", images: [], withdrawn: true }]), WAIT);
+		cell.edited("fix the typo now");
+		undo(cell);
+		assert.equal(cell.read().text, "fix the typo now");
+	});
+
+	it("leaves a refill that also carries a queued message: the queued one exists nowhere else", () => {
+		const { cell } = open("");
+		cell.perform(restoreQueued([{ text: "fix the typo", images: [], withdrawn: true }, { text: "queued steer", images: [] }]), WAIT);
+		const handed = cell.read().text;
+		assert.ok(handed.includes("queued steer"));
+		undo(cell);
+		assert.equal(cell.read().text, handed);
+	});
+
+	it("never clears a typed draft", () => {
+		const { cell } = open("new draft");
+		cell.perform(restoreQueued([{ text: "fix the typo", images: [], withdrawn: true }]), WAIT);
+		const kept = cell.read().text;
+		assert.ok(kept.includes("fix the typo") && kept.includes("new draft"));
+		undo(cell);
+		assert.equal(cell.read().text, kept);
+	});
+});
+
+describe("Rewind's prompt and the recovery card, as one conversation of the composer", () => {
+	const answer = (text: string) => ({ kind: "rewind" as const, draft: { text, images: [], unavailableImages: 0 } });
+
+	it("a rewound prompt fills an empty composer with no card, Undo takes the unedited prompt back, and a later rewind moves the user's own draft to a card", () => {
+		const { cell, port } = open("");
+		cell.perform(rewind(answer("fix the parser")), WAIT);
+		assert.equal(cell.read().text, "fix the parser");
+		assert.deepEqual(cell.read().recoverable, [], "an empty composer has nothing to keep");
+		assert.deepEqual(port.calls, ['write text "fix the parser" caret 14 reset focus']);
+
+		cell.perform(rewind({ kind: "undo" }), WAIT);
+		assert.equal(cell.read().text, "");
+
+		cell.edited("my own draft");
+		cell.perform(rewind(answer("first prompt\nwith a second line")), WAIT);
+		assert.equal(cell.read().text, "first prompt\nwith a second line");
+		assert.deepEqual(cell.read().recoverable.map(card => ({ reason: card.reason, text: card.text })),
+			[{ reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", text: "my own draft" }], "the earlier draft is kept, not overwritten");
+	});
+});
+
+describe("what Esc Esc may open Rewind over, and what /rewind or /branch typed alone leaves", () => {
+	it("an empty draft is idle; any typed text is a draft Rewind never replaces, and deleting it makes the composer idle again", () => {
+		const { cell } = open("");
+		assert.equal(viewOf(cell.read(), 0).untouched, true);
+		cell.edited("x");
+		assert.equal(viewOf(cell.read(), 0).untouched, false);
+		cell.edited("");
+		assert.equal(viewOf(cell.read(), 0).untouched, true);
+	});
+
+	it("/rewind and /branch typed alone are consumed: the draft is empty and idle again, and nothing was sent", () => {
+		for (const command of ["/rewind", "/branch"]) {
+			const { cell, port } = open(command);
+			assert.equal(viewOf(cell.read(), 0).untouched, false);
+			cell.commit(clearText(cell.read()));
+			assert.equal(cell.read().text, "", `${command} is consumed`);
+			assert.equal(viewOf(cell.read(), 0).untouched, true);
+			assert.deepEqual(port.calls, ['write text "" reset']);
+		}
 	});
 });

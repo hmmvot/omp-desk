@@ -10,6 +10,7 @@ import { createDraftCell, type DraftCell } from "./cell.ts";
 import { stubPort, type StubPort } from "./draft-test-stub.ts";
 import { keyEdit, type KeyContext, type KeyPress } from "./key-edit.ts";
 import { recall } from "./recall.ts";
+import { viewOf } from "./view.ts";
 import { withState } from "./value.ts";
 
 function open(text: string): { cell: DraftCell; port: StubPort } {
@@ -74,6 +75,46 @@ describe("keys inside a fenced code block", () => {
 	it("a caret outside any block is not in one", () => {
 		const { cell } = open("plain text");
 		assert.deepEqual(keyEdit(cell.read(), { anchor: 3, focus: 3 }, press("Enter"), idle), { claimed: false, inBlock: false });
+	});
+
+	it("Enter after an opening fence supplies the closing one and rests between them, and the supplied fence is one block edit", () => {
+		const { cell, port } = open("Look:\n```ts");
+		const claim = keyEdit(cell.read(), { anchor: 11, focus: 11 }, press("Enter"), idle);
+		assert.equal(claim.claimed, true);
+		if (claim.claimed && claim.change !== null) cell.commit(claim.change);
+		assert.equal(cell.read().text, "Look:\n```ts\n\n```");
+		assert.equal(port.calls.filter(call => call.startsWith("write")).length, 1, "one write is one native undo step");
+		assert.deepEqual(port.selected, { anchor: 12, focus: 12 });
+	});
+
+	it("Tab and Shift+Tab work on a selection of lines and every line is indented or outdented as one edit; a fence line stays put", () => {
+		const original = "```\na\n    b\n\nc\n```";
+		const { cell, port } = open(original);
+		const run = (key: KeyPress, anchor: number, focus: number): void => {
+			const claim = keyEdit(cell.read(), { anchor, focus }, key, idle);
+			assert.equal(claim.claimed, true);
+			if (claim.claimed && claim.change !== null) cell.commit(claim.change);
+		};
+		run(press("Tab"), 4, 14);
+		assert.equal(cell.read().text, "```\n    a\n        b\n\n    c\n```");
+		assert.deepEqual(port.selected, { anchor: 4, focus: 26 });
+		run(press("Tab", { shiftKey: true }), 4, 26);
+		assert.equal(cell.read().text, original, "one outdent undoes one indent, line for line");
+		const claim = keyEdit(cell.read(), { anchor: 2, focus: 2 }, press("Tab"), idle);
+		assert.equal(claim.claimed, true, "Tab on a fence line is claimed so it does not leave the field");
+		assert.equal(claim.claimed && claim.change, null, "and changes nothing");
+		assert.equal(cell.read().text, original);
+	});
+
+	it("Enter keeps the indentation of an indented line inside the block", () => {
+		assert.deepEqual(after("```\n  x\n```", press("Enter"), 7), { text: "```\n  x\n  \n```", caret: 10 });
+	});
+
+	it("Shift+Enter and Alt+Enter inside a block are newlines, and a selection that straddles a fence leaves Enter to send", () => {
+		const text = "a\n```\nb\n```";
+		assert.deepEqual(after(text, press("Enter", { shiftKey: true }), 7), { text: "a\n```\nb\n\n```", caret: 8 });
+		assert.deepEqual(after(text, press("Enter", { altKey: true }), 7), { text: "a\n```\nb\n\n```", caret: 8 });
+		assert.deepEqual(keyEdit(open(text).cell.read(), { anchor: 0, focus: 8 }, press("Enter"), idle), { claimed: false, inBlock: false });
 	});
 });
 
@@ -180,5 +221,65 @@ describe("recall", () => {
 		cell.commit(recall(cell.read(), [sent], "newer", false)!);
 		assert.deepEqual(cell.read().documents, []);
 		assert.equal(cell.read().next.document, 1);
+	});
+});
+
+/** The key press the page turns into a step: `held` is what the cell reports at that moment. */
+function step(cell: DraftCell, prompts: readonly string[], direction: "older" | "newer"): boolean {
+	const change = recall(cell.read(), prompts, direction, cell.getState().held);
+	if (change === null) return false;
+	cell.commit(change);
+	return true;
+}
+
+
+describe("prompt-history recall (Up and Down in the composer)", () => {
+	const prompts = ["first prompt", "second prompt"];
+
+	it("the oldest prompt is the end of the walk, Down returns through the newer ones to the empty draft, and a typed draft is never replaced", () => {
+		const { cell } = open("");
+		assert.equal(step(cell, prompts, "older"), true);
+		assert.equal(cell.read().text, "second prompt");
+		assert.equal(step(cell, prompts, "older"), true);
+		assert.equal(cell.read().text, "first prompt");
+		assert.equal(step(cell, prompts, "older"), false, "the oldest prompt is the end of the walk");
+		assert.equal(cell.read().text, "first prompt");
+		assert.equal(step(cell, prompts, "newer"), true);
+		assert.equal(cell.read().text, "second prompt");
+		assert.equal(step(cell, prompts, "newer"), true);
+		assert.equal(cell.read().text, "");
+		assert.equal(cell.read().walk, null);
+		cell.edited("typed draft");
+		assert.equal(step(cell, prompts, "older"), false, "a typed draft is never replaced");
+		assert.equal(cell.read().text, "typed draft");
+	});
+
+	it("a recalled prompt that wraps over several rows is placed whole with the caret at its end; the walk does not depend on the row the caret was on", () => {
+		const long = Array.from({ length: 60 }, (_, index) => `word${index}`).join(" ");
+		const { cell, port } = open("");
+		const list = ["first prompt", long];
+		assert.equal(step(cell, list, "older"), true);
+		assert.equal(cell.read().text, long);
+		assert.deepEqual(port.calls, [`write text ${JSON.stringify(long)} caret ${long.length} record focus`]);
+		assert.equal(step(cell, list, "older"), true);
+		assert.equal(cell.read().text, "first prompt");
+		assert.equal(step(cell, list, "newer"), true);
+		assert.equal(cell.read().text, long);
+		assert.equal(step(cell, list, "newer"), true);
+		assert.equal(cell.read().text, "");
+	});
+
+	it("while the hand-off holds the draft the arrow changes nothing: no recalled prompt hides in the draft the release gives back", () => {
+		const { cell } = open("");
+		assert.notEqual(cell.capture(71), null);
+		assert.equal(cell.getState().held, true);
+		assert.equal(step(cell, prompts, "older"), false);
+		assert.equal(cell.read().text, "");
+		assert.equal(cell.read().walk, null);
+		assert.equal(viewOf(cell.read(), 0).hasContent, false, "nothing is behind the empty field that a send would carry");
+		assert.equal(cell.release(71), true);
+		assert.equal(cell.read().text, "");
+		assert.equal(cell.read().walk, null);
+		assert.equal(viewOf(cell.read(), 0).hasContent, false, "after the release too");
 	});
 });

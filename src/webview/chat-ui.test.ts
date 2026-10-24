@@ -16,7 +16,7 @@ import type { ChatEntry } from "../chat/messages.ts";
 import { CLEAR_MARKER_TYPE } from "../chat/clear.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview } from "../chat/rewind.ts";
 import { composeFileBlocks, fileMarker, splitFileBlocks } from "../shared/file-blocks.ts";
-import { REWIND_ARGUMENTS_SENTENCE, parseCommands } from "../protocol/rpc.ts";
+import { REWIND_ARGUMENTS_SENTENCE } from "../protocol/rpc.ts";
 import { MAX_PAINTED } from "./lib/find-dom.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
@@ -3852,55 +3852,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Tab and Shift+Tab work on a selection of lines, fence lines stay put, and every key is one native Undo step", async () => {
-			await reset("code-block-selection");
-			const ORIGINAL = "```\na\n    b\n\nc\n```";
-			await setDraft(ORIGINAL);
-			await setSelection(4, 14);
-			await tab();
-			const indented = "```\n    a\n        b\n\n    c\n```";
-			assert.deepEqual(await areaState(), { value: indented, start: 4, end: 26, focused: true });
-			await tab(8);
-			assert.deepEqual(await areaState(), { value: ORIGINAL, start: 4, end: 14, focused: true });
-			await undo();
-			await ui.wait(`window.composer.value()===${JSON.stringify(indented)}`);
-			await undo();
-			await ui.wait(`window.composer.value()===${JSON.stringify(ORIGINAL)}`);
-			// Tab on a fence line changes nothing and does not leave.
-			await setSelection(2, 2);
-			await tab();
-			assert.deepEqual(await areaState(), { value: ORIGINAL, start: 2, end: 2, focused: true });
-			// Enter inside the block is one undo step.
-			await setDraft("```\n  x\n```");
-			await setSelection(7, 7);
-			await press("Enter", "Enter", 13);
-			await ui.wait("window.composer.value()==='```\\n  x\\n  \\n```'");
-			await undo();
-			await ui.wait("window.composer.value()==='```\\n  x\\n```'");
-			// So is the supplied closing fence.
-			await setDraft("```ts");
-			await press("Enter", "Enter", 13);
-			await ui.wait("window.composer.value()==='```ts\\n\\n```'");
-			await undo();
-			await ui.wait("window.composer.value()==='```ts'");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("Shift+Enter and Alt+Enter inside a block are newlines, and a selection that straddles a fence keeps Enter sending", async () => {
-			await reset("code-block-modifiers");
-			await setDraft("a\n```\nb\n```");
-			await setSelection(7, 7);
-			await press("Enter", "Enter", 13, { modifiers: 8 });
-			assert.deepEqual(await areaState(), { value: "a\n```\nb\n\n```", start: 8, end: 8, focused: true });
-			await press("Enter", "Enter", 13, { modifiers: 1 });
-			assert.deepEqual(await areaState(), { value: "a\n```\nb\n\n\n```", start: 9, end: 9, focused: true });
-			assert.equal(await sendCount(), 0, "neither sends");
-			await setSelection(0, 8);
-			await press("Enter", "Enter", 13);
-			await ui.wait("window.ui.sends().length===1");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		await t.test("an IME composition leaves Enter and Tab inside a block alone", async () => {
 			await reset("code-block-ime");
 			await setDraft("```\nab\n```");
@@ -4880,36 +4831,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("a 4 MB image attaches and sends whole; an image over 5 MiB and a prompt over 10 MiB are refused by size, naming the limit", async () => {
-			await reset("image-limits");
-			await ui.evaluate(`(()=>{
-			 window.pasteBytes=(size,name)=>{const bytes=new Uint8Array(size);bytes.set([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
-			  const data=new DataTransfer();data.items.add(new File([bytes],name,{type:'image/png'}));
-			  window.composer.focus();
-			  window.composer.el().dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
-			})()`);
-			const MiB = 1024 * 1024;
-			await ui.evaluate(`window.pasteBytes(${4 * MiB},'screenshot-4mb.png')`);
-			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===1");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error')"), null, "a 4 MB screenshot is not refused");
-			await ui.evaluate(`window.pasteBytes(${5 * MiB + 1},'huge.png')`);
-			await ui.wait("document.querySelector('.omp-attach-error')");
-			assert.match(await ui.evaluate<string>("document.querySelector('.omp-attach-error').textContent"), /huge\.png/);
-			assert.deepEqual(await strip(), ["#1"]);
-			await ui.evaluate(`window.pasteBytes(${4 * MiB},'second.png')`);
-			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===2");
-			await ui.evaluate(`window.pasteBytes(${4 * MiB},'third.png')`);
-			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('third.png')");
-			assert.deepEqual(await strip(), ["#1", "#2"]);
-			await ui.evaluate("window.ui.admission(true);window.composer.focus()");
-			await ui.call("Input.insertText", { text: "look" });
-			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
-			await ui.wait("window.ui.sends().length===1");
-			const sent = await ui.evaluate<{ images: { data: string }[] }>("window.ui.sends()[0]");
-			assert.deepEqual(sent.images.map(image => image.data.length), [Math.ceil((4 * MiB) / 3) * 4, Math.ceil((4 * MiB) / 3) * 4], "both images travel whole");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		const dropOn = (target: string, type: string, items: string): Promise<{ prevented: boolean }> =>
 			ui.evaluate(`(()=>{const data=new DataTransfer();${items};
 			 const event=new DragEvent(${JSON.stringify(type)},{dataTransfer:data,bubbles:true,cancelable:true});
@@ -5125,52 +5046,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("uncertain admission preserves the original images and recovers into an edited draft without overwrite or automatic retry", async () => {
-			await buildDraft("send-admission-recover");
-			await ui.evaluate("window.ui.admission(false);document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
-			await ui.wait("window.ui.sends().length===1");
-			await setSelection(0, FIRST.length);
-			await ui.call("Input.insertText", { text: "New draft" });
-			await ui.evaluate("window.fixtureClock.fire(45000)");
-			await ui.wait("document.querySelector('[aria-label=\"Dismiss recoverable message\"]')");
-			assert.equal(await draftValue(), "New draft");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error details pre').textContent"), FIRST);
-			await ui.evaluate("window.fixtureClock.fire(6000);window.fixtureClock.fire(45000);window.ui.push({epoch:{nonce:'host-ui-test',counter:2}})");
-			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Dismiss recoverable message\"]').length"), 1, "the notice survives time and reconciliation");
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 1, "uncertain delivery is never retried automatically");
-			await ui.evaluate("[...document.querySelectorAll('.omp-attach-error button')].find(button=>button.textContent==='Add to draft').click()");
-			await ui.wait("window.composer.value().includes('A [Image #4, 10x6]')");
-			assert.equal(await draftValue(), "New draft\n\nA [Image #4, 10x6] B [Image #5, 20x8] C [Image #6, 30x9] D");
-			assert.deepEqual(await strip(), ["#4", "#5", "#6"]);
-			await ui.evaluate("document.querySelector('[aria-label=\"Dismiss recoverable message\"]').click()");
-			await ui.wait("!document.querySelector('[aria-label=\"Dismiss recoverable message\"]')");
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 1);
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("a refused edited send retains the original while an unchanged uncertain draft is not duplicated by recovery", async () => {
-			await reset("send-admission-refused");
-			await ui.evaluate("window.ui.admission(false);window.composer.focus()");
-			await ui.call("Input.insertText", { text: "Refused original" });
-			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
-			await setSelection(0, "Refused original".length);
-			await ui.call("Input.insertText", { text: "New work" });
-			await ui.evaluate("window.ui.sendReply(undefined,'refused','Not admitted')");
-			await ui.wait("document.querySelector('[aria-label=\"Dismiss recoverable message\"]')");
-			assert.equal(await draftValue(), "New work");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error details pre').textContent"), "Refused original");
-			await reset("send-admission-held");
-			await ui.evaluate("window.ui.admission(false);window.composer.focus()");
-			await ui.call("Input.insertText", { text: "Still held" });
-			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click();window.ui.sendReply(undefined,'unconfirmed','Delivery unknown')");
-			await ui.wait("document.querySelector('[aria-label=\"Dismiss recoverable message\"]')");
-			await ui.evaluate("[...document.querySelectorAll('.omp-attach-error button')].find(button=>button.textContent==='Add to draft').click()");
-			assert.equal(await draftValue(), "Still held");
-			assert.equal(await ui.evaluate("window.composer.focused()"), true);
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 1);
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		await t.test("a complete capture freezes current, pending and recovery text through late admission and releases only its token", async () => {
 			await buildDraft("capture-input");
 			await ui.evaluate("window.ui.admission(false);document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
@@ -5243,44 +5118,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Dismiss recoverable message\"]').length"), 2);
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
 			assert.ok(await ui.evaluate("window.sent.some(message=>message.type==='omp:draft-restored'&&message.requestId===720)"));
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("late accepted admission does not clear edits undone back to the original image draft", async () => {
-			await buildDraft("send-admission-undo");
-			await ui.evaluate("window.ui.admission(false);document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
-			await ui.wait("window.ui.sends().length===1");
-			await ui.evaluate("document.querySelector('.omp-attachment[data-image-number=\"2\"] .omp-attachment-remove').click()");
-			await press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
-			await ui.wait(`window.composer.value()===${JSON.stringify(FIRST)}`);
-			await ui.evaluate("window.ui.sendReply()");
-			await ui.wait("!document.querySelector('button[aria-keyshortcuts=\"Enter\"]').disabled");
-			assert.equal(await draftValue(), FIRST);
-			assert.deepEqual(await strip(), ["#1", "#2", "#3"]);
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 1);
-		});
-
-		await t.test("send puts the markers in the text and the images on the wire in the same order, densely renumbered; numbering restarts for the next draft", async () => {
-			await buildDraft("image-refs-send");
-			const [, second] = await markers();
-			await setSelection(second!.end, second!.end);
-			await ui.wait(`window.composer.selection().start===${second!.end}`);
-			await press("Backspace", "Backspace", 8, { commands: ["deleteBackward"] });
-			await ui.wait("!window.composer.value().includes('[Image #2')");
-			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
-			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt')");
-			const sent = await ui.evaluate<{ text: string; images: { type: string; mimeType: string; data: string }[] }>("window.sent.find(message=>message.type==='omp:chat-prompt')");
-			assert.equal(sent.text, "A [Image #1, 10x6] B  C [Image #2, 30x9] D", "markers are renumbered 1..K, the deleted one is gone");
-			const pasted = await ui.evaluate<string[]>("window.pasted");
-			assert.deepEqual(sent.images.map(image => image.data), [pasted[0], pasted[2]], "image K is the image behind marker K");
-			assert.ok(sent.images.every(image => image.type === "image" && image.mimeType === "image/png"));
-			await ui.wait("window.composer.value()===''");
-			// The strip is drawn from the cell's value in the render that follows the field's own change: wait for it instead of reading it in the same turn as the field.
-			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===0");
-			assert.deepEqual(await strip(), []);
-			await installImages();
-			await pasteImage(7, 5, "[Image #1, 7x5]");
-			assert.deepEqual(await strip(), ["#1"], "a new draft starts again at #1");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -5788,69 +5625,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		// Typed key by key at idle with the catalogue a real OMP lists: a builtin `reload-plugins`, a prompt-template file command `report` and skills.
-		const REAL_COMMANDS = "[{name:'compact',source:'builtin',description:'Compact the context'},{name:'reload-plugins',source:'builtin',description:'Reload all plugins'},{name:'skill:omp-desk-bug-triage',source:'skill',description:'Use to triage and research OMP Desk bugs and write a report'},{name:'skill:omp-desk-release',source:'skill',description:'Release a new OMP Desk version'},{name:'report',source:'file',description:'Pause, report progress and next step, then resume'},{name:'skill:report-writer',source:'skill',description:'Write a report'}]";
-		const typeNames = async (text: string): Promise<{ typed: string; labels: string[]; selected: string[]; chips: string[] }[]> => {
-			const seen = [];
-			for (const char of text) {
-				await typeKey(char);
-				await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
-				await settleFrames();
-				seen.push({ typed: await draftValue(), ...(await slashRows()), chips: (await commandChips()).map(chip => chip.text) });
-			}
-			return seen;
-		};
-		await t.test("typed key by key at idle, /report (a file command) keeps its list open at every length, first and selected at the full name and a chip, with the skills below it", async () => {
-			await reset("chips-real-report");
-			await ui.evaluate(`window.ui.push({commands:${REAL_COMMANDS},working:false});window.composer.focus()`);
-			const seen = await typeNames("/report");
-			for (const step of seen) assert.ok(step.labels.length > 0, `the list is open after ${JSON.stringify(step.typed)}`);
-			const full = seen.at(-1)!;
-			assert.deepEqual(full.labels, ["/report", "/skill:report-writer"], "the exact file command is first, the skill whose name contains it follows");
-			assert.deepEqual(full.selected, ["/report"]);
-			assert.deepEqual(full.chips, ["/report"]);
-			assert.deepEqual(seen.slice(0, -1).map(step => step.chips), [[], [], [], [], [], []], "no prefix is a chip");
-			assert.deepEqual(seen[2]!.labels, ["/rewind", "/fresh", "/reload-plugins", "/report", "/skill:omp-desk-release", "/skill:report-writer"], "at /re every command is listed above every skill (a name without `re`, such as the bug-triage skill, is not listed)");
-			await typeKey("s");
-			await waitDraft("window.composer.value()==='/reports'");
-			await settleFrames();
-			assert.deepEqual([(await commandChips()).length, (await slashRows()).labels.length], [0, 0], "nothing matches /reports");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("typed key by key at idle, /reload reaches OMP's /reload-plugins: the row is in the list at /rel, /reloa and /reload, and /reload-plugins is the exact chip", async () => {
-			await reset("chips-real-reload");
-			await ui.evaluate(`window.ui.push({commands:${REAL_COMMANDS},working:false});window.composer.focus()`);
-			const seen = await typeNames("/reload");
-			for (const step of seen.slice(1)) assert.ok(step.labels.includes("/reload-plugins"), `/reload-plugins is listed after ${JSON.stringify(step.typed)}`);
-			assert.deepEqual(seen.at(-1)!.labels, ["/reload-plugins"]);
-			assert.deepEqual(seen.at(-1)!.chips, [], "/reload is only a prefix, so it is text");
-			for (const char of "-plugins") await typeKey(char);
-			await waitDraft("window.composer.value()==='/reload-plugins'");
-			await waitChips(1);
-			assert.deepEqual(await slashRows(), { labels: ["/reload-plugins"], selected: ["/reload-plugins"] });
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("a skill is a chip mid-text exactly where OMP invokes it: the first valid token, not after another command or a shell sigil, not an unknown skill", async () => {
-			await chipSetup("chips-mid-text");
-			await setDraft("please /skill:review the file");
-			await waitChips(1);
-			assert.deepEqual([(await commandChips())[0]!.label, await ui.evaluate("document.querySelector('.omp-chip[data-kind=\"skill\"]').previousSibling.data")], ["Skill review", "please "]);
-			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
-			await setDraft("a /skill:other b /skill:review c");
-			await waitDraft("window.composer.value()==='a /skill:other b /skill:review c'");
-			await waitChips(1);
-			assert.equal((await commandChips())[0]!.label, "Skill other", "only the first token is invoked");
-			for (const text of ["a /skill:nope b /skill:review c", "/compact do /skill:review x", "!ls /skill:review x", "a/skill:review b"]) {
-				await setDraft(text);
-				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
-				await settleFrames();
-				assert.deepEqual((await commandChips()).filter(chip => chip.kind === "skill"), [], `${JSON.stringify(text)}: OMP does not invoke a skill here`);
-			}
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		const MID_COMMANDS = "[{name:'compact',source:'builtin'},{name:'skill:ask-matt',source:'skill',description:'Ask Matt'},{name:'skill:agents/jira-cli',source:'skill',aliases:['jira']},{name:'skill:review',source:'skill'},{name:'skill:other',source:'skill'}]";
 		const typeSteps = async (text: string): Promise<{ typed: string; labels: string[]; selected: string[]; chips: string[] }[]> => {
 			const seen = [];
@@ -5921,43 +5695,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await press("Enter", "Enter", 13);
 			await ui.wait("window.ui.sends().length===1");
 			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "see /skill:other", "the text sent is the draft");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("typed mid-text, a path, a URL and a lone slash never open the list; a token opens it only while a skill matches, and it closes at the character after which none does", async () => {
-			await chipSetup("chips-mid-paths");
-			await ui.evaluate(`window.ui.push({commands:${MID_COMMANDS}})`);
-			for (const text of ["see src/app.ts", "a/b and c/skill:x", "http://x.dev/skill:rev", "open /usr/local/bin", "fix this / and that", "mail x.dev/ask", "ping //ask-", "see /src/app.ts", "see /ask/x/y.ts", "see /ask:x"]) {
-				await setDraft("");
-				await waitDraft("window.composer.value()===''");
-				for (const char of text) {
-					await ui.call("Input.insertText", { text: char });
-					await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
-					await settleFrames();
-					const value = await draftValue();
-					// `/s`, `/a`, `/as` and `/ask` match the skills (`skill:…`, `ask-matt`, `agents/…`), so they list them; the next character of a path closes the list.
-					if (!/\s\/(?:s|a|as|ask)$/.test(value)) assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no list after ${JSON.stringify(value)}`);
-				}
-				assert.equal(await draftValue(), text);
-				assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"],[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no list at the end`);
-			}
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("mid-text, no list opens where OMP would not invoke a skill: after a leading command, a shell sigil or an earlier skill token", async () => {
-			await chipSetup("chips-mid-gates");
-			for (const [text, listed] of [["/compact do /sk", false], ["!ls /sk", false], ["$ echo /sk", false], ["a /skill:other b /sk", false], ["a /skill:nope b /sk", false], ["${HOME} /sk", true]] as const) {
-				await setDraft("");
-				await waitDraft("window.composer.value()===''");
-				for (const char of text) {
-					await ui.call("Input.insertText", { text: char });
-					await waitDraft(`window.composer.value().endsWith(${JSON.stringify(char)})`);
-				}
-				await settleFrames();
-				assert.equal(await draftValue(), text);
-				assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Skills\"]')!==null"), listed, `${JSON.stringify(text)}: the list agrees with the chip rule`);
-				assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]')"), null, `${JSON.stringify(text)}: no command is listed mid-text`);
-			}
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -6112,42 +5849,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("while a turn runs a command and a skill are chips as when idle, because the host sends both as a prompt (OMP's terminal UI does) and the text sent is unchanged", async () => {
-			await chipSetup("chips-working");
-			await setDraft("/skill:review x");
-			await waitChips(1);
-			await ui.evaluate("window.ui.push({working:true})");
-			await settleFrames();
-			assert.equal((await commandChips())[0]!.label, "Skill review", "a skill invocation reaches OMP as a prompt whatever the turn is doing");
-			assert.equal(await draftValue(), "/skill:review x", "the draft is the same text");
-			await setDraft("please run /skill:review on it");
-			await waitDraft("window.composer.value()==='please run /skill:review on it'");
-			await waitChips(1);
-			await setDraft("/compact x");
-			await waitDraft("window.composer.value()==='/compact x'");
-			await waitChips(1);
-			assert.equal((await commandChips())[0]!.label, "Command compact", "a builtin is sent as a prompt during a turn too");
-			await setDraft("/clear x");
-			await waitDraft("window.composer.value()==='/clear x'");
-			await waitChips(1);
-			assert.equal((await commandChips())[0]!.label, "Command clear", "Chat answers its own commands whatever the turn is doing");
-			await setDraft("/CLEAR x");
-			await waitDraft("window.composer.value()==='/CLEAR x'");
-			await waitChips(1);
-			for (const text of ["/foo x", "/usr/bin/x now", "/Compact x"]) {
-				await setDraft(text);
-				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
-				await settleFrames();
-				assert.deepEqual(await commandChips(), [], `${text} stays text during a turn`);
-			}
-			await setDraft("/compact keep files");
-			await waitChips(1);
-			await press("Enter", "Enter", 13);
-			await ui.wait("window.ui.sends().length===1");
-			assert.deepEqual(await ui.evaluate("(({type,text})=>({type,text}))(window.ui.sends()[0])"), { type: "omp:chat-steer", text: "/compact keep files" }, "the page still posts a steer with the draft unchanged; the host picks the command");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		await t.test("a quote beside a chip, an IME composition next to it and a send leave the chip and the text intact", async () => {
 			await chipSetup("chips-neighbours");
 			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -6187,46 +5888,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			} finally {
 				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
 			}
-		});
-
-		await t.test("the catalogue a real OMP 18.11.1 session advertises (86 skills as `skill:<name>`, nested names, builtins with aliases) draws every skill and command as a chip", async () => {
-			const wire: unknown[] = JSON.parse(readFileSync(new URL("./test-support/available-commands-18.11.1.json", import.meta.url), "utf8"));
-			const real = JSON.stringify(parseCommands(wire));
-			await reset("chips-real-catalogue");
-			// The draft was restored before the session listed its commands: no chip until the catalogue arrives.
-			await ui.evaluate("window.composer.focus()");
-			await setDraft("/skill:backlog first look");
-			await settleFrames();
-			assert.deepEqual(await commandChips(), []);
-			await ui.evaluate(`window.ui.push({commands:${real}})`);
-			await waitChips(1);
-			assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [["skill", "/skill:backlog "]]);
-			for (const [draft, kind, text] of [
-				["/skill:agents/tracker-cli check it", "skill", "/skill:agents/tracker-cli "],
-				["/skill:brainstorm", "skill", "/skill:brainstorm"],
-				["/compact keep files", "command", "/compact "],
-				["/review focus", "command", "/review "],
-				["/security scan", "command", "/security "],
-				["/model gpt", "command", "/model "],
-				["read it with /skill:create-plan now", "skill", "/skill:create-plan "],
-			] as const) {
-				await setDraft(draft);
-				await waitDraft(`window.composer.value()===${JSON.stringify(draft)}`);
-				await settleFrames();
-				assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [[kind, text]], draft);
-			}
-			// Picked from the list, typed by hand: the same chip.
-			await setDraft("");
-			await ui.call("Input.insertText", { text: "/skill:back" });
-			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
-			await press("Tab", "Tab", 9);
-			await waitDraft("window.composer.value()==='/skill:backlog '");
-			await waitChips(1);
-			await setDraft("");
-			await ui.call("Input.insertText", { text: "/skill:brainstorm " });
-			await waitChips(1);
-			assert.deepEqual((await commandChips()).map(chip => [chip.kind, chip.text]), [["skill", "/skill:brainstorm "]]);
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("the chip follows the theme in both colour schemes", async () => {
@@ -6982,30 +6643,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Up and Down on an empty draft walk the conversation's prompts and Down past the newest restores the draft", async () => {
-			await reset("quick-history");
-			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
-			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]}),
-			  row('u2',{role:'user',timestamp:3,content:'second prompt'}),row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:4,working:false,settled:true});
-			 window.composer.focus()`);
-			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('second prompt')");
-			await press("ArrowUp", "ArrowUp", 38);
-			await ui.wait("window.composer.value()==='second prompt'");
-			await press("ArrowUp", "ArrowUp", 38);
-			await ui.wait("window.composer.value()==='first prompt'");
-			await press("ArrowUp", "ArrowUp", 38);
-			assert.equal(await draftValue(), "first prompt", "the oldest prompt is the end of the walk");
-			await press("ArrowDown", "ArrowDown", 40);
-			await ui.wait("window.composer.value()==='second prompt'");
-			await press("ArrowDown", "ArrowDown", 40);
-			await ui.wait("window.composer.value()===''");
-			await ui.call("Input.insertText", { text: "typed draft" });
-			await press("ArrowUp", "ArrowUp", 38);
-			assert.equal(await draftValue(), "typed draft", "a typed draft is never replaced");
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		await t.test("Up recalls a skill invocation between two messages as typed, and the skill chip forms from it", async () => {
 			await reset("history-skill-invocation");
 			// OMP stores a typed skill invocation as a `skill-prompt` entry attributed to the user, not as a user message.
@@ -7021,24 +6658,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("window.composer.value()==='/skill:docs-review the changelog'");
 			await press("ArrowUp", "ArrowUp", 38);
 			await ui.wait("window.composer.value()==='first prompt'");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("Up while the hand-off holds the draft changes nothing: no recalled prompt hides in the draft the release gives back", async () => {
-			await reset("history-while-held");
-			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
-			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:2,working:false,settled:true});
-			 window.composer.focus()`);
-			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('first prompt')");
-			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:71})");
-			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===71&&message.captured===true)");
-			await press("ArrowUp", "ArrowUp", 38);
-			await settleFrames();
-			assert.equal(await draftValue(), "", "the field shows the empty draft");
-			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').disabled"), true, "and nothing is behind it that a send would carry");
-			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:71})");
-			await ui.wait("!window.composer.readOnly()");
-			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').disabled"), true, "after the release too");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -7083,23 +6702,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Stop hands the still-queued messages back into the draft, after what is typed, and says when some could not come back", async () => {
-			await reset("quick-stop-restore");
-			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});window.composer.focus()");
-			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
-			await ui.call("Input.insertText", { text: "typed" });
-			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click()");
-			await ui.wait("window.sent.some(message=>message.type==='omp:chat-abort')");
-			await ui.evaluate(`const abort=window.sent.find(message=>message.type==='omp:chat-abort');
-			 window.ui.receive({type:'omp:chat-abort-result',epoch:window.ui.current().epoch,requestId:abort.requestId,status:'accepted',entries:[{text:'queued steer'},{text:'queued follow-up'}],truncated:true})`);
-			await ui.wait("window.composer.value().includes('queued follow-up')");
-			const restored = await draftValue();
-			assert.ok(restored.startsWith("typed") && restored.indexOf("queued steer") < restored.indexOf("queued follow-up"), restored);
-			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('could not hand back every queued message')");
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "restored messages are not sent");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
 		// A Stop that takes the message back (ADR-0082): the answer carries `withdrawn` or `kept`.
 		const stopWithAnswer = async (answer: Record<string, unknown>, typed?: string): Promise<void> => {
 			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});window.composer.focus()");
@@ -7111,7 +6713,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 window.ui.receive({type:'omp:chat-abort-result',epoch:window.ui.current().epoch,requestId:abort.requestId,status:'accepted',entries:[],...${JSON.stringify(answer)}})`);
 		};
 		const stopNotice = (): Promise<string | null> => ui.evaluate("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"] .omp-notice-description')?.textContent ?? null");
-		const undoAnswer = (): Promise<unknown> => ui.evaluate(`window.ui.receive({type:'omp:chat-navigate-result',requestId:'${"0".repeat(32)}',status:'done',kind:'undo',summarized:false})`);
 
 		await t.test("Stop takes a message back into an empty composer and says so; the abort asks for it", async () => {
 			await reset("stop-withdraw-empty");
@@ -7121,16 +6722,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
 			assert.equal(await stopNotice(), "Stopped. Your message is back in the composer.");
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "the message is not sent again");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("Stop keeps a typed draft, puts the taken-back message after it and the queued messages after that", async () => {
-			await reset("stop-withdraw-draft");
-			await stopWithAnswer({ withdrawn: { text: "fix the typo" }, entries: [{ text: "queued steer" }] }, "new draft");
-			await ui.wait("window.composer.value().includes('queued steer')");
-			const merged = await draftValue();
-			assert.ok(merged.startsWith("new draft") && merged.indexOf("new draft") < merged.indexOf("fix the typo") && merged.indexOf("fix the typo") < merged.indexOf("queued steer"), merged);
-			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -7150,45 +6741,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("window.composer.value()==='fix the typo'");
 			await ui.wait("document.querySelector('.omp-notice[data-notice=\"stop-withdraw\"]')");
 			assert.equal(await stopNotice(), "Stopped. Your message is back in the composer. OMP did not confirm taking it out of the conversation, so it may still be there.");
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("Undo of the Stop's move clears the unedited refill, never an edited one, a typed draft, or a refill that carries queued messages", async () => {
-			// An unedited refill of an empty composer goes.
-			await reset("stop-withdraw-undo");
-			await stopWithAnswer({ withdrawn: { text: "fix the typo" } });
-			await ui.wait("window.composer.value()==='fix the typo'");
-			await undoAnswer();
-			await ui.wait("window.composer.value()===''");
-
-			// A refill the user edited stays.
-			await reset("stop-withdraw-undo-edited");
-			await stopWithAnswer({ withdrawn: { text: "fix the typo" } });
-			await ui.wait("window.composer.value()==='fix the typo'");
-			await ui.evaluate("window.composer.focus()");
-			await ui.call("Input.insertText", { text: " now" });
-			await ui.wait("window.composer.value()==='fix the typo now'");
-			await undoAnswer();
-			await settleFrames();
-			assert.equal(await draftValue(), "fix the typo now");
-
-			// A refill that also carries a queued message stays: the queued one exists nowhere else.
-			await reset("stop-withdraw-undo-queued");
-			await stopWithAnswer({ withdrawn: { text: "fix the typo" }, entries: [{ text: "queued steer" }] });
-			await ui.wait("window.composer.value().includes('queued steer')");
-			const handed = await draftValue();
-			await undoAnswer();
-			await settleFrames();
-			assert.equal(await draftValue(), handed);
-
-			// A typed draft is never cleared.
-			await reset("stop-withdraw-undo-typed");
-			await stopWithAnswer({ withdrawn: { text: "fix the typo" } }, "new draft");
-			await ui.wait("window.composer.value().includes('fix the typo')");
-			const kept = await draftValue();
-			await undoAnswer();
-			await settleFrames();
-			assert.equal(await draftValue(), kept);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -7724,51 +7276,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await closed();
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-abort').length"), 0);
 			assert.deepEqual(await navigations(), []);
-			assert.deepEqual(await ui.evaluate("window.errors"), []);
-		});
-
-		await t.test("a rewound prompt fills an empty composer, a typed draft moves to a recovery card, and Undo returns and takes the unedited prompt back", async () => {
-			await reset("rewind-draft");
-			await pushRewind();
-			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
-			await startFromRow(1);
-			await press("Enter", "Enter", 13);
-			await ui.wait("window.sent.some(message=>message.type==='omp:chat-navigate')");
-			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "fix the parser", images: [], unavailableImages: 0 } });
-			await ui.wait("window.composer.value()==='fix the parser' && !document.querySelector('.omp-rewind-bar')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error')"), null, "an empty composer has nothing to keep");
-			// OMP's rewound branch: the target's parent, then the marker, which is the leaf.
-			const marker = { type: "custom", id: "m1", parentId: "a1", timestamp: rewindAt(9), customType: "omp-desk/navigation",
-				data: { v: 1, requestId: "0123456789abcdef0123456789abcdef", kind: "rewind", from: "a2", target: "u2", to: "a1", summarized: false } };
-			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1" });
-			await ui.wait("document.querySelector('.omp-rewind-bar--undo')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--undo').textContent"), "RewoundUndo");
-			// A prompt sent from here moves the conversation on: the bar goes at once, not when the turn is saved.
-			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1", working: true });
-			await ui.wait("!document.querySelector('.omp-rewind-bar--undo')");
-			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1" });
-			await ui.wait("document.querySelector('.omp-rewind-bar--undo')");
-			await ui.evaluate("[...document.querySelectorAll('.omp-rewind-bar--undo button')].find(button=>button.textContent==='Undo').click()");
-			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===2");
-			assert.deepEqual((await navigations())[1], { ...(await navigations())[1]!, kind: "undo", targetId: "a2", expectedLeafId: "m1", summarize: false });
-			await ui.wait("document.querySelector('.omp-rewind-bar[role=status]')?.textContent==='Undoing the rewind…'");
-			await answerNavigation({ status: "done", kind: "undo", summarized: false });
-			await ui.wait("window.composer.value()===''");
-			// Back on the original branch, with a draft of the user's own.
-			await pushRewind();
-			await ui.wait("!document.querySelector('.omp-rewind-bar') && document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
-			await ui.evaluate("window.composer.focus()");
-			await ui.call("Input.insertText", { text: "my own draft" });
-			await startFromRow(0);
-			await press("Enter", "Enter", 13);
-			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===3");
-			assert.deepEqual((await navigations())[2], { ...(await navigations())[2]!, kind: "rewind", targetId: "u1", expectedLeafId: "a2", summarize: false });
-			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "first prompt\nwith a second line", images: [], unavailableImages: 0 } });
-			await ui.wait("window.composer.value()==='first prompt\\nwith a second line'");
-			await ui.wait("document.querySelector('.omp-attach-error details pre')");
-			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-attach-error')].map(card=>({reason:card.firstElementChild.textContent,text:card.querySelector('details pre').textContent}))"),
-				[{ reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", text: "my own draft" }], "the earlier draft is kept, not overwritten");
-			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

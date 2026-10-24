@@ -167,6 +167,16 @@ describe("settleSend", () => {
 		assert.equal(settled.notice, null);
 	});
 
+	it("edits undone back to the text and images of the message leave the draft edited: an accepted send does not clear it", () => {
+		const { cell, sent } = start();
+		cell.edited("hi there");
+		cell.edited("hi");
+		assert.equal(cell.read().text, "hi");
+		const settled = settleSend(cell.read(), sent, accepted);
+		cell.commit(settled.change);
+		assert.deepEqual([cell.read().text, cell.read().images.length, cell.read().inFlight], ["hi", 1, null]);
+	});
+
 	it("a refused send of the unchanged draft keeps it and says why", () => {
 		const { cell, sent } = start();
 		const settled = settleSend(cell.read(), sent, { ok: false, reason: "Not admitted" });

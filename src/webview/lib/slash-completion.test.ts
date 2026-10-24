@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { commandResolver, findCommandChips } from "./draft/command-chips.ts";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, parseArgumentHint, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "./slash-completion.ts";
 
  test("a leading command token lists every command and skill; paths, prose and arguments are not completion-owned", () => {
@@ -161,4 +162,39 @@ test("OMP's bundled /review is listed with the Desk text; a command of the user'
  assert.deepEqual(slashSuggestions(own, "review")[0], own[0]);
  const later = [{ name: "review", source: "custom", description: "A later OMP text", inputHint: "arguments" }];
  assert.deepEqual(slashSuggestions(later, "review")[0], later[0]);
+});
+
+const REAL_COMMANDS = [
+ { name: "compact", source: "builtin", description: "Compact the context" },
+ { name: "reload-plugins", source: "builtin", description: "Reload all plugins" },
+ { name: "skill:omp-desk-bug-triage", source: "skill" },
+ { name: "skill:omp-desk-release", source: "skill" },
+ { name: "report", source: "file", description: "Pause, report progress and next step, then resume" },
+ { name: "skill:report-writer", source: "skill" },
+];
+
+/** What the composer shows after each character of `text` typed at the start of an idle draft: the list rows and the chips. */
+function typedKeyByKey(text: string) {
+ const resolve = commandResolver(REAL_COMMANDS);
+ return [...text].map((_, index) => {
+  const typed = text.slice(0, index + 1);
+  const token = slashQueryAt(typed, typed.length, REAL_COMMANDS);
+  return { typed, rows: token === null ? [] : slashSuggestions(REAL_COMMANDS, token.query, token.skillsOnly).map(command => "/" + command.name), chips: findCommandChips(typed, resolve).map(chip => typed.slice(chip.start, chip.end)) };
+ });
+}
+
+test("typed key by key, /report (a file command) keeps its list open at every length, first at the full name and a chip, with the skills below it", () => {
+ const seen = typedKeyByKey("/report");
+ assert.ok(seen.every(step => step.rows.length > 0), "the list is open after every character");
+ assert.deepEqual(seen.at(-1), { typed: "/report", rows: ["/report", "/skill:report-writer"], chips: ["/report"] }, "the exact file command is first, the skill whose name contains it follows");
+ assert.deepEqual(seen.slice(0, -1).map(step => step.chips), [[], [], [], [], [], []], "no prefix is a chip");
+ assert.deepEqual(seen[2]!.rows, ["/rewind", "/fresh", "/reload-plugins", "/report", "/skill:omp-desk-release", "/skill:report-writer"], "at /re every command is listed above every skill, and a name without `re` is not listed");
+ assert.deepEqual(typedKeyByKey("/reports").at(-1), { typed: "/reports", rows: [], chips: [] }, "nothing matches /reports");
+});
+
+test("typed key by key, /reload reaches OMP's /reload-plugins: the row is listed from /rel to /reload-plugins, which is the exact chip", () => {
+ const seen = typedKeyByKey("/reload-plugins");
+ for (const step of seen.slice(3)) assert.ok(step.rows.includes("/reload-plugins"), step.typed);
+ assert.deepEqual(seen.find(step => step.typed === "/reload"), { typed: "/reload", rows: ["/reload-plugins"], chips: [] }, "/reload is only a prefix, so it is text");
+ assert.deepEqual(seen.at(-1), { typed: "/reload-plugins", rows: ["/reload-plugins"], chips: ["/reload-plugins"] });
 });
