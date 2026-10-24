@@ -10,6 +10,7 @@ import { codeWrapKey, isCodeWrapped, setCodeWrapped, showsWrapToggle } from "../
 import { useHighlightedRuns } from "../lib/use-highlighted-runs.ts";
 import { CodeRuns } from "./CodeRuns.tsx";
 import { CodeWrapScopeContext } from "./CodeWrapScope.tsx";
+import { WrapButton } from "./OutputWrap.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 
 /**
@@ -55,11 +56,7 @@ export function CodeBlock({ language, source, closed, copy = true, leaf, name }:
 			</pre>
 			{(copy && source.length > 0 || wrapButton) && (
 				<div className="omp-code-actions">
-					{wrapButton && (
-						<button type="button" className="omp-copy-button omp-code-wrap" aria-pressed={wrapped} aria-label="Wrap lines" title={wrapped ? "Wrap lines: on. Press to scroll sideways instead" : "Wrap lines: off. Press to wrap long lines"} onClick={toggle}>
-							<span className="codicon codicon-word-wrap" aria-hidden="true" />
-						</button>
-					)}
+					{wrapButton && <WrapButton wrapped={wrapped} onToggle={toggle} />}
 					{copy && source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
 				</div>
 			)}

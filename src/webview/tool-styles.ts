@@ -91,7 +91,12 @@ export const TOOL_STYLES = `
 .omp-window .omp-pre { background: transparent; line-height: var(--omp-row-h); overflow: visible; }
 .omp-window .omp-native-code-line, .omp-window .omp-native-diff .omp-pre > span { height: var(--omp-row-h); }
 /* Code never wraps: every block of rows scrolls sideways. Only the reader's explicit Wrap (the toolbar switch) wraps them. */
-.omp-rows--wrap .omp-pre { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.omp-rows--wrap .omp-pre, .omp-wrap-pane[data-wrapped] :is(.omp-pre, .omp-native-output, .omp-native-code) { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+/* A wrapped row keeps its line number and +/- on its first visual line: the rest hangs under the code, and the row's background runs across all of it. */
+:is(.omp-rows--wrap, .omp-wrap-pane[data-wrapped]) .omp-native-code-line { padding-left: calc(3em + 10px + 1ch); text-indent: calc(-3em - 10px - 1ch); }
+:is(.omp-rows--wrap, .omp-wrap-pane[data-wrapped]) .omp-native-diff .omp-pre > span:has(> .omp-native-diff-sign) { padding-left: calc(6px + 4em + 10px); text-indent: calc(-4em - 10px); }
+.omp-wrap-pane { position: relative; }
+.omp-wrap-pane:hover > .omp-code-actions { opacity: 1; }
 .omp-prose-clip { max-height: 21em; overflow: hidden; }
 .omp-native-tool .omp-tool-head > .omp-gist { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
 .omp-gist--err { color: var(--vscode-errorForeground); }

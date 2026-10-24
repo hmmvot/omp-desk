@@ -9,6 +9,7 @@ import type { OutputFormat } from "../lib/output-format";
 import { useScreenReaderMode } from "../lib/screen-reader";
 import type { FoldState, ToolViewState } from "../lib/tool-view-state";
 import { READER_MAX_ROWS, useWindowedRows, WINDOW_AFTER_ROWS, WRAP_MAX_ROWS } from "../lib/use-windowed-rows";
+import { OutputWrapContext, WrapPane } from "./OutputWrap.tsx";
 
 /** What a block of rows needs to know of the card around it. */
 export interface ToolViewContextValue {
@@ -85,9 +86,10 @@ function WindowedList<T>({ all, render, widthCh }: { all: readonly T[]; render: 
 function FullRows<T>({ all, render, fixed, widthCh }: { all: readonly T[]; render: (rows: readonly T[], offset: number) => ReactNode; fixed: boolean; widthCh?: number }): ReactNode {
 	const { view } = useToolViewContext();
 	const reader = useScreenReaderMode();
+	const paneWrap = useContext(OutputWrapContext);
 	if (!fixed) return <PagedRows all={all} render={render} />;
 	const count = all.length;
-	const wrap = view?.wrap === true;
+	const wrap = view?.wrap === true || paneWrap;
 	const whole = count <= WINDOW_AFTER_ROWS || reader && count <= READER_MAX_ROWS;
 	if (whole) return <div className={wrap ? "omp-rows--wrap" : undefined}>{render(all, 0)}</div>;
 	if (wrap) {
@@ -114,13 +116,20 @@ export interface OutputRowsProps<T> {
 	readonly named?: { readonly count: number; readonly unit: string };
 	/** The marker's words for what a head preview hides; the rows it hides are `all.slice(limit)`. */
 	readonly hidden?: (rows: readonly T[]) => string;
+	/** What the pane is called inside its card, for the reader's Wrap lines choice of fixed rows; two panes of one section need two names. */
+	readonly pane?: string;
 }
 
 /**
  * Rows, bounded: at most `limit` when the card is not full, with the marker that says what is not shown and the
  * button that shows it. A remainder of three rows or fewer is shown instead. A tail preview puts the marker first.
  */
-export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tail = false, unit = "line", units = `${unit}s`, hidden, fixed = false, widthCh, named }: OutputRowsProps<T>): ReactNode {
+export function OutputRows<T>(props: OutputRowsProps<T>): ReactNode {
+	const rows = <Rows {...props} />;
+	return props.fixed === true ? <WrapPane name={props.pane ?? "rows"}>{rows}</WrapPane> : rows;
+}
+
+function Rows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tail = false, unit = "line", units = `${unit}s`, hidden, fixed = false, widthCh, named }: OutputRowsProps<T>): ReactNode {
 	const { live } = useToolViewContext();
 	if (expanded) return <FullRows all={all} render={render} fixed={fixed} widthCh={widthCh} />;
 	const count = all.length;

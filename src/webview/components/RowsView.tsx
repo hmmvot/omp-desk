@@ -27,6 +27,6 @@ export function RowsView({ format, expanded, tail = false }: { format: RowsForma
 	const widthCh = useMemo(() => rows.reduce((width, row) => Math.max(width, row.text.length), 0) + 2, [rows]);
 	if (rows.length === 0) return <div className="omp-empty-note">No line contains “{filter}”</div>;
 	return <div className="omp-native-preview omp-rows" data-rows-kind={format.tables.length > 0 ? "table" : "trace"}>
-		<OutputRows all={rows} expanded={expanded} tail={tail} fixed widthCh={widthCh} render={part => <pre className="omp-pre">{part.map((row, index) => <RowLine key={index} row={row} format={format} />)}</pre>} />
+		<OutputRows all={rows} expanded={expanded} tail={tail} fixed pane="rows" widthCh={widthCh} render={part => <pre className="omp-pre">{part.map((row, index) => <RowLine key={index} row={row} format={format} />)}</pre>} />
 	</div>;
 }

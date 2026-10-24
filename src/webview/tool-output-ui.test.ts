@@ -570,6 +570,42 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("an overflowing command output and a diff get a Wrap lines button: it wraps, keeps the diff markers on the first line, and survives the card closing and opening", async () => {
+			const bash = wideCalls[2]!;
+			const pane = `${card(bash)} .omp-wrap-pane`;
+			await reset("pane-bash"); await show(bash); await open(bash);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${pane} .omp-code-wrap`)})`);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${pane} .omp-code-wrap`)}).getAttribute('aria-pressed')`), "false", "off by default");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${pane} .omp-code-wrap`)}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${pane}[data-wrapped]`)})`);
+			const wrapped = await blockOf(`${pane} pre.omp-pre`);
+			assert.equal(wrapped.whiteSpace, "pre-wrap");
+			assert.ok(wrapped.scroll[0] <= wrapped.scroll[1], `wrapped, the output does not scroll (${wrapped.scroll})`);
+			// The card closing and opening mounts the pane again: the choice stays.
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(bash)} .omp-tool-head`)}).click()`);
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(bash)} .omp-tool-body`)})`);
+			await open(bash);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${pane}[data-wrapped] .omp-code-wrap[aria-pressed=true]`)})`);
+			assert.equal((await blockOf(`${pane} pre.omp-pre`)).whiteSpace, "pre-wrap");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${pane} .omp-code-wrap`)}).click()`);
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${pane}[data-wrapped]`)})`);
+
+			const edit: Call = { id: "edit-wide-diff", tool: "edit", args: { path: "src/Session.cs" }, isError: false, resultText: "ok", details: { path: "src/Session.cs", diff: ` 1|using System;\n-2|${wide}\n+2|${wide} // new\n 3|}`, firstChangedLine: 2 } };
+			await reset("pane-diff"); await show(edit); await open(edit);
+			const diffButton = `${card(edit)} .omp-native-diff .omp-code-wrap`;
+			await ui.wait(`document.querySelector(${JSON.stringify(diffButton)})`);
+			await ui.evaluate(`document.querySelector(${JSON.stringify(diffButton)}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(edit)} .omp-wrap-pane[data-wrapped]`)})`);
+			const facts = await ui.evaluate<{ rowHeight: number; single: number; number: number; sign: number; code: number; background: string; whiteSpace: string }>(`(()=>{
+			 const row=document.querySelector(${JSON.stringify(`${card(edit)} .omp-native-diff-add`)}),short=document.querySelector(${JSON.stringify(`${card(edit)} .omp-native-diff .omp-pre > span:not(.omp-native-diff-add):not(.omp-native-diff-remove)`)});
+			 const range=document.createRange();range.setStart(row.lastChild,0);range.setEnd(row.lastChild,1);
+			 return{rowHeight:row.getBoundingClientRect().height,single:short.getBoundingClientRect().height,number:row.querySelector('.omp-native-line-number').getBoundingClientRect().top-row.getBoundingClientRect().top,sign:row.querySelector('.omp-native-diff-sign').getBoundingClientRect().top-row.getBoundingClientRect().top,code:range.getBoundingClientRect().left,background:getComputedStyle(row).backgroundColor,whiteSpace:getComputedStyle(row).whiteSpace}})()`);
+			assert.equal(facts.whiteSpace, "pre-wrap");
+			assert.ok(facts.rowHeight > facts.single * 1.5, `the changed row wraps over several lines (${facts.rowHeight} vs ${facts.single})`);
+			assert.ok(Math.abs(facts.number - facts.sign) <= 1, "the number and the marker share the first visual line");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a vertical wheel over a wide block scrolls the transcript; a horizontal wheel and Shift+wheel scroll the block", async () => {
 			const call: Call = { id: "read-wide-300", tool: "read", args: { path: "src/Session.cs" }, isError: false, details: {}, resultText: Array.from({ length: 300 }, (_, index) => `${index + 1}:${wide}`).join("\n") };
 			await reset("wide-wheel"); await show(call); await open(call);

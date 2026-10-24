@@ -14,6 +14,7 @@ import { NativeDisclosure } from "./NativeDisclosure.tsx";
 import { lateDiagnosticsFiles, nativeText, numberField, recordRows, stringField } from "./native-message-helpers.ts";
 import { parseAnsi } from "../../chat/ansi.ts";
 import { AnsiLines, AnsiText } from "./AnsiText.tsx";
+import { WrapPane } from "./OutputWrap.tsx";
 
 export interface IrcDisclosure { expanded: boolean; onChange(expanded: boolean): void }
 export interface NativeMessageProps {
@@ -217,9 +218,9 @@ function ExecutionView({ message }: { message: ExecutionMessage }) {
 	const failed = !message.cancelled && message.exitCode !== undefined && message.exitCode !== 0;
 	return <section className={`omp-native-message omp-native-execution ${failed ? "omp-error" : message.cancelled ? "omp-warning" : ""}`}>
 		<header><strong>{message.role === "bashExecution" ? "Bash execution" : "Python execution"}</strong> · {message.cancelled ? "cancelled" : failed ? "failed" : "complete"}{message.exitCode !== undefined ? <span> · exit {message.exitCode}</span> : null}{message.excludeFromContext ? <span className="omp-native-badge">Excluded from model context</span> : null}{message.truncated ? <span className="omp-native-badge">Output truncated</span> : null}</header>
-		<pre className="omp-native-code">{message.role === "bashExecution" ? message.command : message.code}</pre>
-		<pre className="omp-native-output"><AnsiLines lines={lines.slice(-10)} /></pre>
-		{lines.length > 10 ? <NativeDisclosure title={`Full output (${lines.length} lines)`}><pre className="omp-native-output"><AnsiLines lines={lines} /></pre></NativeDisclosure> : null}
+		<WrapPane name="command"><pre className="omp-native-code">{message.role === "bashExecution" ? message.command : message.code}</pre></WrapPane>
+		<WrapPane name="output"><pre className="omp-native-output"><AnsiLines lines={lines.slice(-10)} /></pre></WrapPane>
+		{lines.length > 10 ? <NativeDisclosure title={`Full output (${lines.length} lines)`}><WrapPane name="full-output"><pre className="omp-native-output"><AnsiLines lines={lines} /></pre></WrapPane></NativeDisclosure> : null}
 		{message.images?.length ? <MessageContentView content={message.images} /> : null}
 		<ArtifactWarning meta={message.meta} />
 	</section>;
@@ -295,7 +296,7 @@ function MessageView({ message, superseded, irc }: { message: ChatMessage; super
 		case "fileMention":
 			return <section className="omp-native-message omp-native-file-mentions">{message.files.map((file, index) => <section className="omp-native-file" key={index}>
 				<header><strong>Read</strong> <code>{file.path}</code>{file.lineCount !== undefined ? <span> · {file.lineCount} lines</span> : null}{file.byteSize !== undefined ? <span> · {file.byteSize.toLocaleString()} bytes</span> : null}{file.skippedReason ? <span className="omp-native-badge">Skipped: {file.skippedReason === "binary" ? "binary file" : "file too large"}</span> : null}</header>
-				{file.content ? <><pre className="omp-native-code">{file.content.split(/\r?\n/).slice(0, 6).join("\n")}</pre><NativeDisclosure title="Full file content"><pre className="omp-native-code">{file.content}</pre></NativeDisclosure></> : null}
+				{file.content ? <><WrapPane name={`file${index}`}><pre className="omp-native-code">{file.content.split(/\r?\n/).slice(0, 6).join("\n")}</pre></WrapPane><NativeDisclosure title="Full file content"><WrapPane name={`file${index}-full`}><pre className="omp-native-code">{file.content}</pre></WrapPane></NativeDisclosure></> : null}
 				{file.image ? <MessageContentView content={[file.image]} /> : null}
 			</section>)}</section>;
 		case "toolResult": case "unknown": return null;

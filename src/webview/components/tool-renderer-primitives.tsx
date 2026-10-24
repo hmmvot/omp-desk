@@ -9,6 +9,8 @@ import { SavedImage } from "./SavedImage";
 import { CodeRuns } from "./CodeRuns";
 import { languageForPath, languageId } from "../lib/code-languages";
 import { useCodeLines } from "../lib/use-highlighted-runs";
+import { CodeWrapScope } from "./CodeWrapScope";
+import { WrapPane } from "./OutputWrap";
 import { WebLink } from "./WebLinks";
 import { webLinkUrl } from "../../shared/terminal-links";
 import { OutputRows, PREVIEW_ROWS, ShowAll, useRowFilter, useToolViewContext } from "./tool-view";
@@ -66,7 +68,7 @@ export function TextPreview({ text, expanded, lines = PREVIEW_ROWS, tail = false
 	const code = !prose && language !== undefined && languageId(language) !== null ? language : null;
 	return <div className="omp-native-preview">{prose
 		? <Prose lines={source} expanded={expanded} />
-		: <OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed widthCh={widthCh} render={(rows, offset) => <pre className="omp-pre">{code !== null ? <CodeText all={all} from={offset} to={offset + rows.length} language={code} closed={closed} /> : rows.map((row, index) => <span key={offset + index} className={tint && lineTone(row) !== null ? `omp-tone--${lineTone(row)}` : undefined}>{row}{"\n"}</span>)}</pre>} />}</div>;
+		: <OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed pane="text" widthCh={widthCh} render={(rows, offset) => <pre className="omp-pre">{code !== null ? <CodeText all={all} from={offset} to={offset + rows.length} language={code} closed={closed} /> : rows.map((row, index) => <span key={offset + index} className={tint && lineTone(row) !== null ? `omp-tone--${lineTone(row)}` : undefined}>{row}{"\n"}</span>)}</pre>} />}</div>;
 }
 /** A line of a preview is shown up to this many characters, with a note of the rest: the height of a preview is bounded. */
 function cutRow(line: string): string {
@@ -101,7 +103,7 @@ export function CodePreview({ text, expanded, lines = PREVIEW_ROWS, start = 1, l
 	const language = path === undefined ? null : languageForPath(path);
 	const given = Array.isArray(lineNumbers) && lineNumbers.length === source.length && lineNumbers.every(number => number === null || typeof number === "number" && Number.isFinite(number)) ? lineNumbers as (number | null)[] : null;
 	const numbers = kept === null ? given : kept.map(index => given === null ? start + index : given[index]!);
-	return <div className="omp-native-source"><OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed widthCh={widthCh} render={(rows, at) => <CodeRows all={all} from={at} to={at + rows.length} language={language} closed={closed} numbers={numbers} start={start} />} /></div>;
+	return <div className="omp-native-source"><OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed pane="source" widthCh={widthCh} render={(rows, at) => <CodeRows all={all} from={at} to={at + rows.length} language={language} closed={closed} numbers={numbers} start={start} />} /></div>;
 }
 type DiffKind = "file" | "hunk" | "gap" | "add" | "remove" | "other";
 /** One diff line: its class, the code it carries (`null` for headers and notes), and where that code sits in each side's text. */
@@ -150,14 +152,14 @@ export function DiffPreview({ text, expanded, lines = PREVIEW_ROWS, path, closed
 	if (source.length === 0) return null;
 	if (all.length === 0) return <div className="omp-empty-note">No line contains “{filter}”</div>;
 	const language = path === undefined ? null : languageForPath(path);
-	return <div className="omp-native-diff"><OutputRows all={all} expanded={expanded} limit={lines} unit="line" fixed widthCh={widthCh} render={(rows, offset) => <DiffRows model={model} from={offset} to={offset + rows.length} language={language} closed={closed} />}
+	return <div className="omp-native-diff"><OutputRows all={all} expanded={expanded} limit={lines} unit="line" fixed pane="diff" widthCh={widthCh} render={(rows, offset) => <DiffRows model={model} from={offset} to={offset + rows.length} language={language} closed={closed} />}
 		hidden={rest => {
 			const gaps = rest.filter(line => line.trim() === "" || line.startsWith("@@")).length, more = rest.length - gaps;
 			return gaps > 0 ? `(${gaps} more ${gaps === 1 ? "hunk" : "hunks"}, ${more} more ${more === 1 ? "line" : "lines"})` : `${more} more ${more === 1 ? "line" : "lines"}`;
 		}} /></div>;
 }
 export function Section({ title, link, children }: { title?: string; link?: ExplicitFileLink; children: ReactNode }): ReactNode {
-	return <section className="omp-tool-section">{title !== undefined && <div className="omp-tool-section-title"><FileLinkText text={title} link={link} /></div>}{children}</section>;
+	return <section className="omp-tool-section">{title !== undefined && <div className="omp-tool-section-title"><FileLinkText text={title} link={link} /></div>}<CodeWrapScope id={title ?? ""}>{children}</CodeWrapScope></section>;
 }
 /** The id the card's primary output keeps its folds under. */
 export const OUTPUT_SCOPE = "output";
@@ -253,5 +255,5 @@ function MatchRows({ rows }: { rows: readonly MatchRow[] }): ReactNode {
 /** Search output grouped per file: file headers and numbered lines are rows, at most `limit` of them until the card shows everything. */
 export function MatchOutput({ text, expanded, limit = PREVIEW_ROWS }: { text: string; expanded: boolean; limit?: number }): ReactNode {
 	const rows = useMemo(() => groupedFiles(text).flatMap((file): MatchRow[] => [{ kind: "file", path: file.path }, ...file.lines.map((line): MatchRow => ({ kind: "line", path: file.path, text: line }))]), [text]);
-	return <OutputRows all={rows} expanded={expanded} limit={limit} render={part => <MatchRows rows={part} />} />;
+	return <WrapPane name="matches"><OutputRows all={rows} expanded={expanded} limit={limit} render={part => <MatchRows rows={part} />} /></WrapPane>;
 }
