@@ -980,6 +980,8 @@ ${MAGIC_KEYWORD_STYLES}
 .omp-native-disclosure > summary, .omp-native-child > summary { cursor: pointer; color: var(--omp-muted); }
 .omp-native-disclosure > summary:focus-visible, .omp-native-child > summary:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-native-code, .omp-native-output, .omp-native-message pre { font-family: var(--omp-mono); font-size: var(--omp-mono-size); white-space: pre; overflow-wrap: normal; overflow-x: auto; overflow-y: hidden; max-width: 100%; }
+/* A Markdown code block inside a native row (your own message, notices) is the capped, vertically scrolling block too: the rule above would clip it. */
+.omp-native-message .omp-code-block pre { overflow-y: auto; }
 .omp-native-code { padding: 8px; color: var(--vscode-foreground); background: var(--vscode-textCodeBlock-background); border-radius: var(--omp-radius); }
 .omp-native-status, .omp-native-divider { padding: 6px 0; color: var(--omp-muted); }
 .omp-native-divider { border-top: 1px solid var(--omp-border); }

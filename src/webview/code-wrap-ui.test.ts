@@ -328,6 +328,24 @@ test("wrap lines on code blocks in Chat", { skip: browserPath === undefined, tim
 			assert.equal(shown, true, "Find scrolled the capped block to the match");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
+
+		await t.test("a real wheel over a capped block scrolls it in an assistant reply and in your own message", async () => {
+			await open("wheel");
+			const lines = Array.from({ length: 400 }, (_, index) => `const v${index} = ${index};`).join("\n");
+			const user = `{type:'message',id:'u',parentId:null,timestamp:'2026-10-13T00:00:00.000Z',message:{role:'user',timestamp:1,content:[{type:'text',text:${JSON.stringify(code(lines))}}]}}`;
+			await ui.evaluate(push([user, entry("a", "u", code(lines))]));
+			await ui.wait("document.querySelectorAll('.omp-code-block pre').length === 2");
+			await ui.settle();
+			for (const index of [0, 1]) {
+				const facts = await ui.evaluate<{ overflowY: string; native: boolean; x: number; y: number }>(`(()=>{const pre=document.querySelectorAll('.omp-code-block pre')[${index}];pre.scrollIntoView({block:'start'});const r=pre.getBoundingClientRect();
+					return{overflowY:getComputedStyle(pre).overflowY,native:Boolean(pre.closest('.omp-native-message')),x:r.left+r.width/2,y:r.top+Math.min(r.height,600)/2}})()`);
+				assert.equal(facts.overflowY, "auto", `block ${index} (native row: ${facts.native})`);
+				await ui.settle();
+				const moved = await ui.evaluate<{ x: number; y: number }>(`(()=>{const r=document.querySelectorAll('.omp-code-block pre')[${index}].getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+Math.min(r.height,600)/2}})()`);
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", x: moved.x, y: moved.y, deltaX: 0, deltaY: 300 });
+				await ui.wait(`document.querySelectorAll('.omp-code-block pre')[${index}].scrollTop > 0`);
+			}
+		});
 	} finally {
 		browser?.socket.close();
 		page?.socket.close();
