@@ -4,18 +4,14 @@ import { test } from "node:test";
 import * as entry from "./draft.ts";
 
 /**
- * The ledger of the entry (see the comment at the top of `draft.ts`): every export is listed here, the transitional ones with the group of
- * docs/designs/2026-10-23-composer-draft-module.md, section 6, whose commit removes them (`3`). Group 3 removes those lines, so the
- * list never drifts from the file; afterwards only the kept names are left.
+ * The ledger of the entry (see the comment at the top of `draft.ts`): every export is listed here, so the list never drifts from the file.
  */
-const VALUES: Record<string, "kept" | 3> = {
-	MAX_DRAFT_BYTES: 3,
-	activeDocuments: 3,
-	compactForSend: 3,
-	documentChars: 3,
-	rawTotal: 3,
-	withState: 3,
+const VALUES: Record<string, "kept"> = {
 	acceptCompletion: "kept",
+	addToDraft: "kept",
+	beginSend: "kept",
+	compose: "kept",
+	settleSend: "kept",
 	addRecoverable: "kept",
 	attach: "kept",
 	attachGuardRefusal: "kept",
@@ -53,6 +49,12 @@ const TYPES: Record<string, "kept"> = {
 	AttachReader: "kept",
 	AttachResult: "kept",
 	Change: "kept",
+	Composition: "kept",
+	LinkedContent: "kept",
+	OutgoingMessage: "kept",
+	SendContext: "kept",
+	SendResult: "kept",
+	Settled: "kept",
 	ChipSpan: "kept",
 	CompletionRow: "kept",
 	CompletionTokens: "kept",

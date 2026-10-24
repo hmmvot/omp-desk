@@ -43,35 +43,28 @@
  *   lines of a block in the editor font on a band while the prose around them keeps the UI font;
  * - the text that is sent is the draft as typed.
  */
-import type { ImageContent } from "@oh-my-pi/pi-wire";
 import type { ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { chatTurnInProgress } from "../../chat/model";
 import { nativeSettingsCommand } from "../../chat/settings-command";
 import { guestTransport } from "../bridge";
-import { formatBytes, groupedCount } from "../../shared/file-size";
-import { MAX_MESSAGE_CHARS } from "../../shared/attach-limits";
-import { composeFileBlocks } from "../../shared/file-blocks";
 import {
-	MAX_DRAFT_BYTES,
 	acceptCompletion,
-	activeDocuments,
 	addRecoverable,
+	addToDraft,
 	attach as attachToDraft,
+	beginSend,
 	clearText,
-	cleared,
 	commandResolver,
-	compactForSend,
+	compose,
 	completionAt,
 	dismissLost,
 	dismissRecoverable,
-	documentChars,
 	fieldRules,
 	insertCommand,
 	insertText,
 	keyEdit,
 	knowsReference,
-	rawTotal,
 	readingBy,
 	recall,
 	removeAttachment,
@@ -80,10 +73,10 @@ import {
 	restoreQueued,
 	rewind,
 	setEditorText,
+	settleSend,
 	viewOf,
-	withState,
 	type AttachEntry,
-	type DraftDocument,
+	type LinkedContent,
 	type Recoverable,
 	type ReferenceKind,
 } from "../lib/draft/draft";
@@ -119,7 +112,7 @@ import { sessionPrompts } from "../../chat/prompt-history";
 import { MAX_DROP_URIS } from "../../protocol/messages";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
-import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashSuggestions } from "../lib/slash-completion";
+import { argumentSuggestions, slashSuggestions } from "../lib/slash-completion";
 import { ChatFooter } from "./ChatFooter";
 import { CommandsMenu } from "./CommandsMenu";
 import { KeyboardShortcutsButton } from "./KeyboardShortcutsButton";
@@ -179,19 +172,6 @@ const NEEDS_HOST = "Attaching files needs the editor's connection to the extensi
  */
 function outcomeSince(now: ChatModel, before: ChatModel): boolean {
 	return now.working !== before.working || now.phase !== before.phase || now.commandFeedback !== before.commandFeedback || now.lastPromptResult !== before.lastPromptResult;
-}
-
-/** Whether `text` starts with the `/skill:<name>` of an installed skill: a skill invocation, which may carry files. */
-function startsInstalledSkill(commands: readonly { readonly name: string; readonly source?: string }[], text: string): boolean {
-	const token = /^\/(\S+)/.exec(text)?.[1];
-	return token !== undefined && commands.some(command => command.source === "skill" && command.name === token);
-}
-
-/** The refusal for a message over the limit, with its real figures and, when it carries files, the largest one. */
-function tooLongSentence(total: number, documents: readonly DraftDocument[]): string {
-	const largest = documents.reduce<DraftDocument | null>((best, document) => (best === null || documentChars(document) > documentChars(best) ? document : best), null);
-	const tail = largest === null ? "" : ` The largest file is ${largest.name} (${groupedCount(documentChars(largest))} characters).`;
-	return `The message would be ${groupedCount(total)} characters; one message carries ${groupedCount(MAX_MESSAGE_CHARS)}.${tail}`;
 }
 
 /**
@@ -676,55 +656,26 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 
 	const send = useCallback(
 		async (followUp: boolean): Promise<void> => {
-			// The wire pairs the Nth marker with the Nth image, so the draft's stable numbers are
-			// compacted to 1..K here and images whose marker was deleted are not sent. A document's marker is the
-			// reference of its block and is left as it is.
+			// The draft as it is at Enter: what is sent is this value, whatever is typed while a linked file is read.
 			const typed = cell.read();
-			const compacted = compactForSend(typed.text, typed.images);
-			const files = activeDocuments(typed.text, typed.documents);
-			const draft = compacted.text.trim();
-			const attached = compacted.images;
 			// A pending dialog, a locked or not-live panel, and a read that has started
 			// but not published yet must never produce a message. The cell's `reading`, not the one
 			// a render saw, is what makes this true inside the same frame that started the read.
 			if (cell.getState().held || !canPrompt || request !== null || typed.reading > 0 || sendingRef.current) return;
-			if (draft.length === 0 && attached.length === 0 && files.length === 0) return;
-			// Chat's own `/rewind` and `/branch` never reach OMP; both open the in-place Rewind.
-			if (onRewind !== undefined && attached.length === 0 && files.length === 0 && isRewindCommand(draft)) {
+			const context = { commands: snapshot.commands, rewindAvailable: onRewind !== undefined };
+			let composed = compose(typed, context);
+			if (composed.kind === "empty") return;
+			if (composed.kind === "rewind") {
 				cell.commit(clearText(typed));
 				setSendError(null);
-				onRewind();
+				onRewind?.();
 				return;
 			}
-			if (missingRequiredArgument(snapshot.commands, draft)) {
-				setDismissedCompletion(null);
-				setSendError("This command requires an argument.");
+			if (composed.kind === "refused") {
+				if (composed.reopenCompletion) setDismissedCompletion(null);
+				setSendError(composed.reason);
 				return;
 			}
-			// Restored queued messages can bring the draft past what one message may carry; say so instead of
-			// sending a message the host would refuse without a word.
-			if (rawTotal(attached) > MAX_DRAFT_BYTES) {
-				setSendError(`the attached images are ${formatBytes(rawTotal(attached))}, over the ${formatBytes(MAX_DRAFT_BYTES)} one message may carry; remove an image to send`);
-				return;
-			}
-			// A text that starts with `/` is a command to OMP, which does not take files; a skill invocation is the one that does.
-			if (files.length > 0 && draft.startsWith("/") && !startsInstalledSkill(snapshot.commands, draft)) {
-				setSendError("A message that starts with / is a command and cannot carry files.");
-				return;
-			}
-			const known = files.reduce((sum, file) => sum + documentChars(file), draft.length);
-			if (known > MAX_MESSAGE_CHARS) {
-				setSendError(tooLongSentence(known, files));
-				return;
-			}
-			const wire: ImageContent[] = attached.map(image => ({
-				type: "image",
-				mimeType: image.mimeType,
-				data: image.data,
-			}));
-			const payload = wire.length > 0 ? wire : undefined;
-			// The draft revision is the one at Enter: edits made while the files are read are kept by the guard below.
-			const revision = cell.read().revision;
 			// Set before any await, so a second Enter and a command that sends are blocked while the files are read. The read is
 			// not counted in `reading`: a hand-off during it would be refused and a view switch would lose the draft.
 			sendingRef.current = true;
@@ -736,22 +687,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				setSending(false);
 				if (reason !== null) setSendError(reason);
 			};
-			const linked = files.filter(file => file.source.kind === "linked");
-			const texts = new Map<number, { label: string; content: string; dirty: boolean }>();
-			if (linked.length > 0) {
-				const heldChars = files.reduce((sum, file) => sum + (file.source.kind === "held" ? file.source.content.length : 0), draft.length);
-				const read = await readLinkedFiles(
-					guestTransport,
-					++uriRequestSeqRef.current,
-					linked.flatMap(file => (file.source.kind === "linked" ? [{ number: file.number, ref: file.source.ref }] : [])),
-					Math.max(0, MAX_MESSAGE_CHARS - heldChars),
-					new Map(linked.map(file => [file.number, file.name])),
-				);
+			let contents: ReadonlyMap<number, LinkedContent> | undefined;
+			if (composed.kind === "read") {
+				const read = await readLinkedFiles(guestTransport, ++uriRequestSeqRef.current, composed.files, composed.budget, composed.names);
 				if (!read.ok) {
 					giveUp(read.reason);
 					return;
 				}
-				for (const [number, file] of read.files) texts.set(number, file);
+				contents = read.files;
 			}
 			// The values the send closed over are from before the read: judge the page as it is now. A hand-off that began during
 			// the read already carries the draft intact; otherwise the draft is untouched and Enter sends it again.
@@ -760,60 +703,37 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				giveUp(null);
 				return;
 			}
-			const blocks: { number: number; name: string; label: string | null; content: string }[] = [];
-			for (const file of files) {
-				if (file.source.kind === "held") {
-					blocks.push({ number: file.number, name: file.name, label: file.source.label, content: file.source.content });
-					continue;
-				}
-				const read = texts.get(file.number);
-				if (read === undefined) {
-					giveUp(`${file.name} could not be read.`);
-					return;
-				}
-				blocks.push({ number: file.number, name: file.name, label: read.label, content: read.content });
-			}
-			const text = composeFileBlocks(draft, blocks);
-			// Escaping the files' text can add characters, and a text-only message was never checked at all.
-			if (text.length > MAX_MESSAGE_CHARS) {
-				giveUp(tooLongSentence(text.length, files));
+			if (contents !== undefined) composed = compose(typed, context, contents);
+			if (composed.kind !== "ready") {
+				giveUp(composed.kind === "refused" ? composed.reason : null);
 				return;
 			}
+			const { message } = composed;
+			const payload = message.images.length > 0 ? message.images : undefined;
 			// The model's own `working`, read now: the delivery follows the turn the
 			// session is in at this instant, not the one this render saw.
 			const running = client.getSnapshot().working;
 			const before = client.getSnapshot();
-			cell.commit({ draft: withState(cell.read(), { inFlight: { text, images: wire } }), writes: [] });
+			cell.commit(beginSend(cell.read(), message));
 			onSubmitted?.();
 			const result = await (!running
-				? client.sendPrompt(text, payload)
+				? client.sendPrompt(message.text, payload)
 				: followUp
-					? client.sendFollowUp(text, payload)
-					: client.sendSteer(text, payload));
+					? client.sendFollowUp(message.text, payload)
+					: client.sendSteer(message.text, payload));
 			for (let held = cell.held(); held !== null; held = cell.held()) await held;
-			cell.commit({ draft: withState(cell.read(), { inFlight: null }), writes: [] });
+			const settled = settleSend(cell.read(), message, result);
+			cell.commit(settled.change);
 			sendingRef.current = false;
 			if (!mountedRef.current) return;
 			setSending(false);
-			if (!result.ok) {
-				if (result.unconfirmed || cell.read().revision !== revision) {
-					keepRecoverable({ text, images: wire, reason: result.reason, unconfirmed: result.unconfirmed === true });
-					setSendError(null);
-				} else {
-					setSendError(result.reason);
-				}
-				return;
-			}
-			setSendError(null);
-			const unsaved = linked.filter(file => texts.get(file.number)?.dirty === true).map(file => `${file.name} has unsaved changes in the editor; the saved version was sent.`);
-			setSendNotice(unsaved.length > 0 ? unsaved.join(" ") : null);
-			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null && !outcomeSince(client.getSnapshot(), before)) setSubmitted(true);
-			// Admission may finish after typing, attaching, or restoring another draft. Never erase that work.
-			if (cell.read().revision !== revision) return;
-			cell.commit(cleared(cell.read()));
-			setAttachError(null);
+			if (settled.alerts.send !== undefined) setSendError(settled.alerts.send);
+			if (!result.ok) return;
+			setSendNotice(settled.notice ?? null);
+			if (!running && result.explained !== true && nativeSettingsCommand(message.prose) === null && !outcomeSince(client.getSnapshot(), before)) setSubmitted(true);
+			if (settled.alerts.attach !== undefined) setAttachError(settled.alerts.attach);
 		},
-		[keepRecoverable, canPrompt, cell, client, onRewind, onSubmitted, request, snapshot.commands],
+		[canPrompt, cell, client, onRewind, onSubmitted, request, snapshot.commands],
 	);
 
 	/** Why the Commands list cannot offer a command now; each row adds its own rule (`lib/command-list.ts`). */
@@ -1328,20 +1248,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						<pre style={{ whiteSpace: "pre-wrap", maxHeight: 120, overflowY: "auto" }}>{entry.text}</pre>
 					</details>
 					<button type="button" className="omp-btn" disabled={captureLocked} onClick={() => {
-						if (cell.getState().held) return;
-						const now = cell.read();
-						const held = compactForSend(now.text, now.images);
-						const files = activeDocuments(now.text, now.documents);
-						// The draft already is this original when it composes to the same text. A linked file's text is not here to compare, so it never matches.
-						const sameText = files.every(file => file.source.kind === "held") && composeFileBlocks(held.text.trim(), files.flatMap(file => (file.source.kind === "held" ? [{ number: file.number, name: file.name, label: file.source.label, content: file.source.content }] : []))) === entry.text;
-						if (!sameText || held.images.length !== entry.images.length || held.images.some((image, index) => image.mimeType !== entry.images[index]?.mimeType || image.data !== entry.images[index]?.data)) {
-							offerQueuedForEditing([{ text: entry.text, images: entry.images }]);
-							const after = cell.read();
-							cell.commit({ draft: withState(after, { lostImages: after.lostImages + (entry.lostAttachments ?? 0) }), writes: [] });
-						}
-						else if ((entry.lostAttachments ?? 0) > now.lostImages) {
-							cell.commit({ draft: withState(now, { lostImages: entry.lostAttachments ?? 0 }), writes: [] });
-						}
+						cell.perform(addToDraft(entry.id), { composing: "now", held: "drop" }, outcome => {
+							if (outcome.kind === "applied" && outcome.result !== null) offerQueuedForEditing([outcome.result]);
+						});
 						surfaceRef.current?.focus();
 					}}>Add to draft</button>
 					<button type="button" className="omp-btn" disabled={captureLocked} aria-label="Dismiss recoverable message" onClick={() => {

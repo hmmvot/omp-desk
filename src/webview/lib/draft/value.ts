@@ -72,8 +72,7 @@ export function emptyDraft(): Draft {
 }
 
 /**
- * `draft` with the fields of `patch` replaced, for the writers that have not moved into the module yet. Never the revision: that
- * is the cell's alone. An operation that sets `unedited` carries a `text` write, and the cell stores the revision it produced.
+ * `draft` with the fields of `patch` replaced. Never the revision: that is the cell's alone. An operation that sets `unedited` carries a `text` write, and the cell stores the revision it produced.
  */
 export function withState(draft: Draft, patch: Partial<Omit<Draft, "revision">>): Draft {
 	return { ...draft, ...patch };
