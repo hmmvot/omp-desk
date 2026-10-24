@@ -341,6 +341,8 @@ export interface PtyLaunchSpec {
 	readonly backlogChars?: number;
 	/** How long the broker keeps an exited child's record without a client, in ms. */
 	readonly exitRetentionMs?: number;
+	/** `managed-rpc` only: how long a consumer may stay at the broker's pace bound before the broker closes it, in ms (default 10 s). */
+	readonly rpcPacedCloseMs?: number;
 	/**
 	 * The owning VS Code instance this folder shell belongs to, as the extension host
 	 * sees itself (ADR-0030). Honored for a `folder-shell` only, and only as a hint: the
@@ -1048,6 +1050,12 @@ export type PtyEventFrame =
 			 * and `ready` are still `null`. Absent on a broker from an earlier build, which parses as `false`.
 			 */
 			readonly negotiating: boolean;
+			/**
+			 * The newest consumer this broker closed on its own initiative (`fell-behind` the retained lines, or `paced`
+			 * beyond its limit) and how long ago, so the client that reattaches can say why it had to. Absent when none, and
+			 * on a broker from an earlier build. It names no connection: a window that had no part in it may read it too.
+			 */
+			readonly lastForcedClose?: PtyRpcForcedClose;
 			readonly child: PtyStatusPayload;
 	  }
 	| {
@@ -1188,6 +1196,19 @@ const PUSH_ID_TYPES: Record<string, true> = { "input-owner": true, "owner-stop":
 /** A non-negative safe integer: an output position or a chunk index. */
 function isPtyCounter(value: unknown): value is number {
 	return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/** What a broker reports about the consumer it last closed itself ({@link PtyBrokerFrame} `rpc-attached`). */
+export interface PtyRpcForcedClose {
+	readonly reason: "fell-behind" | "paced";
+	/** Milliseconds since the close, by the broker's clock. */
+	readonly ageMs: number;
+}
+
+function isPtyRpcForcedClose(value: unknown): value is PtyRpcForcedClose {
+	if (typeof value !== "object" || value === null) return false;
+	const record = value as Record<string, unknown>;
+	return (record.reason === "fell-behind" || record.reason === "paced") && isPtyCounter(record.ageMs);
 }
 
 /** Text a frame can carry: a string within the bound its field allows. */
@@ -1394,6 +1415,7 @@ function narrowPtyFrame(record: Record<string, unknown>, direction: PtyDirection
 						hostToolRetention: record.hostToolRetention === true,
 						hostCallOverflow: record.hostCallOverflow === true,
 						negotiating: record.negotiating === true,
+						...(isPtyRpcForcedClose(record.lastForcedClose) ? { lastForcedClose: record.lastForcedClose } : {}),
 						rpcProtocol: record.rpcProtocol as 1 | 2 | null,
 						ready: record.ready as string | null,
 						child: record.child,

@@ -53,10 +53,35 @@ export interface RpcAttachResult {
 	ready: string | null;
 	/** The child offered protocol 2 and its answer to the broker's negotiation is outstanding (`rpcProtocol` is `null` meanwhile). */
 	negotiating: boolean;
+	/** The broker's report of the consumer it last closed itself, when it has one (an earlier build's broker sends none). */
+	lastForcedClose?: { reason: "fell-behind" | "paced"; ageMs: number };
 	child: RpcChildStatus;
 }
 
+/**
+ * What a channel's read side has done since its connection opened (cumulative counters; a rate needs two readings).
+ * It is how a stalled stream is told from a slow consumer: `socketBytesRead` is what the kernel delivered, `chars` and
+ * `busyMs` what this process handled, `readableBytes` what it has not yet.
+ */
+export interface RpcChannelTraffic {
+	frames: number;
+	chars: number;
+	chunks: number;
+	busyMs: number;
+	maxChunkMs: number;
+	maxFrameMs: number;
+	/** Wall-clock time of the last frame delivered, or `null` before the first. */
+	lastFrameAt: number | null;
+	socketBytesRead: number;
+	readableBytes: number;
+	/** Bytes this side has accepted for sending and not yet flushed. */
+	pendingBytes: number;
+}
+
 export type RpcChannelClosedReason = "child-exited" | "disconnected" | "stopped";
+
+/** The reason a handle gives its connection when this window ends it on purpose; any other end is the broker's or the network's. */
+export const RPC_DETACHED_BY_CLIENT = "detached by the client";
 
 export type RpcChannelEvent =
 	/** One COMPLETE stdout line (UTF-8, no trailing newline). Gaps in `seq` are normal. */
@@ -73,7 +98,8 @@ export type RpcChannelEvent =
 	 * connection or a disconnect) changes it. `generation` increases with every change.
 	 */
 	| { type: "input-owner"; owned: boolean; generation: number }
-	| { type: "closed"; reason: RpcChannelClosedReason };
+	/** `detail` is the connection's own words for why it ended (never child text); only a `disconnected` has one. */
+	| { type: "closed"; reason: RpcChannelClosedReason; detail?: string };
 
 /** Codes a `writeLine` rejection carries in its `code` property. */
 export type RpcWriteErrorCode = "input-not-owner" | "child-exited" | "line-too-long" | "closed";
@@ -106,6 +132,8 @@ export interface RpcChannel {
 	onEvent(listener: (event: RpcChannelEvent) => void): () => void;
 	/** Drop the connection. The child is untouched. */
 	disconnect(): void;
+	/** The read-side measurement of the current connection, or `null` when this channel has none. */
+	traffic?(): RpcChannelTraffic | null;
 }
 
 /** The `code` of a rejected `writeLine`, or `"closed"` when the rejection carries none. */

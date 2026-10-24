@@ -57,7 +57,7 @@ async function boot(options: { catalog?: readonly Record<string, unknown>[]; nav
 		return {};
 	});
 	const timers = new ManualTimers();
-	const session = new RpcSession({ channel, sessionFile: null, cwd: "D:\\scratch", hostNonce: "host-a", timers, fileExists: async () => true, watchdogIntervalMs: 60 * 60_000 });
+	const session = new RpcSession({ channel, sessionFile: null, cwd: "D:\\scratch", hostNonce: "host-a", timers, fileExists: async () => true, watchdogIntervalMs: 60 * 60_000, stallCheckIntervalMs: 60 * 60_000 });
 	sessions.push(session);
 	await session.start();
 	await waitUntil(() => session.model.commands.length > 0);

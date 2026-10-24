@@ -130,7 +130,7 @@ import { claimPtyRecord, ensurePtyStateAccess, retirePtyRecord } from "../host/p
 import type * as PtyScreenModule from "./pty-screen.ts";
 import type { PtyScreenChunk, PtyScreenModel } from "./pty-screen.ts";
 import { RpcChildWriteError, startRpcChild, type RpcChild } from "./rpc-child.ts";
-import { RPC_PACE_BYTES, RpcLineRing, RpcSubscriber, type RpcSink } from "./rpc-ring.ts";
+import { RPC_PACED_CLOSE_MS, RPC_PACE_BYTES, RpcLineRing, RpcSubscriber, type RpcForcedClose, type RpcSink } from "./rpc-ring.ts";
 import { PTY_OWNER_EXIT_REASON, PtyOwnerMonitor } from "./pty-owner-monitor.ts";
 import {
 	SELF_CHECK_OUTPUT_LIMIT,
@@ -244,6 +244,8 @@ interface BrokerOptions {
 	readonly ownerGraceMs: number;
 	readonly logPath: string | null;
 	readonly exitRetentionMs: number;
+	/** `managed-rpc`: how long a consumer may stay at the pace bound before it is closed. */
+	readonly rpcPacedCloseMs: number;
 	/** The lock holder id of the launcher that started this broker, when it gave one. */
 	readonly launchId: string | null;
 }
@@ -275,6 +277,7 @@ const VALUED_FLAGS: Record<string, true> = {
 	"launch-id": true,
 	log: true,
 	"exit-retention-ms": true,
+	"rpc-paced-close-ms": true,
 };
 
 /**
@@ -405,6 +408,7 @@ export function parsePtyBrokerArgs(argv: readonly string[]): BrokerOptions | str
 		launchId,
 		logPath: values.get("log") ?? null,
 		exitRetentionMs: boundedInt(values.get("exit-retention-ms"), PTY_DEFAULT_EXIT_RETENTION_MS, 1_000, 24 * 3600_000),
+		rpcPacedCloseMs: boundedInt(values.get("rpc-paced-close-ms"), RPC_PACED_CLOSE_MS, 200, 10 * 60_000),
 	};
 }
 
@@ -454,6 +458,12 @@ export class PtyBroker {
 	private readonly subscribers = new Map<PtyBrokerSideConnection, RpcSubscriber>();
 	/** Subscribers that still owe the client the child's exit `state` until their backlog is delivered. */
 	private readonly exitBarrier = new Set<PtyBrokerSideConnection>();
+	/** The newest consumer this broker closed itself, reported to the next attach (`rpc-attached.lastForcedClose`). */
+	private lastForcedClose: { readonly reason: RpcForcedClose; readonly atMs: number } | null = null;
+	/** Runs while any consumer is at the pace bound: resumes one whose drain was missed, closes one stuck too long. */
+	private paceTimer: NodeJS.Timeout | null = null;
+	/** The pace episode whose "still paced" line was written, per consumer. */
+	private readonly pacedLogged = new WeakMap<RpcSubscriber, number>();
 	/** Per connection: the `rpc-write` line being assembled, and the write id refused so far. */
 	private readonly rpcWrites = new Map<
 		PtyBrokerSideConnection,
@@ -729,6 +739,7 @@ export class PtyBroker {
 			const idle = subscriber.pump();
 			minCursor = Math.min(minCursor, subscriber.cursor);
 			if (idle) this.flushExitBarrier(connection, subscriber);
+			else this.watchPace(subscriber);
 		}
 		this.ring.dropTransientsThrough(minCursor);
 	}
@@ -744,6 +755,47 @@ export class PtyBroker {
 		const subscriber = this.subscribers.get(connection);
 		if (subscriber === undefined) return;
 		if (subscriber.pump()) this.flushExitBarrier(connection, subscriber);
+		else this.watchPace(subscriber);
+		this.ring.dropTransientsThrough(Math.min(...[...this.subscribers.values()].map(item => item.cursor)));
+	}
+
+	/** Start the pace timer when `subscriber` stopped at the pace bound; the timer stops itself when nobody is paced. */
+	private watchPace(subscriber: RpcSubscriber): void {
+		if (!subscriber.paced || this.paceTimer !== null) return;
+		const interval = Math.max(50, Math.min(1_000, Math.floor(this.options.rpcPacedCloseMs / 4)));
+		this.paceTimer = setInterval(() => this.enforcePace(), interval);
+		this.paceTimer.unref();
+	}
+
+	private enforcePace(): void {
+		let anyPaced = false;
+		for (const [connection, subscriber] of [...this.subscribers]) {
+			const verdict = subscriber.enforcePace(this.options.rpcPacedCloseMs);
+			if (verdict === "closed") continue;
+			if (verdict === "resume") {
+				this.pumpConnection(connection);
+				if (subscriber.paced) anyPaced = true;
+				continue;
+			}
+			if (subscriber.paced) {
+				anyPaced = true;
+				// One line per pace episode, once it has lasted half the limit; the close summary carries the rest.
+				if ((subscriber.pacedForMs() ?? 0) >= this.options.rpcPacedCloseMs / 2 && this.pacedLogged.get(subscriber) !== subscriber.stats.pacedEpisodes) {
+					this.pacedLogged.set(subscriber, subscriber.stats.pacedEpisodes);
+					void this.log(`rpc consumer paced ${Math.round(subscriber.pacedForMs() ?? 0)} ms: ${connection.pendingBytes} bytes unflushed, ${this.describePump(subscriber)}`);
+				}
+			}
+		}
+		if (!anyPaced && this.paceTimer !== null) {
+			clearInterval(this.paceTimer);
+			this.paceTimer = null;
+		}
+	}
+
+	/** One line of pump measurement: lines and bytes sent, time the pump took, pace episodes, resumes and missed drains. */
+	private describePump(subscriber: RpcSubscriber): string {
+		const stats = subscriber.stats;
+		return `sent ${stats.lines} lines / ${stats.bytes} bytes in ${stats.pumps} pumps (${stats.busyMs.toFixed(1)} ms busy, slowest ${stats.maxPumpMs.toFixed(1)} ms), ${stats.pacedEpisodes} pace stops, ${stats.resumedBelowBound} resumed below the bound, ${stats.missedDrains} missed drains, cursor ${subscriber.cursor} of ${this.ring.latestSeq}`;
 	}
 
 	private async readChildIdentity(pid: number): Promise<void> {
@@ -856,8 +908,12 @@ export class PtyBroker {
 		}
 		void this.log(`client connected (${this.connections.size} total)`);
 		connection.onFrame(frame => this.handleFrame(connection, frame));
-		connection.onDrain(() => this.pumpConnection(connection));
+		connection.onDrain(() => {
+			this.subscribers.get(connection)?.noteDrain();
+			this.pumpConnection(connection);
+		});
 		connection.onClosed(reason => {
+			const subscriber = this.subscribers.get(connection);
 			this.connections.delete(connection);
 			this.attached.delete(connection);
 			this.subscribers.delete(connection);
@@ -876,6 +932,7 @@ export class PtyBroker {
 				this.scheduleRetention();
 			}
 			void this.log(`client closed: ${reason} (${this.connections.size} left)`);
+			if (subscriber !== undefined) void this.log(`rpc consumer summary: ${connection.pendingBytes} bytes unflushed at close, ${this.describePump(subscriber)}`);
 		});
 		// A client that attaches nothing still learns the truth about the child.
 		connection.send({ v: PTY_PROTOCOL_VERSION, t: "state", status: this.status() });
@@ -1057,6 +1114,9 @@ export class PtyBroker {
 					rpcProtocol: rpc.rpcProtocol,
 					ready: rpc.rpcProtocol === null ? null : rpc.readyLine,
 					negotiating: rpc.negotiating,
+					...(this.lastForcedClose === null
+						? {}
+						: { lastForcedClose: { reason: this.lastForcedClose.reason, ageMs: Math.max(0, Math.round(Date.now() - this.lastForcedClose.atMs)) } }),
 					child: this.status(),
 				});
 				const tail = rpc.stderrTail();
@@ -1371,7 +1431,10 @@ export class PtyBroker {
 			sendFragment: (seq, index, count, data) => {
 				connection.send({ v: PTY_PROTOCOL_VERSION, t: "rpc-line", lineSeq: seq, index, count, data });
 			},
-			close: reason => connection.close(reason),
+			close: (reason, forced) => {
+				this.lastForcedClose = { reason: forced, atMs: Date.now() };
+				connection.close(reason);
+			},
 		};
 	}
 

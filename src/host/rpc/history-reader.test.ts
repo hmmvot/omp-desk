@@ -5,7 +5,7 @@
  * points with their previews. Runner: `node --test src/host/rpc/history-reader.test.ts`.
  */
 import assert from "node:assert/strict";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -299,6 +299,38 @@ describe("rendersByFacts", () => {
 		];
 		for (const { entry, facts } of samples) assert.equal(rendersByFacts(facts), rendersTranscriptEntry(entry), entry.type);
 		assert.equal(rendersByFacts({ type: "custom" }), false);
+	});
+});
+
+describe("HistoryReader for the large-session paths", () => {
+	const marker = (id: string, parentId: string): ChatEntry => ({ type: "custom", id, parentId, timestamp: "2026-01-01T00:00:00.000Z", customType: "omp-desk/navigation", data: {} });
+
+	it("reports the bytes of the file it indexed, and the growth after a refresh", async () => {
+		const dir = await scratch();
+		const file = await dir.file("size.jsonl", sessionFileText({ entries: conversation(3) }));
+		const reader = await HistoryReader.open(file);
+		const first = reader.indexedBytes;
+		assert.equal(first, (await stat(file)).size);
+		await appendFile(file, `${JSON.stringify(messageEntry("u9", "a2", userMessage("more text here", 9_000)))}\n`);
+		await reader.refresh();
+		assert.equal(reader.indexedBytes, (await stat(file)).size);
+		assert.ok(reader.indexedBytes > first);
+	});
+
+	it("lists the saved entries off the active path, newest last and bounded", async () => {
+		const dir = await scratch();
+		const rows = [...conversation(3), marker("m", "a0"), messageEntry("u1b", "m", userMessage("branch prompt", 5_000)), messageEntry("a1b", "u1b", assistantMessage("branch reply", 5_005))];
+		const reader = await HistoryReader.open(await dir.file("off.jsonl", sessionFileText({ entries: rows })));
+		assert.deepEqual((await reader.recentOffPath("a1b")).map(entry => entry.id), ["u1", "a1", "u2", "a2"], "the first branch is off the path to the live leaf");
+		assert.deepEqual((await reader.recentOffPath("a1b", 2)).map(entry => entry.id), ["u2", "a2"], "the newest ones when bounded");
+		assert.deepEqual((await reader.recentOffPath("a2")).map(entry => entry.id), ["m", "u1b", "a1b"], "from the other leaf the second branch is off the path");
+		assert.deepEqual((await reader.recentOffPath(null)).map(entry => entry.id), ["u1", "a1", "u2", "a2"], "no leaf means the file's own");
+	});
+
+	it("lists nothing for a straight conversation", async () => {
+		const dir = await scratch();
+		const reader = await HistoryReader.open(await dir.file("line.jsonl", sessionFileText({ entries: conversation(4) })));
+		assert.deepEqual(await reader.recentOffPath("a3"), []);
 	});
 });
 

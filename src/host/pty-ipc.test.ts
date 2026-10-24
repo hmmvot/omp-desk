@@ -391,6 +391,40 @@ describe("a frame listener that throws", () => {
 	});
 });
 
+describe("the read-side traffic meter", () => {
+	it("counts frames, characters and reads, and times the listener that is slow", async () => {
+		const harness = await start();
+		const connection = await connectPtyBroker({
+			token: harness.token,
+			brokerId: IDENTITY.brokerId,
+			generation: harness.generation,
+			port: harness.server.port,
+		});
+		const before = connection.traffic?.();
+		assert.equal(before?.frames, 0);
+		assert.equal(before?.lastFrameAt, null);
+		const seen = Promise.withResolvers<void>();
+		let frames = 0;
+		connection.onFrame(() => {
+			frames += 1;
+			const until = performance.now() + 20;
+			while (performance.now() < until) { /* a slow consumer */ }
+			if (frames === 3) seen.resolve();
+		});
+		const accepted = await harness.nextConnection();
+		for (let index = 0; index < 3; index += 1) accepted.send({ v: PTY_PROTOCOL_VERSION, t: "state", status: statusPayload() });
+		await seen.promise;
+		const after = connection.traffic?.();
+		assert.equal(after?.frames, 3);
+		assert.ok((after?.chars ?? 0) > 0);
+		assert.ok((after?.chunks ?? 0) >= 1);
+		assert.ok((after?.maxFrameMs ?? 0) >= 19, "the slowest frame is the one the listener spent 20 ms on");
+		assert.ok((after?.busyMs ?? 0) >= 59, "the three frames took at least their listeners' time");
+		assert.ok((after?.lastFrameAt ?? 0) > 0);
+		assert.equal(accepted.traffic?.().frames, 0, "the broker side has read nothing the client sent");
+	});
+});
+
 describe("authenticated frames", () => {
 	it("closes a connection whose frame is not proofed by its own key", async () => {
 		const harness = await start();

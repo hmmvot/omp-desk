@@ -26,6 +26,7 @@ import type {
 	PtyStopResult,
 } from "./pty-protocol.ts";
 import type { PtyClientSideConnection } from "./pty-ipc.ts";
+import { RPC_DETACHED_BY_CLIENT } from "../protocol/rpc.ts";
 
 /** Default time to wait for one request's answer. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -224,7 +225,7 @@ export class BrokerHandle<Event = BrokerHandleEvent> {
 
 	/** Detach this window. The broker and its child keep running. */
 	disconnect(): void {
-		this.connection.close("detached by the client");
+		this.connection.close(RPC_DETACHED_BY_CLIENT);
 	}
 
 	/** Route one connection's frames and closure to this handle; a replaced connection is ignored. */

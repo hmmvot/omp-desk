@@ -63,6 +63,32 @@ export const PTY_MAX_SEND_QUEUE_BYTES = 8 * 1024 * 1024;
 /** Largest single line (one frame, delimiter excluded) a connection accepts, and so the largest unterminated tail it buffers. */
 const MAX_LINE_BYTES = PTY_MAX_FRAME_BYTES;
 
+function newMeter(): ConnectionState["meter"] {
+	return { frames: 0, chars: 0, chunks: 0, busyMs: 0, maxChunkMs: 0, maxFrameMs: 0, lastFrameAt: null };
+}
+
+/**
+ * What one connection's read side has done since it opened: the measurement that tells a slow consumer from a slow
+ * sender. Counters are cumulative; a caller that wants a rate keeps the previous reading.
+ */
+export interface ConnectionTraffic {
+	/** Frames parsed and handed to the listeners. */
+	readonly frames: number;
+	/** Characters read off the socket (it decodes UTF-8 itself) and the number of reads. */
+	readonly chars: number;
+	readonly chunks: number;
+	/** Time spent parsing and delivering, in total and for the slowest single read and single frame. */
+	readonly busyMs: number;
+	readonly maxChunkMs: number;
+	readonly maxFrameMs: number;
+	/** Wall-clock time of the last frame delivered, or `null` before the first. */
+	readonly lastFrameAt: number | null;
+	/** Bytes the kernel has delivered to the socket, bytes received and not yet handed to a listener, and bytes this side has accepted and not flushed. */
+	readonly socketBytesRead: number;
+	readonly readableBytes: number;
+	readonly pendingBytes: number;
+}
+
 /**
  * One authenticated connection, seen from whichever end owns it.
  *
@@ -91,6 +117,8 @@ export interface PtyConnection<Received extends PtyFrame = PtyFrame, Sent extend
 	onFrame(listener: (frame: Received) => void): void;
 	onClosed(listener: (reason: string) => void): void;
 	close(reason?: string): void;
+	/** The read-side measurement of this connection; absent on a test double. */
+	traffic?(): ConnectionTraffic;
 }
 
 /** What the broker's side of one connection speaks. */
@@ -227,6 +255,8 @@ interface ConnectionState {
 	recvSeq: number;
 	queue: string[];
 	queued: number;
+	/** Read-side measurement ({@link ConnectionTraffic}); all milliseconds are monotonic durations. */
+	readonly meter: { frames: number; chars: number; chunks: number; busyMs: number; maxChunkMs: number; maxFrameMs: number; lastFrameAt: number | null };
 	closed: boolean;
 }
 
@@ -286,6 +316,14 @@ function makeConnection<Received extends PtyFrame>(state: ConnectionState): PtyC
 		get pendingBytes() {
 			return state.queued + state.socket.writableLength;
 		},
+		traffic() {
+			return {
+				...state.meter,
+				socketBytesRead: state.socket.bytesRead,
+				readableBytes: state.socket.readableLength,
+				pendingBytes: state.queued + state.socket.writableLength,
+			};
+		},
 		send(body) {
 			if (state.closed) return;
 			state.sendSeq += 1;
@@ -321,37 +359,56 @@ function makeConnection<Received extends PtyFrame>(state: ConnectionState): PtyC
 	};
 }
 
-/** Read post-handshake frames off a socket until it ends. */
+/**
+ * Read post-handshake frames off a socket until it ends. Every read is timed (parse plus the listeners it runs), so a
+ * slow consumer shows as busy time here rather than as a silent stream ({@link ConnectionTraffic}).
+ */
 function pumpFrames(state: ConnectionState): void {
 	state.socket.on("data", (chunk: string) => {
 		if (state.closed) return;
-		const pushed = state.reader.push(chunk);
-		if (pushed.overflow) {
-			closeConnection(state, "the peer sent a frame above the frame bound");
-			return;
-		}
-		for (;;) {
-			const line = state.reader.take();
-			if (line === null) return;
-			if (line.length === 0) continue;
-			let frame: PtyFrame;
-			try {
-				frame = parsePtyFrame(state.key, state.sessionId, state.recvSeq + 1, line, state.direction);
-			} catch (error) {
-				closeConnection(state, error instanceof Error ? error.message : "frame refused");
+		const meter = state.meter;
+		const chunkStart = performance.now();
+		meter.chunks += 1;
+		meter.chars += chunk.length;
+		try {
+			const pushed = state.reader.push(chunk);
+			if (pushed.overflow) {
+				closeConnection(state, "the peer sent a frame above the frame bound");
 				return;
 			}
-			state.recvSeq += 1;
-			try {
-				state.deliver(frame);
-			} catch {
-				// A throw out of a socket "data" handler would abandon every complete line still buffered
-				// behind this one and leave them unread until the peer happens to send again. After a
-				// turn ends that is never, so the stream would freeze. Closing is the recoverable answer:
-				// the owner reconnects and resynchronises from its own cursor.
-				closeConnection(state, "a frame listener failed");
-				return;
+			for (;;) {
+				const line = state.reader.take();
+				if (line === null) return;
+				if (line.length === 0) continue;
+				let frame: PtyFrame;
+				try {
+					frame = parsePtyFrame(state.key, state.sessionId, state.recvSeq + 1, line, state.direction);
+				} catch (error) {
+					closeConnection(state, error instanceof Error ? error.message : "frame refused");
+					return;
+				}
+				state.recvSeq += 1;
+				const frameStart = performance.now();
+				try {
+					state.deliver(frame);
+				} catch {
+					// A throw out of a socket "data" handler would abandon every complete line still buffered
+					// behind this one and leave them unread until the peer happens to send again. After a
+					// turn ends that is never, so the stream would freeze. Closing is the recoverable answer:
+					// the owner reconnects and resynchronises from its own cursor.
+					closeConnection(state, "a frame listener failed");
+					return;
+				} finally {
+					const frameMs = performance.now() - frameStart;
+					meter.frames += 1;
+					meter.lastFrameAt = Date.now();
+					if (frameMs > meter.maxFrameMs) meter.maxFrameMs = frameMs;
+				}
 			}
+		} finally {
+			const chunkMs = performance.now() - chunkStart;
+			meter.busyMs += chunkMs;
+			if (chunkMs > meter.maxChunkMs) meter.maxChunkMs = chunkMs;
 		}
 	});
 	state.socket.on("error", error => closeConnection(state, `socket error: ${error.message}`));
@@ -492,6 +549,7 @@ export async function startPtyBrokerServer(options: PtyBrokerServerOptions): Pro
 				recvSeq: 0,
 				queue: [],
 				queued: 0,
+				meter: newMeter(),
 				closed: false,
 			};
 			// Anything past the handshake line belongs to the frame reader.
@@ -681,6 +739,7 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 			recvSeq: 0,
 			queue: [],
 			queued: 0,
+			meter: newMeter(),
 			closed: false,
 		};
 		// The handshake line was taken from this very reader. The rest of the chunk it

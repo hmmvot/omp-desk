@@ -56,6 +56,24 @@ function payload(entries: readonly SessionEntry[], patch: Partial<ChatSnapshotPa
 	return { ...snapshotOf(createChatModel(), EPOCH), phase: "live", entries, ...patch };
 }
 
+describe("link_stalled", () => {
+	it("parses as an event frame only with a boolean", () => {
+		assert.deepEqual(parseChatEventFrame({ type: "link_stalled", stalled: true }), { type: "link_stalled", stalled: true });
+		assert.deepEqual(parseChatEventFrame({ type: "link_stalled", stalled: false }), { type: "link_stalled", stalled: false });
+		assert.equal(parseChatEventFrame({ type: "link_stalled", stalled: "yes" }), null);
+		assert.equal(parseChatEventFrame({ type: "link_stalled" }), null);
+	});
+
+	it("crosses the snapshot transport only while it is set, and a non-boolean head is refused", () => {
+		const idle = splitChatSnapshot(payload([]), "snap-1").snapshot;
+		assert.equal("linkStalled" in idle.head, false);
+		const stalled = splitChatSnapshot(payload([], { linkStalled: true }), "snap-2").snapshot;
+		assert.equal(stalled.head.linkStalled, true);
+		assert.deepEqual(parseChatHostMessage(wire(stalled)), wire(stalled));
+		assert.equal(parseChatHostMessage(wire({ ...stalled, head: { ...stalled.head, linkStalled: "yes" } })), null);
+	});
+});
+
 describe("isChatRequestId", () => {
 	it("accepts only the 128-bit lowercase hex the page mints", () => {
 		assert.equal(isChatRequestId(REQUEST_ID), true);

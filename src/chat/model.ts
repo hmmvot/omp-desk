@@ -294,6 +294,8 @@ export interface ChatModel {
 	pendingControl: ChatPendingControl | null;
 	/** A `/clear` the host deferred until OMP finishes an interrupted turn; at most one per session. */
 	clearPending: ClearDeferrable | null;
+	/** The host sees the link to OMP deliver nothing while a command waits for its answer; cleared when frames resume. */
+	linkStalled: boolean;
 	/** One bounded text line from `setStatus`, or null. */
 	statusLine: string | null;
 	statusEntries: ReadonlyMap<string, string>;
@@ -376,6 +378,8 @@ export type ChatEventFrame = SubagentFrame | NativeEventFrame
 	| { type: "control_pending"; pending: ChatPendingControl | null }
 	/** Host-owned only: a `/clear` is waiting for OMP to become ready (ADR-0059 amendment). */
 	| { type: "clear_pending"; pending: ClearDeferrable | null }
+	/** Host-owned only: the link to OMP stopped delivering (`true`) or resumed (`false`). */
+	| { type: "link_stalled"; stalled: boolean }
 	| { type: "model_changed" }
 	| { type: "thinking_level_changed"; thinkingLevel?: string | null; configured?: string; resolved?: string }
 	| { type: "config_update"; model?: ChatLiteModel | null; thinkingLevel?: string | null }
@@ -462,6 +466,7 @@ export interface ChatSnapshotPayload {
 	displayTurns?: readonly DisplayTurn[];
 	pendingControl?: ChatPendingControl | null;
 	clearPending?: ClearDeferrable | null;
+	linkStalled?: boolean;
 }
 
 /** `omp:chat-entries`. */
@@ -536,6 +541,7 @@ export function createChatModel(): ChatModel {
 		commandFeedback: null,
 		pendingControl: null,
 		clearPending: null,
+		linkStalled: false,
 		statusLine: null,
 		statusEntries: EMPTY_STATUS,
 		widgets: NO_WIDGETS,
@@ -870,6 +876,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			commands: snapshot.commands,
 			pendingControl: snapshot.pendingControl ?? null,
 			clearPending: snapshot.clearPending ?? null,
+			linkStalled: snapshot.linkStalled === true,
 		},
 		clock,
 	);
@@ -1092,6 +1099,8 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			return samePendingControl(model.pendingControl, frame.pending) ? model : { ...model, pendingControl: frame.pending };
 		case "clear_pending":
 			return model.clearPending === frame.pending ? model : { ...model, clearPending: frame.pending };
+		case "link_stalled":
+			return model.linkStalled === frame.stalled ? model : { ...model, linkStalled: frame.stalled };
 		case "model_changed":
 			return model;
 		case "turn_start":
@@ -1580,6 +1589,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		displayTurns: model.displayTurns,
 		...(model.pendingControl === null ? {} : { pendingControl: model.pendingControl }),
 		...(model.clearPending === null ? {} : { clearPending: model.clearPending }),
+		...(model.linkStalled ? { linkStalled: true } : {}),
 	};
 }
 

@@ -30,7 +30,7 @@ import { BrokerHandle, PtyRequestError, type BrokerHandleEvent } from "./broker-
 import { PTY_PROTOCOL_VERSION, PTY_RPC_MAX_WRITE_BYTES, PtyProtocolError, PtyRpcFragmentAssembler, ptyRpcFragment, ptyRpcFragmentCount } from "./pty-protocol.ts";
 import type { PtyBrokerFrame, PtyBrokerRecord, PtyStatusPayload, PtyStopMode, PtyStopResult } from "./pty-protocol.ts";
 import type { PtyClientSideConnection } from "./pty-ipc.ts";
-import type { InputReclaim, RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChildStatus } from "../protocol/rpc.ts";
+import type { InputReclaim, RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChannelTraffic, RpcChildStatus } from "../protocol/rpc.ts";
 
 /** How long one line write waits for the broker's acknowledgement. */
 const WRITE_TIMEOUT_MS = 60_000;
@@ -117,6 +117,10 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		};
 	}
 
+	traffic(): RpcChannelTraffic | null {
+		return this.connection.traffic?.() ?? null;
+	}
+
 	async attach(request: { readonly sinceSeq: number; readonly reclaimInput?: InputReclaim }): Promise<RpcAttachResult> {
 		if (this.closedReason !== null) await this.reconnect();
 		this.channelClosed = false;
@@ -135,6 +139,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 			rpcProtocol: frame.rpcProtocol,
 			ready: frame.ready,
 			negotiating: frame.negotiating,
+			...(frame.lastForcedClose === undefined ? {} : { lastForcedClose: frame.lastForcedClose }),
 			child: childStatusOf(frame.child),
 		};
 	}
@@ -225,7 +230,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		for (const waiter of this.drainWaiters.splice(0)) waiter();
 		this.assembler.reset();
 		this.setOwned(false);
-		this.closeChannel("disconnected");
+		this.closeChannel("disconnected", reason);
 	}
 
 	protected handleFrame(frame: PtyBrokerFrame): void {
@@ -287,10 +292,10 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		for (const listener of [...this.channelListeners]) listener(event);
 	}
 
-	private closeChannel(reason: "child-exited" | "disconnected" | "stopped"): void {
+	private closeChannel(reason: "child-exited" | "disconnected" | "stopped", detail?: string): void {
 		if (this.channelClosed) return;
 		this.channelClosed = true;
-		this.emitChannel({ type: "closed", reason });
+		this.emitChannel(detail === undefined ? { type: "closed", reason } : { type: "closed", reason, detail });
 	}
 
 	/** Claim input without takeover; losing the claim is a state (reads work, writes are refused). */

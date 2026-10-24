@@ -11,6 +11,7 @@ import type {
 	RpcAttachResult,
 	RpcChannel,
 	RpcChannelEvent,
+	RpcChannelTraffic,
 	RpcChildStatus,
 	RpcWriteErrorCode,
 } from "../../protocol/rpc.ts";
@@ -67,6 +68,11 @@ export class FakeRpcChannel implements RpcChannel {
 	/** The attach answer's `hostToolRetention`: `false` models a broker from an earlier build. */
 	hostToolRetention = true;
 	hostCallOverflow = false;
+	/** The attach answer's `truncated`, and the broker's report of the consumer it closed itself (`lastForcedClose`). */
+	truncatedAttach = false;
+	forcedClose: { reason: "fell-behind" | "paced"; ageMs: number } | undefined;
+	/** What `traffic()` reports; `null` models a channel with no reading. */
+	trafficReading: RpcChannelTraffic | null = null;
 	/** Whether `attach` wins the broker's input claim; `false` models a window that attaches while another one holds input. */
 	inputClaimable = true;
 	/** How many claims the broker refuses before it grants input to a claimable window: a previous owner whose close it has not processed yet. */
@@ -125,6 +131,10 @@ export class FakeRpcChannel implements RpcChannel {
 		};
 	}
 
+	traffic(): RpcChannelTraffic | null {
+		return this.trafficReading;
+	}
+
 	disconnect(): void {
 		this.disconnects += 1;
 		this.#attached = false;
@@ -148,13 +158,14 @@ export class FakeRpcChannel implements RpcChannel {
 			fromSeq: request.sinceSeq,
 			oldestSeq: this.#ring[0]?.seq ?? this.#seq,
 			latestSeq: this.#seq,
-			truncated: false,
+			truncated: this.truncatedAttach,
 			pinnedOverflow: false,
 			hostToolRetention: this.hostToolRetention,
 			hostCallOverflow: this.hostCallOverflow,
 			rpcProtocol: this.rpcProtocol,
 			ready: this.ready,
 			negotiating: this.negotiating,
+			...(this.forcedClose === undefined ? {} : { lastForcedClose: this.forcedClose }),
 			child: { state: this.childState, pid: 1234, exitCode: this.childState === "exited" ? this.childExitCode : null, ...(this.childStderrTail === undefined ? {} : { stderrTail: this.childStderrTail }) },
 		};
 		queueMicrotask(() => {
@@ -221,9 +232,9 @@ export class FakeRpcChannel implements RpcChannel {
 		return this.emit(`{"type":"${type}","message":${JSON.stringify(message)},"messageId":"${messageId}"}`);
 	}
 
-	closeLink(reason: "child-exited" | "disconnected" | "stopped"): void {
+	closeLink(reason: "child-exited" | "disconnected" | "stopped", detail?: string): void {
 		this.#attached = false;
-		this.#deliver({ type: "closed", reason });
+		this.#deliver(detail === undefined ? { type: "closed", reason } : { type: "closed", reason, detail });
 	}
 
 	exitChild(exitCode = 0, stderrTail?: string): void {

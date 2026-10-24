@@ -54,6 +54,25 @@ function end(model: ChatModel, messageId: string, message: ChatMessage): ChatMod
 
 const ids = (model: ChatModel): string[] => model.entries.map(entry => entry.id);
 
+describe("link stalled", () => {
+	it("is set and cleared by its host-owned frame, and a repeat changes nothing", () => {
+		const base = live();
+		assert.equal(base.linkStalled, false);
+		const stalled = reduceChatFrame(base, { type: "link_stalled", stalled: true }, { now: 2 });
+		assert.equal(stalled.linkStalled, true);
+		assert.equal(reduceChatFrame(stalled, { type: "link_stalled", stalled: true }, { now: 3 }), stalled, "no new model for the same state");
+		assert.equal(reduceChatFrame(stalled, { type: "link_stalled", stalled: false }, { now: 4 }).linkStalled, false);
+	});
+
+	it("travels in a snapshot only while set, and a fresh snapshot replaces what the page held", () => {
+		const stalled = reduceChatFrame(live(), { type: "link_stalled", stalled: true }, { now: 2 });
+		assert.equal(snapshotOf(stalled, EPOCH).linkStalled, true);
+		assert.equal("linkStalled" in snapshotOf(live(), EPOCH), false);
+		assert.equal(applyChatSnapshot(createChatModel(), { ...emptySnapshot(), linkStalled: true }, { now: 1 }).linkStalled, true);
+		assert.equal(applyChatSnapshot(stalled, emptySnapshot(), { now: 3 }).linkStalled, false);
+	});
+});
+
 describe("a tool's observed start", () => {
 	it("is marked only when tool_execution_start was seen, not when the record began at an update", () => {
 		let model = reduceChatFrame(live(), { type: "tool_execution_start", toolCallId: "seen", toolName: "read", args: {} }, { now: 100 });

@@ -22,6 +22,8 @@ const GENERIC_FAILURE = "The session is not available.";
 const LEGACY_TEXT =
 	"This tab belongs to a previous version of the extension and cannot show this session. Close the tab and open the session from the Sessions panel.";
 const STOPPED_TEXT = "Session stopped. Resume to continue.";
+/** A live Chat whose connection to OMP has delivered no answer for a few seconds; the host probes it and replaces it if the probe is not answered. */
+export const LINK_STALLED_TEXT = "OMP is not answering through the connection. Waiting a moment, then reconnecting on its own.";
 
 /** The fixed sentence for `code`, or the generic one. */
 export function errorSentence(code: string | null): string {
@@ -30,7 +32,7 @@ export function errorSentence(code: string | null): string {
 }
 
 /** The banner for a model, or `null` when a live, writable conversation needs none. */
-export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyReason" | "exitReason">): ChatBanner | null {
+export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyReason" | "exitReason"> & Partial<Pick<ChatModel, "linkStalled">>): ChatBanner | null {
 	switch (model.phase) {
 		case "starting":
 			return { level: "info", icon: "debug-start", text: "Starting the session…" };
@@ -39,6 +41,7 @@ export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyRe
 		case "resyncing":
 			return { level: "info", icon: "sync", text: "Catching up with the session…" };
 		case "live":
+			if (model.linkStalled === true) return { level: "warn", icon: "sync", text: LINK_STALLED_TEXT };
 			return model.readOnlyReason === null ? null : { level: "warn", icon: "warning", text: model.readOnlyReason };
 		case "stopped":
 			if (model.exitReason !== undefined) return {

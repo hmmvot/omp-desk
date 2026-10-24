@@ -902,6 +902,8 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 			const pending = parseClearPending(value.pending);
 			return pending === "invalid" ? null : { type: "clear_pending", pending };
 		}
+		case "link_stalled":
+			return typeof value.stalled === "boolean" ? { type: "link_stalled", stalled: value.stalled } : null;
 		case "thinking_level_changed": {
 			if (value.thinkingLevel !== undefined && value.thinkingLevel !== null && !isText(value.thinkingLevel, MAX_LABEL_LENGTH)) return null;
 			return value.thinkingLevel === undefined ? { type: "thinking_level_changed" } : { type: "thinking_level_changed", thinkingLevel: value.thinkingLevel };
@@ -1093,6 +1095,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 	if (pendingControl === "invalid") return null;
 	const clearPending = parseClearPending(value.clearPending);
 	if (clearPending === "invalid") return null;
+	if (value.linkStalled !== undefined && typeof value.linkStalled !== "boolean") return null;
 
 	return {
 		phase,
@@ -1134,6 +1137,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		displayTurns,
 		...(pendingControl === null ? {} : { pendingControl }),
 		...(clearPending === null ? {} : { clearPending }),
+		...(value.linkStalled === true ? { linkStalled: true } : {}),
 	};
 }
 

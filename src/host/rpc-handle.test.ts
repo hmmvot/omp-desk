@@ -187,7 +187,7 @@ function watch(handle: RpcHandle): Seen {
 
 const marker = (name: string) => (json: Record<string, unknown>) => json.type === "marker" && json.name === name;
 
-async function launchRpc(slot = nextSlot()): Promise<RpcHandle> {
+async function launchRpc(slot = nextSlot(), extra: { rpcPacedCloseMs?: number } = {}): Promise<RpcHandle> {
 	const outcome = await client.launchRpc({
 		slot,
 		kind: "managed-rpc",
@@ -195,6 +195,7 @@ async function launchRpc(slot = nextSlot()): Promise<RpcHandle> {
 		args: ["-e", RPC_CHILD_SCRIPT],
 		cwd: tmpdir(),
 		title: `rpc ${slot}`,
+		...extra,
 	});
 	assert.equal(outcome.state, "running", outcome.reason);
 	assert.ok(outcome.handle);
@@ -361,6 +362,35 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 		const outcome = await Promise.race([answered.then(() => "answered"), closed.then(event => JSON.stringify(event))]);
 		assert.equal(outcome, "answered");
 		assert.equal(secondSeen.lines().filter(line => line.json.type === "rpc_chunk").length, 6, "every chunk of the answer arrived");
+	});
+
+	it("closes a consumer that does not read as paced after the limit, names it on the next attach, and the reattached window gets the rest", { timeout: TEST_TIMEOUT_MS }, async () => {
+		// A window whose extension host is stuck stops reading its socket: the broker's queue for it passes the pace bound and
+		// stays there. The broker used to leave it until the ring evicted its cursor (minutes of a quiet session); it now closes
+		// it after `rpcPacedCloseMs`, with its own reason, and says so to the window that comes back.
+		const slot = nextSlot();
+		const first = await launchRpc(slot, { rpcPacedCloseMs: 1_000 });
+		const firstSeen = watch(first);
+		await first.attach({ sinceSeq: 0 });
+		const closed = firstSeen.whenEvent(event => event.type === "closed");
+		// About 12 MiB: more than any socket buffer plus the pace bound (2 MiB), less than a ring the stuck window is behind by.
+		void send(first, { type: "history", lines: 700, bytes: 16 * 1024, name: "flood" });
+		await new Promise(resolve => setImmediate(resolve));
+		const until = Date.now() + 4_000;
+		while (Date.now() < until) { /* a stuck extension host: nothing reads the socket */ }
+		const event = await closed;
+		assert.equal(event.type === "closed" ? event.reason : null, "disconnected");
+		// The wire carries no reason: the broker ends the connection, and says why only on the next attach (`lastForcedClose`).
+		const seenSeq = firstSeen.lines().at(-1)?.seq ?? 0;
+
+		const second = await reattach(slot);
+		const secondSeen = watch(second);
+		const attached = await second.attach({ sinceSeq: seenSeq });
+		assert.equal(attached.lastForcedClose?.reason, "paced");
+		assert.ok((attached.lastForcedClose?.ageMs ?? Infinity) < 30_000);
+		await send(second, { type: "mark", name: "after" });
+		await secondSeen.whenLine(marker("after"));
+		await secondSeen.whenLine(marker("flood"));
 	});
 
 	it("keeps an unanswered dialog across every reattach until it is answered", { timeout: TEST_TIMEOUT_MS }, async () => {

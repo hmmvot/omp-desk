@@ -239,6 +239,27 @@ export class HistoryReader {
 		return this.#path;
 	}
 
+	/** Bytes of the session file the index covers: the file's size at the last scan (what a full `get_entries` would send, give or take framing). */
+	get indexedBytes(): number {
+		return this.#indexedBytes;
+	}
+
+	/**
+	 * The newest `limit` entries in file order that are not on the active path ending at `leafId` (the file's own leaf
+	 * when `null` or unknown): what OMP saved to branches the user moved away from. A legacy file has no branches.
+	 */
+	async recentOffPath(leafId: string | null, limit: number = 400): Promise<ChatEntry[]> {
+		if (this.#header === null) throw new HistoryReadError("no-header");
+		const legacy = this.#version === null || this.#version < 3;
+		if (legacy) return [];
+		const position = leafId === null ? undefined : this.#byId.get(leafId);
+		const onPath = new Set(this.#pathTo(position ?? this.#fileLeaf(false)));
+		const found: number[] = [];
+		for (let index = this.#entries.length - 1; index >= 0 && found.length < limit; index -= 1) if (!onPath.has(index)) found.push(index);
+		found.reverse();
+		return this.#withFile(handle => this.#readPositions(handle, found));
+	}
+
 	/** Re-read appended bytes; a file that shrank or whose last indexed line changed is re-indexed once. */
 	async refresh(): Promise<HistoryRefresh> {
 		return this.#withFile(async handle => {

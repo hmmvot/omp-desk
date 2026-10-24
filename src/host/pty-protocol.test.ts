@@ -669,6 +669,24 @@ describe("managed-rpc kind and frames", () => {
 		assert.equal(forged.t === "rpc-attached" && forged.negotiating, false, "only a literal true counts");
 	});
 
+	it("reads the close the broker made on its own initiative, and ignores one it cannot name", () => {
+		const key = derivePtySessionKey(createPtyToken(), createPtyNonce(), createPtyNonce());
+		const sessionId = derivePtySessionId(key);
+		const v = PTY_PROTOCOL_VERSION;
+		const attached = { v, t: "rpc-attached", id: 1, fromSeq: 0, oldestSeq: 1, latestSeq: 2, truncated: false, pinnedOverflow: false, rpcProtocol: 2, ready: null, child: statusFixture() };
+		const parse = (frame: object) => parsePtyFrame(key, sessionId, 1, encodePtyFrame(key, sessionId, 1, frame as never), "broker-to-client");
+		const paced = parse({ ...attached, lastForcedClose: { reason: "paced", ageMs: 1200 } });
+		assert.deepEqual(paced.t === "rpc-attached" ? paced.lastForcedClose : null, { reason: "paced", ageMs: 1200 });
+		const behind = parse({ ...attached, lastForcedClose: { reason: "fell-behind", ageMs: 0 } });
+		assert.equal(behind.t === "rpc-attached" && behind.lastForcedClose?.reason, "fell-behind");
+		const earlier = parse(attached);
+		assert.equal(earlier.t === "rpc-attached" && earlier.lastForcedClose, undefined, "an earlier build's broker sends none");
+		const unknown = parse({ ...attached, lastForcedClose: { reason: "evicted-by-moon", ageMs: 5 } });
+		assert.equal(unknown.t === "rpc-attached" && unknown.lastForcedClose, undefined, "a reason this build cannot name is no reason, and the attach still works");
+		const malformed = parse({ ...attached, lastForcedClose: { reason: "paced", ageMs: "soon" } });
+		assert.equal(malformed.t === "rpc-attached" && malformed.lastForcedClose, undefined);
+	});
+
 	it("refuses an rpc frame whose fragment position, encoding or ids are wrong", () => {
 		const key = derivePtySessionKey(createPtyToken(), createPtyNonce(), createPtyNonce());
 		const sessionId = derivePtySessionId(key);

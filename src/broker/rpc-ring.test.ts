@@ -15,6 +15,9 @@ import { describe, it } from "node:test";
 import { PTY_RPC_FRAGMENT_RAW_BYTES } from "../host/pty-protocol.ts";
 import {
 	DEFAULT_RPC_RING_LIMITS,
+	RPC_FELL_BEHIND_REASON,
+	RPC_PACED_CLOSE_MS,
+	RPC_PACED_REASON,
 	RPC_PACE_BYTES,
 	RPC_RETAINED_RESPONSE_MAX_BYTES,
 	RpcLineRing,
@@ -329,6 +332,7 @@ describe("replay from a cursor", () => {
 class FakeSink implements RpcSink {
 	closed = false;
 	closeReason: string | null = null;
+	forced: string | null = null;
 	pendingBytes = 0;
 	readonly sent: Array<{ seq: number; index: number; count: number; data: string }> = [];
 
@@ -336,9 +340,10 @@ class FakeSink implements RpcSink {
 		this.sent.push({ seq, index, count, data });
 	}
 
-	close(reason: string): void {
+	close(reason: string, forced: string): void {
 		this.closed = true;
 		this.closeReason = reason;
+		this.forced = forced;
 	}
 
 	/** Completed lines in delivery order, reassembled from their fragments. */
@@ -506,5 +511,104 @@ describe("paced subscriber", () => {
 		const first: RpcRingEntry | undefined = ring.replay(0).entries[0];
 		assert.equal(includesType(sink.lines().map(line => line.text), "extension_ui_request", '"ui-1"'), true);
 		assert.equal(first?.pinned, "dialog");
+	});
+});
+
+describe("a consumer that stays paced", () => {
+	/** A subscriber on a clock the test moves. */
+	function paced(sink: FakeSink): { subscriber: RpcSubscriber; ring: RpcLineRing; clock: { now: number } } {
+		const ring = new RpcLineRing();
+		ring.setConsumers(1);
+		const clock = { now: 1_000 };
+		const subscriber = new RpcSubscriber(ring, sink, ring.replay(0).entries, ring.latestSeq, RPC_PACE_BYTES, () => clock.now);
+		return { subscriber, ring, clock };
+	}
+
+	it("is closed as paced once it has stood at the bound for the limit, whatever the ring still holds", () => {
+		const sink = new FakeSink();
+		const { subscriber, ring, clock } = paced(sink);
+		ring.append(filler(1));
+		sink.pendingBytes = RPC_PACE_BYTES;
+		assert.equal(subscriber.pump(), false);
+		assert.equal(subscriber.paced, true);
+		clock.now += RPC_PACED_CLOSE_MS - 1;
+		assert.equal(subscriber.enforcePace(RPC_PACED_CLOSE_MS), "wait", "just under the limit it is kept");
+		assert.equal(sink.closed, false);
+		clock.now += 1;
+		assert.equal(subscriber.enforcePace(RPC_PACED_CLOSE_MS), "closed");
+		assert.equal(sink.closed, true);
+		assert.equal(sink.forced, "paced", "the broker's own reason is named, not left to the generic eviction one");
+		assert.equal(sink.closeReason, RPC_PACED_REASON);
+		assert.equal(sink.sent.length, 0, "nothing was sent to a consumer that never drained");
+	});
+
+	it("is not closed while its socket drains: a pump below the bound restarts the clock", () => {
+		const sink = new FakeSink();
+		const { subscriber, ring, clock } = paced(sink);
+		ring.append(filler(1));
+		sink.pendingBytes = RPC_PACE_BYTES;
+		subscriber.pump();
+		clock.now += RPC_PACED_CLOSE_MS - 1;
+		sink.pendingBytes = 0;
+		subscriber.pump();
+		assert.equal(subscriber.paced, false);
+		sink.pendingBytes = RPC_PACE_BYTES;
+		ring.append(filler(2));
+		clock.now += 2_000;
+		subscriber.pump();
+		clock.now += RPC_PACED_CLOSE_MS - 1;
+		assert.equal(subscriber.enforcePace(RPC_PACED_CLOSE_MS), "wait", "the second stop counts from its own start");
+		assert.equal(sink.closed, false);
+		assert.equal(subscriber.stats.pacedEpisodes, 2);
+	});
+
+	it("is told to resume, not closed, when its queue fell below the bound; an empty queue with no drain reported is a missed drain", () => {
+		const sink = new FakeSink();
+		const { subscriber, ring, clock } = paced(sink);
+		ring.append(filler(1));
+		ring.append(filler(2));
+		sink.pendingBytes = RPC_PACE_BYTES;
+		subscriber.pump();
+		clock.now += RPC_PACED_CLOSE_MS * 5;
+		sink.pendingBytes = RPC_PACE_BYTES - 1;
+		assert.equal(subscriber.enforcePace(RPC_PACED_CLOSE_MS), "resume");
+		assert.equal(sink.closed, false);
+		assert.equal(subscriber.stats.resumedBelowBound, 1, "a partly flushed queue is a slow drain, not a lost one");
+		assert.equal(subscriber.stats.missedDrains, 0);
+		sink.pendingBytes = 0;
+		assert.equal(subscriber.enforcePace(RPC_PACED_CLOSE_MS), "resume");
+		assert.equal(subscriber.stats.missedDrains, 1, "the queue emptied and no drain was reported");
+		subscriber.noteDrain();
+		assert.equal(subscriber.enforcePace(RPC_PACED_CLOSE_MS), "resume");
+		assert.equal(subscriber.stats.missedDrains, 1, "a reported drain is not missed");
+		assert.equal(subscriber.pump(), true);
+		assert.equal(sink.lines().length, 2, "the backlog goes out when the caller pumps");
+	});
+
+	it("names the other forced close, a cursor evicted from the ring, as fell-behind", () => {
+		const sink = new FakeSink();
+		const { subscriber, ring } = paced(sink);
+		for (let index = 0; index < DEFAULT_RPC_RING_LIMITS.maxLines + 50; index += 1) ring.append(filler(index, 8));
+		subscriber.pump();
+		assert.equal(sink.forced, "fell-behind");
+		assert.equal(sink.closeReason, RPC_FELL_BEHIND_REASON);
+	});
+
+	it("measures what its pump did: lines, bytes, pumps and the time they took", () => {
+		const sink = new FakeSink();
+		const { subscriber, ring, clock } = paced(sink);
+		ring.append(filler(1));
+		ring.append(filler(2));
+		const original = sink.sendFragment.bind(sink);
+		sink.sendFragment = (seq, index, count, data) => {
+			clock.now += 7;
+			original(seq, index, count, data);
+		};
+		subscriber.pump();
+		assert.equal(subscriber.stats.lines, 2);
+		assert.ok(subscriber.stats.bytes > 0);
+		assert.equal(subscriber.stats.pumps, 1);
+		assert.equal(subscriber.stats.busyMs, 14);
+		assert.equal(subscriber.stats.maxPumpMs, 14);
 	});
 });

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { PtyBroker, childEnvironment, parsePtyBrokerArgs } from "./pty-broker.ts";
+import { RPC_PACED_CLOSE_MS } from "./rpc-ring.ts";
 import type { PtyBrokerServer, PtyBrokerSideConnection } from "../host/pty-ipc.ts";
 import { PTY_PROTOCOL_VERSION, PTY_RUNTIME_VERSION } from "../host/pty-protocol.ts";
 import type { PtyClientFrame, PtyEventFrame, PtyStopResult } from "../host/pty-protocol.ts";
@@ -173,5 +174,30 @@ describe("child environment", () => {
 			{ OMP_VSCODE_CONTROL_DIR: "C:\\fresh", OMP_VSCODE_CONTROL_SLOT: "slot-1", ELECTRON_RUN_AS_NODE: "1" },
 		);
 		assert.deepEqual(env, { PATH: "C:\\bin", OMP_VSCODE_CONTROL_DIR: "C:\\fresh", OMP_VSCODE_CONTROL_SLOT: "slot-1" });
+	});
+});
+
+describe("broker arguments", () => {
+	const base = [
+		"--slot", "tab:1", "--kind", "managed-rpc", "--storage-dir", process.cwd(), "--file", process.execPath, "--cwd", process.cwd(),
+		"--tree-digest", "a".repeat(64), "--native", "koffi.node", "--native-sha256", "b".repeat(64),
+	];
+
+	it("takes the paced-close limit from --rpc-paced-close-ms, defaulting to the ring's own", () => {
+		const fallback = parsePtyBrokerArgs(base);
+		assert.ok(typeof fallback !== "string");
+		assert.equal(fallback.rpcPacedCloseMs, RPC_PACED_CLOSE_MS);
+		const given = parsePtyBrokerArgs([...base, "--rpc-paced-close-ms", "1500"]);
+		assert.ok(typeof given !== "string");
+		assert.equal(given.rpcPacedCloseMs, 1500);
+	});
+
+	it("keeps the limit inside its bounds", () => {
+		const tiny = parsePtyBrokerArgs([...base, "--rpc-paced-close-ms", "5"]);
+		assert.ok(typeof tiny !== "string");
+		assert.equal(tiny.rpcPacedCloseMs, 200, "a limit below the lowest bound is raised to it");
+		const huge = parsePtyBrokerArgs([...base, "--rpc-paced-close-ms", "99999999"]);
+		assert.ok(typeof huge !== "string");
+		assert.equal(huge.rpcPacedCloseMs, 600_000);
 	});
 });

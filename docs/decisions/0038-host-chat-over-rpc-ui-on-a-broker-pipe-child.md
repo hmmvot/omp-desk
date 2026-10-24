@@ -17,6 +17,8 @@ date: 2026-09-29
 
 > §1 narrowly amended 2026-10-18 by the [fork design](../designs/2026-10-18-fork-branch-clear-session-actions.md): a Desk draft that was opened as a fork of a live session starts its one `omp --mode rpc-ui` process with OMP's own `--fork <source session file>` instead of a bare new session. OMP writes the copy before RPC starts, and the row then resumes with `--session <exact file>` like any other; `--fork` is never emitted with `--session` and the original's process is never involved.
 
+> §1 narrowly amended 2026-10-24 by the [stream-stall design](../designs/2026-10-24-chat-stream-stall-is-visible-and-ends-fast.md): a consumer whose socket stays at the pacing bound for 10 s (`--rpc-paced-close-ms`, 200 ms to 10 min) is closed by the broker with its own reason, like one whose cursor the ring evicted, and the next `rpc-attached` carries the additive optional `lastForcedClose: { reason: "fell-behind" | "paced", ageMs }` so the reattaching host can log why (the field is diagnostic; nothing acts on it). No protocol version changes; a host or broker without the field behaves as before.
+
 ## Context and Problem Statement
 
 The chat editor is a Collab guest ([ADR-0002](0002-local-collab-gui-native-omp.md)): a loopback relay sidecar, a room and bearer link

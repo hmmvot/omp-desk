@@ -61,6 +61,16 @@ export const RPC_PINNED_SKELETON_LINE_MAX_BYTES = 64 * 1024;
 export const RPC_RETAINED_RESPONSE_MAX_BYTES = 4 * 1024;
 /** Stop sending to a sink whose unflushed bytes reach this; resume on its drain. */
 export const RPC_PACE_BYTES = 2 * 1024 * 1024;
+/**
+ * A consumer that has been at the pace bound this long without its socket draining is closed, so its owner reattaches at
+ * once instead of waiting minutes for the ring to evict the lines it is stuck behind
+ * ([ADR-0038](../../docs/decisions/0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md) amendment, 2026-10-24).
+ */
+export const RPC_PACED_CLOSE_MS = 10_000;
+/** Why a broker closed a consumer on its own initiative; the other closes are the peer's or the caller's. */
+export type RpcForcedClose = "fell-behind" | "paced";
+export const RPC_FELL_BEHIND_REASON = "the consumer fell behind the retained lines and must reattach";
+export const RPC_PACED_REASON = "the consumer stayed paced beyond the limit and must reattach";
 
 export interface RpcRingLimits {
 	readonly maxBytes: number;
@@ -517,7 +527,24 @@ export interface RpcSink {
 	/** Bytes accepted and not yet flushed. */
 	readonly pendingBytes: number;
 	sendFragment(seq: number, index: number, count: number, data: string): void;
-	close(reason: string): void;
+	/** End the connection. `forced` names the broker's own reason, which the next attach reports. */
+	close(reason: string, forced: RpcForcedClose): void;
+}
+
+/** What one subscriber's pump has done: the measurement that settles whether the broker or the consumer is slow. */
+export interface RpcPumpStats {
+	/** Lines handed to the sink completely. */
+	lines: number;
+	/** Raw line bytes of those lines. */
+	bytes: number;
+	/** `pump` calls, and the time they took in total and at most. */
+	pumps: number;
+	busyMs: number;
+	maxPumpMs: number;
+	/** Times the pump stopped at the pace bound; times the timer found the queue partly flushed below it; times it found the queue empty with no drain reported since the pace began. */
+	pacedEpisodes: number;
+	resumedBelowBound: number;
+	missedDrains: number;
 }
 
 /**
@@ -525,24 +552,37 @@ export interface RpcSink {
  *
  * `pump` sends until the sink's queue reaches the pacing bound and reports whether the
  * subscriber is idle (caught up with nothing partly sent); the caller pumps again on the
- * sink's drain and whenever the ring gains a line.
+ * sink's drain and whenever the ring gains a line. A sink that stays at the bound for
+ * {@link RPC_PACED_CLOSE_MS} is closed by {@link enforcePace}, which a timer calls.
  */
 export class RpcSubscriber {
 	/** Newest `seq` this subscriber has been handed (or skipped as dead). */
 	cursor: number;
+	readonly stats: RpcPumpStats = { lines: 0, bytes: 0, pumps: 0, busyMs: 0, maxPumpMs: 0, pacedEpisodes: 0, resumedBelowBound: 0, missedDrains: 0 };
 	private readonly ring: RpcLineRing;
 	private readonly sink: RpcSink;
 	private readonly replay: readonly RpcRingEntry[];
 	private readonly paceBytes: number;
+	private readonly now: () => number;
 	private replayIndex = 0;
 	private current: { readonly entry: RpcRingEntry; readonly count: number; index: number } | null = null;
+	private pacedAt: number | null = null;
+	private drainedAt: number | null = null;
 
-	constructor(ring: RpcLineRing, sink: RpcSink, replay: readonly RpcRingEntry[], startCursor: number, paceBytes = RPC_PACE_BYTES) {
+	constructor(
+		ring: RpcLineRing,
+		sink: RpcSink,
+		replay: readonly RpcRingEntry[],
+		startCursor: number,
+		paceBytes = RPC_PACE_BYTES,
+		now: () => number = () => performance.now(),
+	) {
 		this.ring = ring;
 		this.sink = sink;
 		this.replay = replay;
 		this.cursor = startCursor;
 		this.paceBytes = paceBytes;
+		this.now = now;
 	}
 
 	/** Nothing is partly sent and nothing is waiting. */
@@ -550,10 +590,62 @@ export class RpcSubscriber {
 		return this.current === null && this.replayIndex >= this.replay.length && this.ring.next(this.cursor) === null;
 	}
 
+	/** Whether the last pump stopped at the pace bound and the sink has not drained since. */
+	get paced(): boolean {
+		return this.pacedAt !== null && !this.sink.closed;
+	}
+
+	/** How long the sink has been at the pace bound, or `null` when it is not. */
+	pacedForMs(): number | null {
+		return this.pacedAt === null ? null : this.now() - this.pacedAt;
+	}
+
 	/** Send until paced or caught up. Returns `true` when idle. */
 	pump(): boolean {
+		const started = this.now();
+		const idle = this.pumpLines();
+		const elapsed = this.now() - started;
+		this.stats.pumps += 1;
+		this.stats.busyMs += elapsed;
+		if (elapsed > this.stats.maxPumpMs) this.stats.maxPumpMs = elapsed;
+		return idle;
+	}
+
+	/**
+	 * Called on a timer while the subscriber is paced. `"closed"`: it has stood at the bound for `limitMs` and the sink was
+	 * closed as paced. `"resume"`: its queue is below the bound again and the caller must pump it (and flush what a pump
+	 * owes: the exit barrier, released transient lines). `"wait"`: still at the bound, inside the limit (or not paced).
+	 * A resume that finds the queue empty although no drain was reported since the pace began is counted as a missed
+	 * drain; one that finds it partly flushed is a normal slow drain and counts separately.
+	 */
+	enforcePace(limitMs: number): "closed" | "resume" | "wait" {
+		if (this.pacedAt === null || this.sink.closed) return "wait";
+		if (this.sink.pendingBytes < this.paceBytes) {
+			if (this.sink.pendingBytes === 0 && (this.drainedAt === null || this.drainedAt < this.pacedAt)) this.stats.missedDrains += 1;
+			else this.stats.resumedBelowBound += 1;
+			return "resume";
+		}
+		if (this.now() - this.pacedAt < limitMs) return "wait";
+		this.pacedAt = null;
+		this.sink.close(RPC_PACED_REASON, "paced");
+		return "closed";
+	}
+
+	/** The sink reported that its queue emptied: the moment a drain was last seen, against which a missed one is counted. */
+	noteDrain(): void {
+		this.drainedAt = this.now();
+	}
+
+	private pumpLines(): boolean {
 		while (!this.sink.closed) {
-			if (this.sink.pendingBytes >= this.paceBytes) return false;
+			if (this.sink.pendingBytes >= this.paceBytes) {
+				if (this.pacedAt === null) {
+					this.pacedAt = this.now();
+					this.stats.pacedEpisodes += 1;
+				}
+				return false;
+			}
+			this.pacedAt = null;
 			if (this.current === null) {
 				const entry = this.takeNext();
 				if (entry === null) return !this.sink.closed;
@@ -561,8 +653,11 @@ export class RpcSubscriber {
 			}
 			const { entry, count, index } = this.current;
 			this.sink.sendFragment(entry.seq, index, count, ptyRpcFragment(entry.bytes, index));
-			if (index + 1 >= count) this.current = null;
-			else this.current.index = index + 1;
+			if (index + 1 >= count) {
+				this.current = null;
+				this.stats.lines += 1;
+				this.stats.bytes += entry.bytes.length;
+			} else this.current.index = index + 1;
 		}
 		return false;
 	}
@@ -574,7 +669,7 @@ export class RpcSubscriber {
 			if (entry !== undefined && !entry.dead) return entry;
 		}
 		if (this.ring.lostAfter(this.cursor)) {
-			this.sink.close("the consumer fell behind the retained lines and must reattach");
+			this.sink.close(RPC_FELL_BEHIND_REASON, "fell-behind");
 			return null;
 		}
 		const entry = this.ring.next(this.cursor);

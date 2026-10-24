@@ -11,11 +11,19 @@ import { describe, it } from "node:test";
 import { createChatModel } from "../../chat/model.ts";
 import type { ChatModel, ChatPhase } from "../../chat/model.ts";
 import { RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
-import { chatBanner, errorSentence } from "./chat-banner.ts";
+import { LINK_STALLED_TEXT, chatBanner, errorSentence } from "./chat-banner.ts";
 
 function model(phase: ChatPhase, patch: Partial<ChatModel> = {}): ChatModel {
 	return { ...createChatModel(), phase, ...patch };
 }
+
+describe("chatBanner and a stalled link", () => {
+	it("tells a live conversation that its connection is not answering, and says nothing once it is", () => {
+		assert.deepEqual(chatBanner(model("live", { linkStalled: true })), { level: "warn", icon: "sync", text: LINK_STALLED_TEXT });
+		assert.equal(chatBanner(model("live", { linkStalled: false })), null);
+		assert.equal(chatBanner(model("failed", { linkStalled: true, code: "ready-timeout" }))?.level, "error", "a failure outranks the stall note");
+	});
+});
 
 describe("chatBanner", () => {
 	it("says nothing about a live, writable conversation", () => {

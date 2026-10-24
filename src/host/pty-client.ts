@@ -1316,6 +1316,7 @@ export function buildBrokerArguments(
 	if (spec.scrollbackLines !== undefined) args.push("--scrollback", String(spec.scrollbackLines));
 	if (spec.backlogChars !== undefined) args.push("--backlog", String(spec.backlogChars));
 	if (spec.exitRetentionMs !== undefined) args.push("--exit-retention-ms", String(spec.exitRetentionMs));
+	if (spec.rpcPacedCloseMs !== undefined) args.push("--rpc-paced-close-ms", String(spec.rpcPacedCloseMs));
 	if (logPath !== null) args.push("--log", logPath);
 	for (const [name, value] of Object.entries(spec.env ?? {})) args.push("--env", `${name}=${value ?? ""}`);
 	for (const argument of spec.args) args.push("--arg", argument);
