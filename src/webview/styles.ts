@@ -195,7 +195,8 @@ ${ANSI_STYLES}
 .omp-jump-latest:hover { background: var(--vscode-list-hoverBackground); }
 .omp-jump-latest:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .omp-transcript {
-	flex: 1 1 auto;
+	/* A basis of 0, not auto: with auto the browser measures the scroller's content height in its own layout pass before the final one, so every update (a streamed word) laid out every mounted row again, changed or not (about 25 ms on a page with 8,000 mounted nodes, 0.2 ms with a basis of 0, measured in VS Code), and a streaming Chat page was busy a quarter of the time. */
+	flex: 1 1 0px;
 	overflow-y: auto;
 	/* Last guard only: everything wide wraps or scrolls in its own block. */
 	overflow-x: hidden;

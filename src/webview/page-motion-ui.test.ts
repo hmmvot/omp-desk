@@ -101,6 +101,15 @@ const SETUP = `(() => {
   const spinner = document.querySelector('[data-tool-call-id="w1"] .codicon-modifier-spin');
   return { status: status?.style.getPropertyValue("--omp-spin") ?? null, spinner: spinner?.style.getPropertyValue("--omp-spin") ?? null };
  };
+ // When the working row's glyph takes a step: the times its --omp-spin changes in the next \`ms\`.
+ window.record = ms => new Promise(resolve => {
+  const status = document.querySelector(".omp-working-status-text");
+  const times = [];
+  let last = status.style.getPropertyValue("--omp-spin");
+  const observer = new MutationObserver(() => { const value = status.style.getPropertyValue("--omp-spin"); if (value !== last) { last = value; times.push(performance.now()); } });
+  observer.observe(status, { attributes: true, attributeFilter: ["style"] });
+  setTimeout(() => { observer.disconnect(); resolve(times); }, ms);
+ });
  window.live(1000);
 })()`;
 
@@ -193,19 +202,78 @@ test("spinners keep turning through a long run, a remount and lost animation fra
 			}
 		});
 
-		await t.test("they turn again when the browser lost the animation frame the loop was waiting for", async () => {
-			// What the page cannot tell: the frame it asked for never runs (a page that was not drawn, a dropped request). The watchdog asks again.
-			await evaluate("window.nativeFrame = window.requestAnimationFrame; window.requestAnimationFrame = () => 1; 1");
-			await delay(400);
-			await evaluate("window.requestAnimationFrame = window.nativeFrame; 1");
-			await turning("after a lost frame", 2600);
+		const record = async (span: number): Promise<number[]> => evaluate<number[]>(`window.record(${span})`);
+		const gapsOf = (times: number[]): number[] => times.slice(1).map((time, index) => time - times[index]!);
+		const lose = (): Promise<unknown> => evaluate("window.nativeFrame ??= window.requestAnimationFrame; window.requestAnimationFrame = () => 1; 1");
+		const restore = (): Promise<unknown> => evaluate("window.requestAnimationFrame = window.nativeFrame; 1");
+
+		await t.test("the working row's glyph takes a step every 125 ms, not alternately 100 and 200", async () => {
+			const times = await record(3000);
+			assert.ok(times.length >= 21 && times.length <= 25, `${times.length} steps in 3 s`);
+			const gaps = gapsOf(times);
+			const even = gaps.filter(gap => gap >= 100 && gap <= 150).length;
+			assert.ok(even >= gaps.length * 0.8, `${even} of ${gaps.length} gaps are 100 to 150 ms: ${gaps.map(gap => Math.round(gap)).join(" ")}`);
 		});
 
-		await t.test("they turn at once when the page is focused again after a lost frame", async () => {
-			await evaluate("window.requestAnimationFrame = () => 1; 1");
-			await delay(400);
-			await evaluate("window.requestAnimationFrame = window.nativeFrame; window.dispatchEvent(new Event('focus')); 1");
-			await turning("after focus", 1000);
+		await t.test("it keeps its rate while the browser does not run the frames asked for, for as long as a busy page waits for one", async () => {
+			await lose();
+			const times = await record(800);
+			await restore();
+			assert.ok(times.length >= 5, `${times.length} steps in 800 ms without a frame`);
+		});
+
+		await t.test("a page that gets no frame at all looks once a second, and is back at its rate with the first frame", async () => {
+			await lose();
+			await delay(1300);
+			const looking = await record(4000);
+			assert.ok(looking.length <= 6, `${looking.length} steps in 4 s of a page that is not drawn`);
+			assert.ok(looking.length >= 2, `${looking.length} steps in 4 s: it crawls, it does not freeze`);
+			await restore();
+			await delay(1700);
+			const back = await record(1000);
+			assert.ok(back.length >= 6, `${back.length} steps in the second after the frames are back`);
+		});
+
+		await t.test("it is back at once when the page is focused again after it was taken as not drawn", async () => {
+			await lose();
+			await delay(1300);
+			await restore();
+			const recording = record(1000);
+			await evaluate("window.dispatchEvent(new Event('focus')); 1");
+			const times = await recording;
+			assert.ok(times.length >= 6, `${times.length} steps in the second after the focus`);
+		});
+
+		await t.test("a streamed update does not lay the unchanged rows out again: the transcript's flex basis is 0, not auto", async () => {
+			// With a basis of auto the browser measures the scroller's content in a pass of its own, and a changed word then laid out every mounted row (25 ms on 8,000 nodes in VS Code) and kept a streaming page busy.
+			const cost = await evaluate<{ basis: string; zero: number; auto: number }>(`(() => {
+ const transcript = document.querySelector(".omp-transcript");
+ const heavy = document.createElement("div");
+ heavy.style.display = "flow-root";
+ for (let index = 0; index < 400; index++) {
+  const paragraph = document.createElement("p");
+  for (let part = 0; part < 12; part++) { const span = document.createElement("span"); span.textContent = "word " + part + " "; paragraph.append(span, document.createElement("code")); }
+  heavy.append(paragraph);
+ }
+ transcript.prepend(heavy);
+ const text = document.querySelector(".omp-working-status-text");
+ const median = () => {
+  const times = [];
+  for (let round = 0; round < 15; round++) { text.textContent = "Working " + round; const start = performance.now(); transcript.getBoundingClientRect(); times.push(performance.now() - start); }
+  return times.sort((a, b) => a - b)[7];
+ };
+ const basis = getComputedStyle(transcript).flexBasis;
+ median();
+ const zero = median();
+ transcript.style.flexBasis = "auto";
+ median();
+ const auto = median();
+ transcript.style.flexBasis = "";
+ heavy.remove();
+ return { basis, zero, auto };
+})()`);
+			assert.equal(cost.basis, "0px");
+			assert.ok(cost.zero * 3 < cost.auto, `a changed word lays out in ${cost.zero.toFixed(2)} ms with the basis of 0 and ${cost.auto.toFixed(2)} ms with auto`);
 		});
 
 		await t.test("the starting banner's spinner turns inside its own box: the notices block never gets a scrollbar, at any step", async () => {
