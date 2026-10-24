@@ -57,6 +57,7 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { canonicalJson } from "./control-protocol.ts";
 import { CHAT_EXIT_STDERR_BYTES, parseChatExitReason } from "../chat/exit-reason.ts";
+import type { RpcForcedCloseReport } from "../protocol/rpc.ts";
 
 /**
  * Version of the frame protocol. Bumped when a frame's meaning changes.
@@ -1055,7 +1056,7 @@ export type PtyEventFrame =
 			 * beyond its limit) and how long ago, so the client that reattaches can say why it had to. Absent when none, and
 			 * on a broker from an earlier build. It names no connection: a window that had no part in it may read it too.
 			 */
-			readonly lastForcedClose?: PtyRpcForcedClose;
+			readonly lastForcedClose?: RpcForcedCloseReport;
 			readonly child: PtyStatusPayload;
 	  }
 	| {
@@ -1198,14 +1199,7 @@ function isPtyCounter(value: unknown): value is number {
 	return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
-/** What a broker reports about the consumer it last closed itself ({@link PtyBrokerFrame} `rpc-attached`). */
-export interface PtyRpcForcedClose {
-	readonly reason: "fell-behind" | "paced";
-	/** Milliseconds since the close, by the broker's clock. */
-	readonly ageMs: number;
-}
-
-function isPtyRpcForcedClose(value: unknown): value is PtyRpcForcedClose {
+function isRpcForcedCloseReport(value: unknown): value is RpcForcedCloseReport {
 	if (typeof value !== "object" || value === null) return false;
 	const record = value as Record<string, unknown>;
 	return (record.reason === "fell-behind" || record.reason === "paced") && isPtyCounter(record.ageMs);
@@ -1415,7 +1409,7 @@ function narrowPtyFrame(record: Record<string, unknown>, direction: PtyDirection
 						hostToolRetention: record.hostToolRetention === true,
 						hostCallOverflow: record.hostCallOverflow === true,
 						negotiating: record.negotiating === true,
-						...(isPtyRpcForcedClose(record.lastForcedClose) ? { lastForcedClose: record.lastForcedClose } : {}),
+						...(isRpcForcedCloseReport(record.lastForcedClose) ? { lastForcedClose: record.lastForcedClose } : {}),
 						rpcProtocol: record.rpcProtocol as 1 | 2 | null,
 						ready: record.ready as string | null,
 						child: record.child,

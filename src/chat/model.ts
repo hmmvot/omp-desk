@@ -294,7 +294,7 @@ export interface ChatModel {
 	pendingControl: ChatPendingControl | null;
 	/** A `/clear` the host deferred until OMP finishes an interrupted turn; at most one per session. */
 	clearPending: ClearDeferrable | null;
-	/** The host sees the link to OMP deliver nothing while a command waits for its answer; cleared when frames resume. */
+	/** A command has waited for its answer with nothing arriving and the broker does not answer a status request (or has not yet); cleared when a line arrives. */
 	linkStalled: boolean;
 	/** One bounded text line from `setStatus`, or null. */
 	statusLine: string | null;

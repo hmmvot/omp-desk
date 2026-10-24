@@ -27,7 +27,16 @@ export interface RpcChildStatus {
 	stderrTail?: string;
 }
 
-/** Result of one broker attach; the replay lines follow as `line` events. */
+/** Why a broker closed a consumer on its own initiative; the other closes are the peer's or the caller's. */
+export type RpcForcedClose = "fell-behind" | "paced";
+
+/** What a broker reports about the consumer it last closed itself. */
+export interface RpcForcedCloseReport {
+	readonly reason: RpcForcedClose;
+	/** Milliseconds since the close, by the broker's clock. */
+	readonly ageMs: number;
+}
+
 export interface RpcAttachResult {
 	/** First `seq` the replay starts after (the `sinceSeq` the caller asked for, clamped by the broker). */
 	fromSeq: number;
@@ -54,7 +63,7 @@ export interface RpcAttachResult {
 	/** The child offered protocol 2 and its answer to the broker's negotiation is outstanding (`rpcProtocol` is `null` meanwhile). */
 	negotiating: boolean;
 	/** The broker's report of the consumer it last closed itself, when it has one (an earlier build's broker sends none). */
-	lastForcedClose?: { reason: "fell-behind" | "paced"; ageMs: number };
+	lastForcedClose?: RpcForcedCloseReport;
 	child: RpcChildStatus;
 }
 
@@ -80,9 +89,6 @@ export interface RpcChannelTraffic {
 
 export type RpcChannelClosedReason = "child-exited" | "disconnected" | "stopped";
 
-/** The reason a handle gives its connection when this window ends it on purpose; any other end is the broker's or the network's. */
-export const RPC_DETACHED_BY_CLIENT = "detached by the client";
-
 export type RpcChannelEvent =
 	/** One COMPLETE stdout line (UTF-8, no trailing newline). Gaps in `seq` are normal. */
 	| { type: "line"; seq: number; line: string }
@@ -98,8 +104,8 @@ export type RpcChannelEvent =
 	 * connection or a disconnect) changes it. `generation` increases with every change.
 	 */
 	| { type: "input-owner"; owned: boolean; generation: number }
-	/** `detail` is the connection's own words for why it ended (never child text); only a `disconnected` has one. */
-	| { type: "closed"; reason: RpcChannelClosedReason; detail?: string };
+	/** `detail` is the connection's own words for why it ended (never child text); only a `disconnected` has one. `byClient`: this window ended it on purpose (a replaced connection), not the broker or the network. */
+	| { type: "closed"; reason: RpcChannelClosedReason; detail?: string; byClient?: true };
 
 /** Codes a `writeLine` rejection carries in its `code` property. */
 export type RpcWriteErrorCode = "input-not-owner" | "child-exited" | "line-too-long" | "closed";
@@ -133,7 +139,13 @@ export interface RpcChannel {
 	/** Drop the connection. The child is untouched. */
 	disconnect(): void;
 	/** The read-side measurement of the current connection, or `null` when this channel has none. */
-	traffic?(): RpcChannelTraffic | null;
+	traffic(): RpcChannelTraffic | null;
+	/**
+	 * One round trip to the broker itself (its `status` request, which OMP never sees): the milliseconds it took, or
+	 * `null` when the broker did not answer within `timeoutMs` or the connection is closed. It travels the same
+	 * broker-to-host queue as the lines, so it tells a stalled broker or link from an OMP that is busy.
+	 */
+	probeLink(timeoutMs: number): Promise<number | null>;
 }
 
 /** The `code` of a rejected `writeLine`, or `"closed"` when the rejection carries none. */

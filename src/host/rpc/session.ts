@@ -107,7 +107,6 @@ import {
 	DENIED_SLASH_COMMANDS,
 	INTERNAL_ID_PREFIX,
 	VSC_ID_PREFIX,
-	RPC_DETACHED_BY_CLIENT,
 	classifySlashInput,
 	encodeCommand,
 	encodeUiResponse,
@@ -165,10 +164,10 @@ export interface HistoryPort {
 	snapshot(rows?: number, leafId?: string | null): Promise<HistorySnapshot>;
 	loadOlder(beforeId: string, rows?: number): Promise<HistoryOlder>;
 	refresh(): Promise<HistoryRefresh>;
-	/** Bytes of the session file the index covers; absent on a reader that does not know. */
-	readonly indexedBytes?: number;
+	/** Bytes of the session file the index covers. */
+	readonly indexedBytes: number;
 	/** The newest entries OMP saved to branches off the active path ending at `leafId`. */
-	recentOffPath?(leafId: string | null, limit?: number): Promise<ChatEntry[]>;
+	recentOffPath(leafId: string | null, limit?: number): Promise<ChatEntry[]>;
 }
 
 /** Why a session adopted with {@link RpcSessionOptions.reclaimInput} is read-only when the claim could not be won. */
@@ -214,7 +213,7 @@ export interface RpcSessionOptions {
 	stallAfterMs?: number;
 	/** How often the stall monitor looks (default 1 s). */
 	stallCheckIntervalMs?: number;
-	/** A session file of at least this many bytes is never read whole through `get_entries`: the file serves instead (default 8 MiB). */
+	/** A session file of at least this many bytes is not asked for whole by the check of rows saved on another branch: the file serves instead (default 8 MiB). */
 	largeSessionBytes?: number;
 	/** Desk's host tools (ADR-0055). Absent: the session registers none and ignores host tool frames. */
 	hostTools?: HostToolProvider;
@@ -570,6 +569,8 @@ const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 /** The link is called stalled when a command waits this long for its answer with no frame arriving, or a working session sends none. */
 const DEFAULT_STALL_AFTER_MS = 5_000;
 const DEFAULT_STALL_CHECK_MS = 1_000;
+/** A broker status request outstanding this long tells the page the link is stalled. */
+const LINK_PROBE_GRACE_MS = 2_000;
 /** A full `get_entries` of a session file this large is tens of MiB of chunks; the file answers instead. */
 const DEFAULT_LARGE_SESSION_BYTES = 8 * 1024 * 1024;
 /** While the link is stalled, the transcript is re-read from the session file this often. */
@@ -712,6 +713,15 @@ async function defaultFileExists(file: string): Promise<boolean> {
 	}
 }
 
+/** Both ends of a send read the same clock; a message written a second before it is another send of the same words. */
+const SEND_ROW_TOLERANCE_MS = 1_000;
+
+/** Whether `row` is the user message of `send`: the same text, written at or after the send. */
+function isSendRow(row: ChatEntry, send: { readonly text: string; readonly sentAt: number }): boolean {
+	const text = userMessageText(row);
+	return text !== null && text === send.text && (entryMessage(row)?.timestamp ?? 0) >= send.sentAt - SEND_ROW_TOLERANCE_MS;
+}
+
 function userMessageText(entry: ChatEntry): string | null {
 	if (isUserSkillInvocation(entry)) return skillPromptText(entry.type === "custom_message" ? entry.details : entry.type === "message" && "details" in entry.message ? entry.message.details : undefined);
 	if (entry.type !== "message" || entry.message.role !== "user") return null;
@@ -828,18 +838,18 @@ export class RpcSession {
 	/** The stall monitor's timer, the stall in progress (the link delivered no frame), and whether its probe is out. */
 	#stallTimer: unknown = null;
 	#stall: { at: number; lastFrameAt: number } | null = null;
-	#stallProbing = false;
+	#linkProbe: { startedAt: number; state: "pending" | "ok" | "failed" } | null = null;
 	/** The oldest command already reported as unanswered while frames were still arriving (reported once). */
 	#starvedReported: PendingCommand | null = null;
 	#quietReportedAt: number | null = null;
 	#trafficMark: { at: number; traffic: RpcChannelTraffic } | null = null;
 	/** Lines received since the last attach began. */
 	#linesSinceAttach = 0;
-	/** The broker connection ended on its own, or the broker said lines were lost: the next attach rebuilds from the file. */
+	/** The broker connection ended on its own: the reattach log says so. */
 	#lossyAttach = false;
+	/** While the link is stalled: the timer that re-reads the session file so the reply shows. */
 	#fileFollowTimer: unknown = null;
-	/** The tail of the queue of reads that refresh and use the history reader: two refreshes at once would index the same bytes twice. */
-	#diskTail: Promise<unknown> = Promise.resolve();
+	#offPathFromFileLogged = false;
 	#autoRecoveryAttempt = 0;
 	#autoRecoveryTimer: unknown = null;
 	#mutationFence: string | null = null;
@@ -2289,7 +2299,7 @@ export class RpcSession {
 		const forced = result.lastForcedClose;
 		this.#lossyAttach = false;
 		if (kind === "reattach" || result.truncated) {
-			this.#options.log?.info(`${kind === "reattach" ? "reattached" : "attached"}: replay from seq ${result.fromSeq} (the broker holds ${result.oldestSeq} to ${result.latestSeq}${result.truncated ? "; the lines in between are gone" : ""})${forced === undefined ? "" : `; the broker closed a consumer as ${forced.reason === "paced" ? "paced (its socket did not drain)" : "fallen behind its retained lines"} ${Math.round(forced.ageMs / 1000)} s earlier`}`);
+			this.#options.log?.info(`${kind === "reattach" ? "reattached" : "attached"}: replay from seq ${result.fromSeq} (the broker holds ${result.oldestSeq} to ${result.latestSeq}${result.truncated ? "; the lines in between are gone" : ""})${forced === undefined ? "" : `; the broker (any window) closed a consumer as ${forced.reason === "paced" ? "paced (its socket did not drain)" : "fallen behind its retained lines"} ${Math.round(forced.ageMs / 1000)} s earlier`}`);
 		}
 		if (result.child.state === "exited") {
 			await this.#paint;
@@ -2521,7 +2531,7 @@ export class RpcSession {
 				return;
 			case "closed":
 				if (event.reason === "disconnected") {
-					this.#noteBrokerClose(event.detail);
+					this.#noteBrokerClose(event.detail, event.byClient === true);
 					this.#hostCalls?.closeGate("the broker connection closed");
 					if (this.#establishing) this.#dropDuringEstablish = true;
 					else void this.#reattach();
@@ -3045,18 +3055,23 @@ export class RpcSession {
 	/** One full read: the file's entries off the active path consume the pending rows they persisted. */
 	async #dropPendingSavedElsewhere(): Promise<void> {
 		const reader = this.#reader;
-		if (reader?.recentOffPath !== undefined && this.#fileServes()) {
+		if (reader !== null) {
 			try {
-				const offPath = await this.#serialDisk(async () => {
-					await reader.refresh();
-					return reader.recentOffPath!(this.#model.leafId);
-				});
-				if (this.#disposed || this.#ended) return;
-				const next = dropPendingSavedElsewhere(this.#model, offPath, { now: this.#timers.now() });
-				if (next === this.#model) return;
-				this.#model = next;
-				if (this.#live) this.#publish();
-				return;
+				// The size is read from a fresh index: a re-index in progress reports none.
+				await reader.refresh();
+				if (this.#fileServes()) {
+					if (!this.#offPathFromFileLogged) {
+						this.#offPathFromFileLogged = true;
+						this.#options.log?.info(`a check of rows saved on another branch is served from the session file (${Math.round(reader.indexedBytes / (1024 * 1024))} MiB), not by get_entries`);
+					}
+					const offPath = await reader.recentOffPath(this.#model.leafId);
+					if (this.#disposed || this.#ended) return;
+					const next = dropPendingSavedElsewhere(this.#model, offPath, { now: this.#timers.now() });
+					if (next === this.#model) return;
+					this.#model = next;
+					if (this.#live) this.#publish();
+					return;
+				}
 			} catch {
 				this.#historyFallbacks += 1;
 			}
@@ -3181,10 +3196,8 @@ export class RpcSession {
 		if (reader === null) return false;
 		try {
 			for (let attempt = 0; ; attempt += 1) {
-				const history = await this.#serialDisk(async () => {
-					await reader.refresh();
-					return reader.snapshot(this.#tailRows, live?.leafId);
-				});
+				await reader.refresh();
+				const history = await reader.snapshot(this.#tailRows, live?.leafId);
 				if (this.#disposed || this.#ended) return true;
 				const agrees = live === undefined || (history.lastId === live.lastId && history.leafId === live.leafId);
 				if (agrees || history.legacyIds) {
@@ -3213,17 +3226,11 @@ export class RpcSession {
 		if (this.#live) this.#publish();
 	}
 
-	#serialDisk<T>(work: () => Promise<T>): Promise<T> {
-		const run = this.#diskTail.then(work, work);
-		this.#diskTail = run.catch(() => undefined);
-		return run;
-	}
-
 	/** Whether a read of the whole transcript should come from the session file: it is large, and the file can serve. */
 	#fileServes(): boolean {
 		const reader = this.#reader;
 		if (reader === null || this.#readerLegacyIds) return false;
-		return (reader.indexedBytes ?? 0) >= (this.#options.largeSessionBytes ?? DEFAULT_LARGE_SESSION_BYTES);
+		return reader.indexedBytes >= (this.#options.largeSessionBytes ?? DEFAULT_LARGE_SESSION_BYTES);
 	}
 
 	async #afterSettle(): Promise<void> {
@@ -3326,10 +3333,7 @@ export class RpcSession {
 		if (this.#ledger.length === 0 || !this.#model.settled) return;
 		for (const entry of [...this.#ledger]) {
 			if (!entry.unconfirmed) continue;
-			const delivered = this.#model.entries.some(row => {
-				const text = userMessageText(row);
-				return text !== null && text === entry.text && (entryMessage(row)?.timestamp ?? 0) >= entry.sentAt - 5_000;
-			});
+			const delivered = this.#model.entries.some(row => isSendRow(row, entry));
 			this.#ledger.splice(this.#ledger.indexOf(entry), 1);
 			if (!delivered) this.#emit({ type: "prompt-lost", requestId: entry.requestId });
 		}
@@ -3524,8 +3528,14 @@ export class RpcSession {
 			}
 			return { status: "refused", reason: "rejected", ...(typeof response.code === "string" ? { code: response.code } : {}) };
 		} catch (error) {
-			const outcome = this.#failureOutcome(error, requestId);
-			return outcome.status === "unconfirmed" ? (await this.#confirmFromFile(requestId)) ?? outcome : outcome;
+			const outcome = this.#failureOutcome(error, requestId, false);
+			if (outcome.status !== "unconfirmed") return outcome;
+			const confirmed = await this.#confirmFromFile(requestId);
+			if (confirmed !== null) return confirmed;
+			// Marked only now: while the file was read, a lost-prompt check must not take the entry for a lost one.
+			const entry = this.#ledger.find(item => item.requestId === requestId);
+			if (entry !== undefined) entry.unconfirmed = true;
+			return outcome;
 		} finally {
 			this.#userInputInFlight -= 1;
 		}
@@ -3561,11 +3571,11 @@ export class RpcSession {
 		}
 	}
 
-	#failureOutcome(error: unknown, requestId: string | null): { status: "refused"; reason: SendRefusal } | { status: "unconfirmed" } {
+	#failureOutcome(error: unknown, requestId: string | null, mark = true): { status: "refused"; reason: SendRefusal } | { status: "unconfirmed" } {
 		if (!(error instanceof CommandFailure)) return { status: "refused", reason: "write-failed" };
 		if (error.reason === "unconfirmed" || error.reason === "timeout") {
 			const entry = requestId === null ? undefined : this.#ledger.find(item => item.requestId === requestId);
-			if (entry !== undefined) entry.unconfirmed = true;
+			if (entry !== undefined && mark) entry.unconfirmed = true;
 			return { status: "unconfirmed" };
 		}
 		if (error.writeCode === "input-not-owner") return { status: "refused", reason: "not-owner" };
@@ -3918,10 +3928,9 @@ export class RpcSession {
 	}
 
 	/** The broker connection ended: say why (the connection's own words), and read the traffic it carried. */
-	#noteBrokerClose(detail: string | undefined): void {
-		const ours = detail === RPC_DETACHED_BY_CLIENT;
+	#noteBrokerClose(detail: string | undefined, ours: boolean): void {
 		if (!ours) this.#lossyAttach = true;
-		this.#options.log?.info(`the broker connection closed${detail === undefined ? "" : `: ${detail}`}${ours ? " (this window replaced it)" : ""}; last seq ${this.#lastSeq}, ${this.#linesSinceAttach} lines since the attach; ${this.#describeTraffic(this.#channel.traffic?.() ?? null)}`);
+		this.#options.log?.info(`the broker connection closed${detail === undefined ? "" : `: ${detail}`}${ours ? " (this window replaced it)" : ""}; last seq ${this.#lastSeq}, ${this.#linesSinceAttach} lines since the attach; ${this.#describeTraffic(this.#channel.traffic() ?? null)}`);
 	}
 
 	/** One line of what the connection's read side has done: the measurement that tells a slow consumer from a stalled stream. */
@@ -3933,13 +3942,14 @@ export class RpcSession {
 			const seconds = Math.max(0.001, (this.#timers.now() - mark.at) / 1000);
 			window = `; last ${seconds.toFixed(1)} s: ${traffic.frames - mark.traffic.frames} frames, ${Math.round((traffic.socketBytesRead - mark.traffic.socketBytesRead) / seconds / 1024)} KiB/s from the broker, ${(traffic.busyMs - mark.traffic.busyMs).toFixed(0)} ms busy`;
 		}
-		return `read ${traffic.frames} frames in ${traffic.chunks} reads (${traffic.socketBytesRead} bytes from the socket, ${traffic.readableBytes} unread), busy ${traffic.busyMs.toFixed(0)} ms, slowest read ${traffic.maxChunkMs.toFixed(0)} ms and frame ${traffic.maxFrameMs.toFixed(0)} ms, ${traffic.pendingBytes} bytes unsent${window}`;
+		return `read ${traffic.frames} frames in ${traffic.chunks} reads (${traffic.socketBytesRead} bytes from the socket, ${traffic.chars} chars decoded, ${traffic.readableBytes} unread), busy ${traffic.busyMs.toFixed(0)} ms, slowest read ${traffic.maxChunkMs.toFixed(0)} ms and frame ${traffic.maxFrameMs.toFixed(0)} ms, last frame ${traffic.lastFrameAt === null ? "never" : `${Math.max(0, Math.round(Date.now() - traffic.lastFrameAt))} ms ago`}, ${traffic.pendingBytes} bytes unsent${window}`;
 	}
 
 	// --- The link-stall monitor -------------------------------------------------------------------------------------
 	// The watchdog above notices a connection that is silent for tens of seconds. The monitor notices, within seconds, that
-	// the link has stopped delivering while the child is alive: it writes what it sees to the log, tells the page, probes the
-	// link and replaces it when the probe is not answered. Nothing here changes a command's own deadline.
+	// the link has stopped delivering while the child is alive: it writes what it sees to the log, asks the broker itself for one
+	// status round trip and tells the page when the broker does not answer. It never replaces a connection (the watchdog does)
+	// and nothing here changes a command's own deadline.
 
 	#armStall(): void {
 		if (this.#stallTimer !== null || this.#disposed || this.#ended) return;
@@ -3958,6 +3968,7 @@ export class RpcSession {
 		this.#stopFileFollow();
 		this.#stall = null;
 		this.#starvedReported = null;
+		this.#linkProbe = null;
 		this.#quietReportedAt = null;
 		this.#trafficMark = null;
 		if (this.#model.linkStalled) this.#model = { ...this.#model, linkStalled: false };
@@ -3972,7 +3983,9 @@ export class RpcSession {
 		const waited = this.#oldestUnanswered(now);
 		const starved = waited !== null && waited.ms >= limit;
 		const quiet = (this.#model.working || this.#model.asyncPaused) && this.#model.uiRequest === null && silence >= limit;
-		const traffic = this.#channel.traffic?.() ?? null;
+		const markDue = this.#trafficMark === null || now - this.#trafficMark.at >= TRAFFIC_DEBUG_MS;
+		// A reading allocates; an idle healthy tick takes none.
+		const traffic = starved || quiet || markDue ? (this.#channel.traffic() ?? null) : null;
 		if (waited !== null && starved && silence < limit && waited.command !== this.#starvedReported) {
 			// Frames are arriving, so the connection is not stalled; the answer is behind them (a long answer queued ahead of it).
 			this.#starvedReported = waited.command;
@@ -3981,20 +3994,20 @@ export class RpcSession {
 		if (silence >= limit && starved) {
 			if (this.#stall === null) {
 				this.#stall = { at: now, lastFrameAt: this.#lastActivityAt };
+				// The answer to this command is not behind frames: the one "frames are still arriving" line is for a different case.
+				this.#starvedReported = waited.command;
 				this.#options.log?.info(`the link has delivered nothing for ${Math.round(silence)} ms while ${waited.command.command.type} waits for its answer (${Math.round(waited.ms)} ms); last seq ${this.#lastSeq}; ${this.#describeTraffic(traffic)}`);
 			}
-			if (!this.#stallProbing && !this.#hasPendingGetState()) this.#probeStall();
-			this.#setLinkStalled(true);
+			this.#startLinkProbe(now);
+			this.#setLinkStalled(this.#linkStalledWanted(now));
 		} else if (quiet && this.#quietReportedAt !== this.#lastActivityAt) {
 			// OMP works and says nothing (a long tool, a background wait): one line per silence, no probe and no notice.
 			this.#quietReportedAt = this.#lastActivityAt;
 			this.#options.log?.info(`OMP is working but has sent nothing for ${Math.round(silence)} ms; last seq ${this.#lastSeq}; ${this.#describeTraffic(traffic)}`);
 		}
-		if (this.#trafficMark === null || now - this.#trafficMark.at >= TRAFFIC_DEBUG_MS) {
-			if (traffic !== null) {
-				if (this.#trafficMark !== null && traffic.frames > this.#trafficMark.traffic.frames) this.#options.log?.debug(`traffic: ${this.#describeTraffic(traffic)}`);
-				this.#trafficMark = { at: now, traffic };
-			}
+		if (markDue && traffic !== null) {
+			if (this.#trafficMark !== null && traffic.frames > this.#trafficMark.traffic.frames) this.#options.log?.debug(`traffic: ${this.#describeTraffic(traffic)}`);
+			this.#trafficMark = { at: now, traffic };
 		}
 	}
 
@@ -4003,9 +4016,9 @@ export class RpcSession {
 		const stall = this.#stall;
 		if (stall === null) return;
 		this.#stall = null;
-		this.#starvedReported = null;
+		this.#linkProbe = null;
 		const now = this.#timers.now();
-		this.#options.log?.info(`frames resumed after ${Math.round(now - stall.lastFrameAt)} ms without one (seq ${this.#lastSeq}); ${this.#describeTraffic(this.#channel.traffic?.() ?? null)}`);
+		this.#options.log?.info(`frames resumed after ${Math.round(now - stall.lastFrameAt)} ms without one (seq ${this.#lastSeq}); ${this.#describeTraffic(this.#channel.traffic() ?? null)}`);
 		this.#setLinkStalled(false);
 		this.#stopFileFollow();
 	}
@@ -4022,23 +4035,33 @@ export class RpcSession {
 		return oldest;
 	}
 
-	#hasPendingGetState(): boolean {
-		for (const command of this.#pendingCommands.values()) if (command.command.type === "get_state") return true;
-		return false;
+	/**
+	 * One round trip to the broker itself, once per stall (never OMP: the broker answers it from its own state). An answer
+	 * means the broker and the link carry traffic, so the stall is OMP holding a command; no answer means the broker or the
+	 * link is the stall. The page is told only on no answer, or while the answer is still outstanding after a short grace.
+	 * Nothing here replaces the connection: that stays with the watchdog.
+	 */
+	#startLinkProbe(now: number): void {
+		if (this.#linkProbe !== null) return;
+		const mine: { startedAt: number; state: "pending" | "ok" | "failed" } = { startedAt: now, state: "pending" };
+		this.#linkProbe = mine;
+		const attach = this.#hostAttach;
+		const timeoutMs = this.#options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+		void this.#channel.probeLink(timeoutMs).then(ms => {
+			if (this.#disposed || this.#ended || attach !== this.#hostAttach || this.#linkProbe !== mine) return;
+			mine.state = ms === null ? "failed" : "ok";
+			const traffic = this.#describeTraffic(this.#channel.traffic() ?? null);
+			if (ms === null) this.#options.log?.warn(`the broker did not answer a status request within ${timeoutMs} ms: the broker or the link is stalled (last seq ${this.#lastSeq}); ${traffic}`);
+			else this.#options.log?.info(`the broker answered a status request in ${Math.round(ms)} ms: the link carries traffic, so the stall is OMP holding the command (last seq ${this.#lastSeq})`);
+			this.#setLinkStalled(this.#linkStalledWanted(this.#timers.now()));
+		});
 	}
 
-	/** Ask the child for its state over the stalled link; an unanswered probe replaces the connection. */
-	#probeStall(): void {
-		this.#stallProbing = true;
-		const attach = this.#hostAttach;
-		void this.#sendInternal({ type: "get_state" }, this.#options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS).then(outcome => {
-			this.#stallProbing = false;
-			if (this.#disposed || this.#ended || !this.#live || attach !== this.#hostAttach) return;
-			if (outcome.status === "unconfirmed") {
-				// A probe OMP holds in its own queue is not proof of a dead link, and the watchdog replaces a connection that stays silent: this one only says so.
-				this.#options.log?.warn(`the stall probe was not answered within ${this.#options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS} ms (last seq ${this.#lastSeq}); ${this.#describeTraffic(this.#channel.traffic?.() ?? null)}`);
-			}
-		});
+	/** Whether the page is told the link is stalled: the broker did not answer, or has not within the grace. */
+	#linkStalledWanted(now: number): boolean {
+		const probe = this.#linkProbe;
+		if (probe === null || probe.state === "failed") return true;
+		return probe.state === "pending" && now - probe.startedAt >= LINK_PROBE_GRACE_MS;
 	}
 
 	#setLinkStalled(stalled: boolean): void {
@@ -4050,7 +4073,7 @@ export class RpcSession {
 	// --- A prompt whose answer never came, looked up in the session file --------------------------------------------
 
 	/**
-	 * A `prompt` (steer, follow-up) whose response did not arrive in time is looked for in the session file, by its text
+	 * A `prompt` whose response did not arrive in time is looked for in the session file, by its text
 	 * and the time of the send. OMP writes a user message before it answers, so a message on disk was delivered whatever
 	 * the link did to its response: the send is reported accepted, the transcript is read from the file, and while the link
 	 * stays stalled the file is read again every {@link FILE_FOLLOW_MS}, so the reply shows without the stream. Not on
@@ -4062,18 +4085,16 @@ export class RpcSession {
 		if (entry === undefined || reader === null || this.#disposed || this.#ended) return null;
 		let history: HistorySnapshot;
 		try {
-			history = await this.#serialDisk(async () => {
-				await reader.refresh();
-				return reader.snapshot(this.#tailRows);
-			});
+			await reader.refresh();
+			history = await reader.snapshot(this.#tailRows);
 		} catch {
 			this.#historyFallbacks += 1;
 			return null;
 		}
-		if (this.#disposed || this.#ended) return null;
+		// A lost-prompt check may have taken the entry while the file was read: it then stays reported lost.
+		if (this.#disposed || this.#ended || !this.#ledger.includes(entry)) return null;
 		const row = history.entries.find(candidate => {
-			const text = userMessageText(candidate);
-			return text !== null && text === entry.text && (entryMessage(candidate)?.timestamp ?? 0) >= entry.sentAt - 1_000;
+			return isSendRow(candidate, entry);
 		});
 		if (row === undefined) return null;
 		entry.unconfirmed = false;
@@ -4105,10 +4126,8 @@ export class RpcSession {
 		const reader = this.#reader;
 		if (reader === null || this.#readerLegacyIds || this.#stall === null || !this.#live || this.#disposed || this.#ended) return;
 		try {
-			const history = await this.#serialDisk(async () => {
-				await reader.refresh();
-				return reader.snapshot(this.#tailRows);
-			});
+			await reader.refresh();
+			const history = await reader.snapshot(this.#tailRows);
 			if (!this.#disposed && !this.#ended && this.#live && this.#stall !== null && (history.lastId !== this.#cursor || history.leafId !== this.#model.leafId)) this.#applyDiskHistory(history);
 		} catch {
 			this.#historyFallbacks += 1;

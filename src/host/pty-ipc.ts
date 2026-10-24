@@ -50,6 +50,7 @@ import {
 	type PtyRefusalCode,
 	type PtyRequestFrame,
 } from "./pty-protocol.ts";
+import type { RpcChannelTraffic } from "../protocol/rpc.ts";
 
 /** Host the broker binds and the client dials. Nothing else is reachable. */
 export const PTY_LOOPBACK_HOST = "127.0.0.1";
@@ -67,27 +68,6 @@ function newMeter(): ConnectionState["meter"] {
 	return { frames: 0, chars: 0, chunks: 0, busyMs: 0, maxChunkMs: 0, maxFrameMs: 0, lastFrameAt: null };
 }
 
-/**
- * What one connection's read side has done since it opened: the measurement that tells a slow consumer from a slow
- * sender. Counters are cumulative; a caller that wants a rate keeps the previous reading.
- */
-export interface ConnectionTraffic {
-	/** Frames parsed and handed to the listeners. */
-	readonly frames: number;
-	/** Characters read off the socket (it decodes UTF-8 itself) and the number of reads. */
-	readonly chars: number;
-	readonly chunks: number;
-	/** Time spent parsing and delivering, in total and for the slowest single read and single frame. */
-	readonly busyMs: number;
-	readonly maxChunkMs: number;
-	readonly maxFrameMs: number;
-	/** Wall-clock time of the last frame delivered, or `null` before the first. */
-	readonly lastFrameAt: number | null;
-	/** Bytes the kernel has delivered to the socket, bytes received and not yet handed to a listener, and bytes this side has accepted and not flushed. */
-	readonly socketBytesRead: number;
-	readonly readableBytes: number;
-	readonly pendingBytes: number;
-}
 
 /**
  * One authenticated connection, seen from whichever end owns it.
@@ -118,7 +98,7 @@ export interface PtyConnection<Received extends PtyFrame = PtyFrame, Sent extend
 	onClosed(listener: (reason: string) => void): void;
 	close(reason?: string): void;
 	/** The read-side measurement of this connection; absent on a test double. */
-	traffic?(): ConnectionTraffic;
+	traffic?(): RpcChannelTraffic;
 }
 
 /** What the broker's side of one connection speaks. */
@@ -255,7 +235,7 @@ interface ConnectionState {
 	recvSeq: number;
 	queue: string[];
 	queued: number;
-	/** Read-side measurement ({@link ConnectionTraffic}); all milliseconds are monotonic durations. */
+	/** Read-side measurement ({@link RpcChannelTraffic}); durations are monotonic milliseconds, `lastFrameAt` is wall-clock time. */
 	readonly meter: { frames: number; chars: number; chunks: number; busyMs: number; maxChunkMs: number; maxFrameMs: number; lastFrameAt: number | null };
 	closed: boolean;
 }
@@ -361,7 +341,7 @@ function makeConnection<Received extends PtyFrame>(state: ConnectionState): PtyC
 
 /**
  * Read post-handshake frames off a socket until it ends. Every read is timed (parse plus the listeners it runs), so a
- * slow consumer shows as busy time here rather than as a silent stream ({@link ConnectionTraffic}).
+ * slow consumer shows as busy time here rather than as a silent stream ({@link RpcChannelTraffic}).
  */
 function pumpFrames(state: ConnectionState): void {
 	state.socket.on("data", (chunk: string) => {

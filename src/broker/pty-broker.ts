@@ -130,7 +130,8 @@ import { claimPtyRecord, ensurePtyStateAccess, retirePtyRecord } from "../host/p
 import type * as PtyScreenModule from "./pty-screen.ts";
 import type { PtyScreenChunk, PtyScreenModel } from "./pty-screen.ts";
 import { RpcChildWriteError, startRpcChild, type RpcChild } from "./rpc-child.ts";
-import { RPC_PACED_CLOSE_MS, RPC_PACE_BYTES, RpcLineRing, RpcSubscriber, type RpcForcedClose, type RpcSink } from "./rpc-ring.ts";
+import { RPC_PACED_CLOSE_MS, RPC_PACE_BYTES, RpcLineRing, RpcSubscriber, type RpcSink } from "./rpc-ring.ts";
+import type { RpcForcedClose } from "../protocol/rpc.ts";
 import { PTY_OWNER_EXIT_REASON, PtyOwnerMonitor } from "./pty-owner-monitor.ts";
 import {
 	SELF_CHECK_OUTPUT_LIMIT,

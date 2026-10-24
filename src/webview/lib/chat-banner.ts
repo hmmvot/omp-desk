@@ -22,7 +22,7 @@ const GENERIC_FAILURE = "The session is not available.";
 const LEGACY_TEXT =
 	"This tab belongs to a previous version of the extension and cannot show this session. Close the tab and open the session from the Sessions panel.";
 const STOPPED_TEXT = "Session stopped. Resume to continue.";
-/** A live Chat whose connection to OMP has delivered no answer for a few seconds; the host probes it and replaces it if the probe is not answered. */
+/** A live Chat whose connection to OMP has delivered no answer for a few seconds and whose broker does not answer a status request (or has not yet, after 2 s); a connection that stays silent is replaced by the host's watchdog. */
 export const LINK_STALLED_TEXT = "OMP is not answering through the connection. Waiting a moment, then reconnecting on its own.";
 
 /** The fixed sentence for `code`, or the generic one. */

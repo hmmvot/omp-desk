@@ -121,6 +121,16 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		return this.connection.traffic?.() ?? null;
 	}
 
+	async probeLink(timeoutMs: number): Promise<number | null> {
+		const started = performance.now();
+		try {
+			await this.request({ v: PTY_PROTOCOL_VERSION, t: "status", id: 0 }, timeoutMs);
+		} catch {
+			return null;
+		}
+		return performance.now() - started;
+	}
+
 	async attach(request: { readonly sinceSeq: number; readonly reclaimInput?: InputReclaim }): Promise<RpcAttachResult> {
 		if (this.closedReason !== null) await this.reconnect();
 		this.channelClosed = false;
@@ -230,7 +240,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		for (const waiter of this.drainWaiters.splice(0)) waiter();
 		this.assembler.reset();
 		this.setOwned(false);
-		this.closeChannel("disconnected", reason);
+		this.closeChannel("disconnected", reason, this.detachedByClient);
 	}
 
 	protected handleFrame(frame: PtyBrokerFrame): void {
@@ -292,10 +302,10 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		for (const listener of [...this.channelListeners]) listener(event);
 	}
 
-	private closeChannel(reason: "child-exited" | "disconnected" | "stopped", detail?: string): void {
+	private closeChannel(reason: "child-exited" | "disconnected" | "stopped", detail?: string, byClient = false): void {
 		if (this.channelClosed) return;
 		this.channelClosed = true;
-		this.emitChannel(detail === undefined ? { type: "closed", reason } : { type: "closed", reason, detail });
+		this.emitChannel({ type: "closed", reason, ...(detail === undefined ? {} : { detail }), ...(byClient ? { byClient: true as const } : {}) });
 	}
 
 	/** Claim input without takeover; losing the claim is a state (reads work, writes are refused). */

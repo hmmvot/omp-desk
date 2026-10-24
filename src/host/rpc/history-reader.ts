@@ -223,6 +223,19 @@ export class HistoryReader {
 	#pathCache: { leaf: number; path: number[] } | null = null;
 	#lastTag: { offset: number; length: number; text: string } | null = null;
 
+	/**
+	 * The tail of the queue of reads: every public read waits for the one before it, because `refresh` can re-index and a
+	 * read that computed its positions before an await must not see the index change under it.
+	 */
+	#queue: Promise<unknown> = Promise.resolve();
+	// Rule: a `*Now` body never calls a public method (it would wait on its own turn forever).
+
+	#serial<T>(work: () => Promise<T>): Promise<T> {
+		const run = this.#queue.then(work, work);
+		this.#queue = run.catch(() => undefined);
+		return run;
+	}
+
 	private constructor(path: string) {
 		this.#path = path;
 		this.#blobs = blobsDirectoryFor(path);
@@ -248,20 +261,28 @@ export class HistoryReader {
 	 * The newest `limit` entries in file order that are not on the active path ending at `leafId` (the file's own leaf
 	 * when `null` or unknown): what OMP saved to branches the user moved away from. A legacy file has no branches.
 	 */
-	async recentOffPath(leafId: string | null, limit: number = 400): Promise<ChatEntry[]> {
+	recentOffPath(leafId: string | null, limit: number = 400): Promise<ChatEntry[]> {
+		return this.#serial(() => this.#recentOffPathNow(leafId, limit));
+	}
+
+	async #recentOffPathNow(leafId: string | null, limit: number): Promise<ChatEntry[]> {
 		if (this.#header === null) throw new HistoryReadError("no-header");
 		const legacy = this.#version === null || this.#version < 3;
 		if (legacy) return [];
 		const position = leafId === null ? undefined : this.#byId.get(leafId);
 		const onPath = new Set(this.#pathTo(position ?? this.#fileLeaf(false)));
 		const found: number[] = [];
-		for (let index = this.#entries.length - 1; index >= 0 && found.length < limit; index -= 1) if (!onPath.has(index)) found.push(index);
+		for (let index = this.#entries.length - 1; index >= 0 && found.length < limit; index -= 1) if (!onPath.has(index) && CHAT_ENTRY_TYPES[this.#entries[index]!.type] === true) found.push(index);
 		found.reverse();
 		return this.#withFile(handle => this.#readPositions(handle, found));
 	}
 
 	/** Re-read appended bytes; a file that shrank or whose last indexed line changed is re-indexed once. */
-	async refresh(): Promise<HistoryRefresh> {
+	refresh(): Promise<HistoryRefresh> {
+		return this.#serial(() => this.#refreshNow());
+	}
+
+	async #refreshNow(): Promise<HistoryRefresh> {
 		return this.#withFile(async handle => {
 			const size = (await handle.stat()).size;
 			const unchanged = size >= this.#indexedBytes && (await this.#lastLineIntact(handle));
@@ -282,7 +303,11 @@ export class HistoryReader {
 	 * at the last entry in file order (OMP's leaf after a load); `leafId` of the result names the leaf actually used, so
 	 * a caller that passed the live leaf can tell a disk that trails the process. Legacy files ignore `leafId`.
 	 */
-	async snapshot(rows: number = DEFAULT_TAIL_ROWS, leafId?: string | null): Promise<HistorySnapshot> {
+	snapshot(rows: number = DEFAULT_TAIL_ROWS, leafId?: string | null): Promise<HistorySnapshot> {
+		return this.#serial(() => this.#snapshotNow(rows, leafId));
+	}
+
+	async #snapshotNow(rows: number, leafId: string | null | undefined): Promise<HistorySnapshot> {
 		const header = this.#header;
 		if (header === null) throw new HistoryReadError("no-header");
 		const legacy = this.#version === null || this.#version < 3;
@@ -315,7 +340,11 @@ export class HistoryReader {
 	 * The next `rows` rendering rows above the row `beforeId` (the top of what the caller holds), walking that row's
 	 * own ancestors: the caller's window may end at a leaf that is not the last line of the file (ADR-0051).
 	 */
-	async loadOlder(beforeId: string, rows: number = DEFAULT_TAIL_ROWS): Promise<HistoryOlder> {
+	loadOlder(beforeId: string, rows: number = DEFAULT_TAIL_ROWS): Promise<HistoryOlder> {
+		return this.#serial(() => this.#loadOlderNow(beforeId, rows));
+	}
+
+	async #loadOlderNow(beforeId: string, rows: number): Promise<HistoryOlder> {
 		const top = this.#byId.get(beforeId);
 		if (top === undefined) return { entries: [], olderCount: 0, found: false };
 		const path = this.#pathTo(top);

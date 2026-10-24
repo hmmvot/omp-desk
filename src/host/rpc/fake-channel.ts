@@ -12,6 +12,7 @@ import type {
 	RpcChannel,
 	RpcChannelEvent,
 	RpcChannelTraffic,
+	RpcForcedCloseReport,
 	RpcChildStatus,
 	RpcWriteErrorCode,
 } from "../../protocol/rpc.ts";
@@ -70,7 +71,7 @@ export class FakeRpcChannel implements RpcChannel {
 	hostCallOverflow = false;
 	/** The attach answer's `truncated`, and the broker's report of the consumer it closed itself (`lastForcedClose`). */
 	truncatedAttach = false;
-	forcedClose: { reason: "fell-behind" | "paced"; ageMs: number } | undefined;
+	forcedClose: RpcForcedCloseReport | undefined;
 	/** What `traffic()` reports; `null` models a channel with no reading. */
 	trafficReading: RpcChannelTraffic | null = null;
 	/** Whether `attach` wins the broker's input claim; `false` models a window that attaches while another one holds input. */
@@ -133,6 +134,16 @@ export class FakeRpcChannel implements RpcChannel {
 
 	traffic(): RpcChannelTraffic | null {
 		return this.trafficReading;
+	}
+
+	/** What `probeLink` answers: a round trip in ms, `null` (unanswered), or `"hang"` (never settles, as a stalled link does). */
+	linkProbe: number | null | "hang" = 2;
+	readonly linkProbes: number[] = [];
+
+	probeLink(timeoutMs: number): Promise<number | null> {
+		this.linkProbes.push(timeoutMs);
+		if (this.linkProbe === "hang") return new Promise<number | null>(() => undefined);
+		return Promise.resolve(this.linkProbe);
 	}
 
 	disconnect(): void {
@@ -232,9 +243,9 @@ export class FakeRpcChannel implements RpcChannel {
 		return this.emit(`{"type":"${type}","message":${JSON.stringify(message)},"messageId":"${messageId}"}`);
 	}
 
-	closeLink(reason: "child-exited" | "disconnected" | "stopped", detail?: string): void {
+	closeLink(reason: "child-exited" | "disconnected" | "stopped", detail?: string, byClient = false): void {
 		this.#attached = false;
-		this.#deliver(detail === undefined ? { type: "closed", reason } : { type: "closed", reason, detail });
+		this.#deliver({ type: "closed", reason, ...(detail === undefined ? {} : { detail }), ...(byClient ? { byClient: true as const } : {}) });
 	}
 
 	exitChild(exitCode = 0, stderrTail?: string): void {

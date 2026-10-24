@@ -269,6 +269,15 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 		assert.match(status.nativeCreationTime ?? "", /^[1-9][0-9]{9,19}$/, "the child's kernel identity is recorded like any child's");
 	});
 
+	it("answers a link probe from the broker itself, and not once the connection is closed", { timeout: TEST_TIMEOUT_MS }, async () => {
+		const handle = await launchRpc();
+		await handle.attach({ sinceSeq: 0 });
+		const ms = await handle.probeLink(10_000);
+		assert.ok(ms !== null && ms >= 0 && ms < 10_000, `the broker answers a status request (${String(ms)})`);
+		handle.disconnect();
+		assert.equal(await handle.probeLink(1_000), null, "a closed connection cannot be probed");
+	});
+
 	it("carries a quote-dense 1 MiB line whole in both directions", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const handle = await launchRpc();
 		const seen = watch(handle);

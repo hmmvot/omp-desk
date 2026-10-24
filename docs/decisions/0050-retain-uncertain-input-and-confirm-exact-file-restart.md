@@ -5,6 +5,8 @@ date: 2026-10-08
 
 # ADR-0050: Retain uncertain input and confirm exact-file Restart
 
+> Amended 2026-10-24 by the [stream-stall design](../designs/2026-10-24-chat-stream-stall-is-visible-and-ends-fast.md): a `prompt` send that timed out as unconfirmed is reported delivered when the session file holds a user message with the same text written at or after the send (less 1 s); it is then not marked as possibly lost and is not re-sent. A steer or follow-up, and a message that is not in the file, stay as before.
+
 ## Context and Problem Statement
 
 OMP can keep emitting transcript events while its serial RPC dispatcher cannot answer state or input commands. Same-process Reconnect cannot guarantee dispatcher recovery. A page post and broker write are transport receipts, not input admission, and a lost admission reply does not prove that input was rejected. Existing Reload requires responsive native state and therefore cannot be the recovery action for this failure.

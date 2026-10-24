@@ -36,6 +36,7 @@
  */
 
 import { ptyRpcFragment, ptyRpcFragmentCount } from "../host/pty-protocol.ts";
+import type { RpcForcedClose } from "../protocol/rpc.ts";
 
 /** Ring bound: raw bytes of live (non-superseded) replayable lines. */
 export const RPC_RING_MAX_BYTES = 4 * 1024 * 1024;
@@ -67,8 +68,6 @@ export const RPC_PACE_BYTES = 2 * 1024 * 1024;
  * ([ADR-0038](../../docs/decisions/0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md) amendment, 2026-10-24).
  */
 export const RPC_PACED_CLOSE_MS = 10_000;
-/** Why a broker closed a consumer on its own initiative; the other closes are the peer's or the caller's. */
-export type RpcForcedClose = "fell-behind" | "paced";
 export const RPC_FELL_BEHIND_REASON = "the consumer fell behind the retained lines and must reattach";
 export const RPC_PACED_REASON = "the consumer stayed paced beyond the limit and must reattach";
 

@@ -1,8 +1,8 @@
 /**
  * What the host does when the broker link stalls or the broker closes it (the incident where a long Chat showed no replies):
  * every close and reattach is logged with its reason, a silent link is measured, probed and shown to the page, a prompt
- * whose answer never came is looked up in the session file instead of being re-sent, and a large session is rebuilt from
- * its file after a lossy close instead of by a full `get_entries`.
+ * whose answer never came is looked up in the session file instead of being re-sent, and a reattach after a close by the
+ * broker reads only what came after its cursor, never the whole transcript.
  *
  * Runner: `node --test src/host/rpc/session-stall.test.ts`.
  */
@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { appendFile } from "node:fs/promises";
 import { afterEach, describe, it } from "node:test";
 import type { Logger } from "../../shared/logger.ts";
+import { toChatEventFrame } from "../../protocol/rpc.ts";
 import { FakeRpcChannel } from "./fake-channel.ts";
 import { RpcSession, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { ManualTimers, ScratchDir, assistantMessage, messageEntry, sessionFileText, tick, userMessage, waitUntil } from "./test-support.ts";
@@ -70,15 +71,19 @@ describe("a close by the broker", () => {
 		assert.ok(log.has(/info the broker connection closed: the consumer fell behind the retained lines and must reattach; last seq \d+/));
 		assert.ok(log.has(new RegExp(`info reattach started: last seq ${seqBefore} \\(the broker connection ended on its own\\)`)));
 		assert.ok(log.has(/info reattach finished in \d+ ms after 1 attempt: last seq \d+ to \d+, \d+ lines received, phase live/));
-		assert.ok(log.has(/info reattached: .*the broker closed a consumer as fallen behind its retained lines 2 s earlier/));
+		assert.ok(log.has(/info reattached: .*the broker \(any window\) closed a consumer as fallen behind its retained lines 2 s earlier/));
 		assert.equal(session.phase, "live");
 	});
 
-	it("says when it was this window that replaced the connection", async () => {
+	it("says when it was this window that replaced the connection, by the typed flag and not by its words", async () => {
 		const { channel, log } = await boot();
-		channel.closeLink("disconnected", "replaced-by-new-attach");
+		channel.closeLink("disconnected", "detached by the client", true);
 		await tick();
-		assert.ok(log.has(/the broker connection closed: replaced-by-new-attach/));
+		assert.ok(log.has(/the broker connection closed: detached by the client \(this window replaced it\)/));
+		const other = await boot();
+		other.channel.closeLink("disconnected", "detached by the client");
+		await tick();
+		assert.equal(other.log.has(/this window replaced it/), false, "words alone say nothing");
 	});
 
 	it("names a paced close as one whose socket did not drain", async () => {
@@ -99,17 +104,18 @@ describe("the stall monitor", () => {
 		timers.advance(6_000);
 		await tick();
 		assert.ok(log.has(/info the link has delivered nothing for \d+ ms while prompt waits for its answer \(\d+ ms\); last seq \d+/));
-		assert.ok(channel.commandsOfType("get_state").length >= 2, "the link is probed");
+		assert.equal(channel.linkProbes.length, 1, "the broker is asked once");
 		channel.emit({ type: "agent_start" });
 		assert.ok(log.has(/info frames resumed after \d+ ms without one/));
 	});
 
 	it("tells the page the link is stalled while a command is unanswered, and clears it when frames resume", async () => {
 		const { channel, session, timers, outputs } = await boot();
+		channel.linkProbe = "hang";
 		channel.autoRespond = false;
 		const outcome = session.prompt({ requestId: "slow-1", text: "wait for me" });
 		await tick();
-		timers.advance(6_000);
+		timers.advance(8_000);
 		await tick();
 		assert.equal(session.model.linkStalled, true);
 		assert.equal(session.snapshot().linkStalled, true);
@@ -120,6 +126,31 @@ describe("the stall monitor", () => {
 		channel.autoRespond = true;
 		session.dispose();
 		await outcome;
+	});
+
+	it("does not tell the page when the broker answers a status request: the stall is OMP holding the command", async () => {
+		const { channel, session, timers, log } = await boot();
+		channel.linkProbe = 3;
+		channel.autoRespond = false;
+		void session.prompt({ requestId: "busy-1", text: "omp is busy" });
+		await tick();
+		timers.advance(9_000);
+		await tick();
+		assert.equal(channel.linkProbes.length, 1, "one probe per stall");
+		assert.ok(log.has(/info the broker answered a status request in 3 ms: the link carries traffic, so the stall is OMP holding the command/));
+		assert.equal(session.model.linkStalled, false);
+	});
+
+	it("tells the page and warns when the broker does not answer a status request", async () => {
+		const { channel, session, timers, log } = await boot();
+		channel.linkProbe = null;
+		channel.autoRespond = false;
+		void session.prompt({ requestId: "dead-1", text: "no link" });
+		await tick();
+		timers.advance(6_000);
+		await tick();
+		assert.ok(log.has(/warn the broker did not answer a status request within \d+ ms: the broker or the link is stalled/));
+		assert.equal(session.model.linkStalled, true);
 	});
 
 	it("does not call a link stalled while frames arrive, however long a command waits behind them", async () => {
@@ -146,27 +177,29 @@ describe("the stall monitor", () => {
 		assert.equal(session.model.linkStalled, false);
 	});
 
-	it("sends a probe for a starved command, warns when it is unanswered, and keeps the connection", async () => {
+	it("never replaces the connection for a starved command, however long the broker stays unanswered, and writes the stall line once", async () => {
 		const { channel, session, timers, log } = await boot({ session: { probeTimeoutMs: 2_000 } });
+		channel.linkProbe = "hang";
 		const attaches = channel.attachRequests.length;
 		channel.autoRespond = false;
 		void session.prompt({ requestId: "probe-1", text: "waits" });
 		await tick();
-		timers.advance(8_000);
+		timers.advance(25_000);
 		await tick();
-		assert.ok(log.has(/warn the stall probe was not answered within 2000 ms/));
-		assert.equal(channel.attachRequests.length, attaches, "a probe OMP holds is not a reason to replace the connection");
+		assert.equal(channel.attachRequests.length, attaches, "an unanswered probe is not a reason to replace the connection");
+		assert.equal(log.lines.filter(line => /the link has delivered nothing/.test(line)).length, 1, "one stall line per stall");
+		assert.equal(log.has(/but frames are still arriving/), false, "the stall is not reported as candidate 1");
 	});
 
 	it("reports a working session that says nothing once, without probing or telling the page, and not at all while a dialog is open", async () => {
 		const { channel, session, timers, log } = await boot();
 		channel.emit({ type: "agent_start" });
 		await tick();
-		const probes = channel.commandsOfType("get_state").length;
+		const probes = channel.linkProbes.length;
 		timers.advance(30_000);
 		await tick();
 		assert.equal(log.lines.filter(line => /OMP is working but has sent nothing/.test(line)).length, 1, "one line per silence");
-		assert.equal(channel.commandsOfType("get_state").length, probes, "no probe for a quiet session");
+		assert.equal(channel.linkProbes.length, probes, "no probe for a quiet session");
 		assert.equal(session.model.linkStalled, false);
 		const dialog = await boot();
 		dialog.channel.emit({ type: "agent_start" });
@@ -272,5 +305,11 @@ describe("a large session after unknown_since", () => {
 		});
 		assert.equal(channel.commandsOfType("get_entries").length, 2, "the since read and one full read");
 		assert.deepEqual(session.model.entries.map(entry => entry.id), ["c1", "c2"]);
+	});
+});
+
+describe("link_stalled", () => {
+	it("a child can never produce the frame", () => {
+		assert.equal(toChatEventFrame({ type: "link_stalled", stalled: true }), null);
 	});
 });
