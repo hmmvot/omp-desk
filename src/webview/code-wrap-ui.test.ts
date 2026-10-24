@@ -293,6 +293,41 @@ test("wrap lines on code blocks in Chat", { skip: browserPath === undefined, tim
 			await ui.settle();
 			assert.deepEqual((await buttons()).pressed, ["false", "true"], "the second block is still wrapped, the first is not");
 		});
+
+		await t.test("a tall block is capped at the column's maximum width and scrolls, its buttons stay put, and Find reveals a deep match", async () => {
+			await open("tall");
+			const lines = Array.from({ length: 400 }, (_, index) => index === 350 ? "const needleline = 1;" : `const v${index} = ${index};`).join("\n");
+			await ui.evaluate(push([entry("a", null, code(lines))]));
+			await ui.wait("document.querySelector('.omp-code-block pre')");
+			await ui.settle();
+			const facts = await ui.evaluate<{ max: string; height: number; scrolls: boolean; overflowY: string }>(`(()=>{const pre=document.querySelector('.omp-code-block pre');const s=getComputedStyle(pre);
+				return{max:getComputedStyle(document.querySelector('.omp-transcript')).getPropertyValue('--omp-content-max').trim(),height:pre.getBoundingClientRect().height,scrolls:pre.scrollHeight>pre.clientHeight,overflowY:s.overflowY}})()`);
+			assert.equal(facts.max, "840px");
+			assert.equal(facts.overflowY, "auto");
+			assert.ok(facts.scrolls && Math.abs(facts.height - 840) <= 1, `capped at 840: ${JSON.stringify(facts)}`);
+			const place = (): Promise<{ top: number; offset: number }> => ui.evaluate(`(()=>{const block=document.querySelector('.omp-code-block');const pre=block.querySelector('pre');const button=block.querySelector('.omp-code-actions');
+				return{top:pre.scrollTop,offset:button.getBoundingClientRect().top-pre.getBoundingClientRect().top}})()`);
+			const before = await place();
+			await ui.evaluate("(()=>{const pre=document.querySelector('.omp-code-block pre');pre.scrollTop=600})()");
+			await ui.settle();
+			const after = await place();
+			assert.ok(after.top > 0, "the block scrolled");
+			assert.ok(Math.abs(after.offset - before.offset) <= 1, `buttons stay at the block's top: ${before.offset} -> ${after.offset}`);
+			// Find: the match at line 350 is far below the block's first screen.
+			await ui.evaluate("(()=>{document.querySelector('.omp-code-block pre').scrollTop=0})()");
+			await ui.evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'f',code:'KeyF',keyCode:70,ctrlKey:true,bubbles:true,cancelable:true}))");
+			await ui.wait("document.querySelector('.omp-find-input')");
+			await ui.evaluate("document.querySelector('.omp-find-input').focus()");
+			await ui.call("Input.insertText", { text: "needleline" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 1'");
+			const shown = await ui.evaluate<boolean>(`(async()=>{const end=performance.now()+10000;
+				while(performance.now()<end){const h=CSS.highlights.get('omp-find-current'),r=h&&[...h][0];
+				 if(r){const pre=document.querySelector('.omp-code-block pre'),box=r.getBoundingClientRect(),p=pre.getBoundingClientRect();
+				  if(pre.scrollTop>0&&box.top>=p.top&&box.bottom<=p.bottom)return true}
+				 await new Promise(resolve=>requestAnimationFrame(resolve))}return false})()`);
+			assert.equal(shown, true, "Find scrolled the capped block to the match");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 	} finally {
 		browser?.socket.close();
 		page?.socket.close();

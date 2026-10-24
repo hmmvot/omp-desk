@@ -214,6 +214,12 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 					if (target !== null || seen >= SETTLE_FRAMES) {
 						// The row's top went a third of the way down; a match deep inside a tall row goes there instead, and never under the bar.
 						const root = latest.current.rootRef.current, controller = latest.current.controllerRef.current, anchor = row.closest<HTMLElement>("[data-anchor-key]"), bar = barRef.current;
+						// A capped code block scrolls inside: bring the match to its middle first, so the row scroll below measures a line that is on screen.
+						const block = target?.startContainer.parentElement?.closest("pre") ?? null;
+						if (target !== null && block !== null && block.scrollHeight > block.clientHeight) {
+							const inside = target.getBoundingClientRect(), box = block.getBoundingClientRect();
+							block.scrollTop += inside.top - box.top - (block.clientHeight - inside.height) / 2;
+						}
 						if (target !== null && root !== null && controller !== null && anchor !== null) {
 							const floor = bar === null ? 0 : bar.getBoundingClientRect().bottom - root.getBoundingClientRect().top + 12;
 							controller.reveal(unit.sources, Math.round(Math.max(root.clientHeight / 3, floor) - (target.getBoundingClientRect().top - anchor.getBoundingClientRect().top)));

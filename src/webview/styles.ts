@@ -200,7 +200,9 @@ ${ANSI_STYLES}
 	/* Last guard only: everything wide wraps or scrolls in its own block. */
 	overflow-x: hidden;
 	--omp-transcript-pad-top: 16px;
-	padding: var(--omp-transcript-pad-top) max(12px, calc((100% - 840px) / 2)) 24px;
+	/* The widest the conversation column gets; fenced code is as tall at most. */
+	--omp-content-max: 840px;
+	padding: var(--omp-transcript-pad-top) max(12px, calc((100% - var(--omp-content-max)) / 2)) 24px;
 	min-height: 0;
 	overflow-anchor: none;
 }
@@ -452,7 +454,9 @@ ${ANSI_STYLES}
 	border-radius: var(--omp-radius-card);
 	padding: 10px 12px;
 	overflow-x: auto;
-	overflow-y: hidden;
+	/* Taller than the column is wide: scroll inside (the Copy and Wrap buttons sit outside this box, so they stay put). */
+	overflow-y: auto;
+	max-height: var(--omp-content-max);
 	/* Fenced code scrolls sideways; only inline code in a paragraph wraps. */
 	white-space: pre;
 	overflow-wrap: normal;
