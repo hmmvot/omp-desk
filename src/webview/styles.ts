@@ -259,7 +259,9 @@ ${ANSI_STYLES}
 @media (prefers-reduced-motion: no-preference) {
 	.omp-working-status-text { background-position: var(--omp-sweep, 100%) 0; }
 	.omp-working-status-text:not(:empty)::before { transform: rotate(var(--omp-spin, 0deg)); }
-	.codicon.codicon-loading.codicon-modifier-spin, .codicon.codicon-sync.codicon-modifier-spin, .codicon.codicon-gear.codicon-modifier-spin { transform: rotate(var(--omp-spin, 0deg)); }
+	/* The glyph turns inside its own clipped box: a square turned by 45 degrees reaches 3 px past its layout box, and as a transform of the element itself that overflow made the scroller around it (the notices block, the transcript) grow a scrollbar at every diagonal step. */
+	.codicon.codicon-loading.codicon-modifier-spin, .codicon.codicon-sync.codicon-modifier-spin, .codicon.codicon-gear.codicon-modifier-spin { overflow: clip; }
+	.codicon.codicon-loading.codicon-modifier-spin::before, .codicon.codicon-sync.codicon-modifier-spin::before, .codicon.codicon-gear.codicon-modifier-spin::before { display: inline-block; transform: rotate(var(--omp-spin, 0deg)); }
 	.omp-turn-progress::before { transform: translateX(calc(-100% + var(--omp-progress, 0) * 534%)); }
 }
 @media (prefers-reduced-motion: reduce) { .omp-working-status-text, .omp-working-status-text:not(:empty)::before { animation: none; } }
