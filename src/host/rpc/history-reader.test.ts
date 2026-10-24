@@ -326,6 +326,20 @@ describe("HistoryReader at a leaf that is not the last line (ADR-0051)", () => {
 		assert.equal(unknown.leafId, "a1b", "an unindexed leaf falls back to the file's last entry, which the caller can tell apart");
 	});
 
+	it("lists a branch that starts at a skill invocation the user typed, which OMP writes as a custom message and no user message", async () => {
+		const dir = await scratch();
+		const skill: ChatEntry = { type: "custom_message", id: "sk", parentId: "a0", timestamp: "2026-01-01T00:00:00.000Z", customType: "skill-prompt", content: "expanded skill body", display: true, attribution: "user", details: { name: "release-notes", prompt: "/skill:release-notes for 0.5.0" } };
+		const agentSkill: ChatEntry = { ...skill, id: "auto", attribution: "agent" };
+		// u0 → a0 → [old: sk → a1s] / [agent's own skill row: auto → a1x] / [new: m → u1b → a1b]
+		const rows = [...conversation(1), skill, messageEntry("a1s", "sk", assistantMessage("written", 4_000)), agentSkill, messageEntry("a1x", "auto", assistantMessage("loaded", 4_100)), marker("m", "a0"), messageEntry("u1b", "m", userMessage("branch prompt", 5_000)), messageEntry("a1b", "u1b", assistantMessage("branch reply", 5_005))];
+		const reader = await HistoryReader.open(await dir.file("skill.jsonl", sessionFileText({ entries: rows })));
+		const snapshot = await reader.snapshot(10);
+		assert.deepEqual(snapshot.entries.map(entry => entry.id), ["u0", "a0", "m", "u1b", "a1b"]);
+		assert.deepEqual(snapshot.branches, [{ entryId: "a0", branches: [{ tipId: "a1s", firstPromptId: "sk", firstPrompt: "/skill:release-notes for 0.5.0", messages: 2, prompts: 1 }] }], "the user's skill invocation roots a branch with its typed text; the agent's own skill row does not");
+		const atOld = await reader.snapshot(10, "a1s");
+		assert.deepEqual(atOld.entries.map(entry => entry.id), ["u0", "a0", "sk", "a1s"]);
+	});
+
 	it("loads older rows along the ancestors of the row held, not in file order", async () => {
 		const dir = await scratch();
 		// u0..a3, then a second branch off a1 written after it: u2b..a3b.

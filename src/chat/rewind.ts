@@ -8,7 +8,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { isRecord } from "../shared/guards.ts";
-import type { ChatEntry } from "./messages.ts";
+import { entryMessage, isUserSkillInvocation, userSkill, type ChatEntry, type MessageContent } from "./messages.ts";
 import { confirmedClearBoundaryIndex } from "./cleared-history.ts";
 import { toolPresentation } from "./tool-presentation.ts";
 import { projectTranscript, rendersTranscriptEntry, type ProjectedTool } from "./transcript.ts";
@@ -174,20 +174,49 @@ export function promptPreview(text: string): string {
 	return line.length > PREVIEW_CHARS ? `${line.slice(0, PREVIEW_CHARS - 1)}…` : line;
 }
 
-/** Whether an entry is a user prompt Rewind can target: a durable `message` with role `user`. */
+/**
+ * Whether an entry is a prompt Rewind can target: a durable user message, or a skill invocation the user typed that the
+ * transcript shows as the user's own message ({@link userSkill}). OMP stores that invocation as a `skill-prompt` custom
+ * message attributed to `user` instead of a user message, and its own `navigateTree` (so the OMP-side command) rewinds
+ * past it exactly as past a user message.
+ */
 export function isRewindTarget(entry: ChatEntry): boolean {
-	return entry.type === "message" && entry.message.role === "user";
+	if (entry.type === "message" && entry.message.role === "user") return true;
+	if (!isUserSkillInvocation(entry)) return false;
+	const message = entryMessage(entry);
+	return message?.role === "custom" && userSkill(message) !== null;
 }
 
-/** The user prompts of the loaded active branch, oldest first. `entries` are durable rows only. */
+/** What the user typed for a skill invocation: OMP's `details.prompt` verbatim, else `/skill:name args` rebuilt from the name and arguments of an entry that kept no prompt. */
+function skillPromptText(details: unknown): string {
+	if (!isRecord(details)) return "";
+	if (typeof details.prompt === "string" && details.prompt.trim().length > 0) return details.prompt;
+	if (typeof details.name !== "string" || details.name.trim().length === 0) return "";
+	const args = typeof details.args === "string" ? details.args.trim() : "";
+	return `/skill:${details.name}${args.length > 0 ? ` ${args}` : ""}`;
+}
+
+/**
+ * What a target holds of what the user sent: the typed text and the content that carries its images. A skill
+ * invocation's own content is the expanded skill, so its typed text comes from `details`. `null` for any other entry.
+ */
+function sentPrompt(entry: ChatEntry): { text: string; content: MessageContent } | null {
+	const message = entryMessage(entry);
+	if (message === null) return null;
+	if (message.role === "user") return { text: promptText(message.content), content: message.content };
+	if (message.role === "custom" && isUserSkillInvocation(entry)) return { text: skillPromptText(message.details), content: message.content };
+	return null;
+}
+
+/** The prompts of the loaded active branch Rewind can target, oldest first. `entries` are durable rows only. */
 export function rewindTargets(entries: readonly ChatEntry[]): RewindTarget[] {
 	const targets: RewindTarget[] = [];
 	for (let index = confirmedClearBoundaryIndex(entries) + 1; index < entries.length; index += 1) {
 		const entry = entries[index]!;
-		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		const content = entry.message.content;
-		const images = typeof content === "string" ? 0 : content.filter(block => block.type === "image").length;
-		targets.push({ id: entry.id, parentId: entry.parentId, preview: promptPreview(promptText(content)) || (images > 0 ? `${images} image${images === 1 ? "" : "s"}` : "(empty prompt)"), images, timestamp: entry.timestamp });
+		const sent = isRewindTarget(entry) ? sentPrompt(entry) : null;
+		if (sent === null) continue;
+		const images = typeof sent.content === "string" ? 0 : sent.content.filter(block => block.type === "image").length;
+		targets.push({ id: entry.id, parentId: entry.parentId, preview: promptPreview(sent.text) || (images > 0 ? `${images} image${images === 1 ? "" : "s"}` : "(empty prompt)"), images, timestamp: entry.timestamp });
 	}
 	return targets;
 }
@@ -244,19 +273,19 @@ export interface RewindDraft {
 	unavailableImages: number;
 }
 
-/** The draft of a user prompt entry, or `null` for any other entry. */
+/** The draft of a prompt entry Rewind targets (a user message or a skill invocation the user typed), or `null` for any other entry. */
 export function rewindDraft(entry: ChatEntry): RewindDraft | null {
-	if (entry.type !== "message" || entry.message.role !== "user") return null;
-	const content = entry.message.content;
-	if (typeof content === "string") return { text: content, images: [], unavailableImages: 0 };
+	const sent = sentPrompt(entry);
+	if (sent === null) return null;
+	if (typeof sent.content === "string") return { text: sent.text, images: [], unavailableImages: 0 };
 	const images: ImageContent[] = [];
 	let unavailableImages = 0;
-	for (const block of content) {
+	for (const block of sent.content) {
 		if (block.type !== "image") continue;
 		if (block.data.startsWith("blob:")) unavailableImages += 1;
 		else images.push({ type: "image", data: block.data, mimeType: block.mimeType });
 	}
-	return { text: promptText(content), images, unavailableImages };
+	return { text: sent.text, images, unavailableImages };
 }
 
 /** The Undo a page offers: the newest conversation entry of the branch is a rewind or switch marker. */
@@ -328,7 +357,7 @@ export function leafReaches(branch: readonly object[], expectedLeafId: string | 
 export interface BranchNode {
 	id: string;
 	parentId: string | null;
-	/** `user` or `assistant` for a message entry of that role; anything else is not a counted message. */
+	/** `user` or `assistant` for a message entry of that role (a skill invocation the user typed counts as `user`); anything else is not a counted message. */
 	role: string | null;
 	/** {@link promptPreview} of a user prompt, when the reader has its body. */
 	preview?: string;
@@ -447,9 +476,11 @@ export function branchNodesOf(raw: readonly Record<string, unknown>[]): BranchNo
 	for (const entry of raw) {
 		if (typeof entry.id !== "string") continue;
 		const message = entry.type === "message" && isRecord(entry.message) ? entry.message : null;
-		const role = message !== null && typeof message.role === "string" ? message.role : null;
-		const content = role === "user" ? message!.content : undefined;
-		const preview = typeof content === "string" || Array.isArray(content) ? promptPreview(promptText(content as string | { type: string; text?: string }[])) : "";
+		const skill = isUserSkillInvocation(entry);
+		const role = skill ? "user" : message !== null && typeof message.role === "string" ? message.role : null;
+		const content = role === "user" && !skill ? message!.content : undefined;
+		const text = skill ? skillPromptText((message ?? entry).details) : typeof content === "string" || Array.isArray(content) ? promptText(content as string | { type: string; text?: string }[]) : "";
+		const preview = promptPreview(text);
 		nodes.push({ id: entry.id, parentId: typeof entry.parentId === "string" ? entry.parentId : null, role, ...(preview ? { preview } : {}) });
 	}
 	return nodes;

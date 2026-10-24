@@ -71,14 +71,13 @@ import {
 } from "../../chat/clear.ts";
 import type { ForkSource } from "../../chat/fork.ts";
 import { routesAsPrompt } from "../../chat/prompt-routing.ts";
-import { anchorKind, isUserSkillInvocation, mayStillWithdraw, withdrawVerdict, type AnchorKind, type AnchorResult } from "../../chat/stop-withdraw.ts";
+import { anchorKind, mayStillWithdraw, withdrawVerdict, type AnchorKind, type AnchorResult } from "../../chat/stop-withdraw.ts";
 import {
 	NAVIGATE_COMMAND,
 	NAVIGATE_ERROR_PATH,
 	branchNodesOf,
 	computeBranchPoints,
 	encodeNavigateCommand,
-	isRewindTarget,
 	navigateErrorCode,
 	navigationMarker,
 	rewindDraft,
@@ -1380,12 +1379,8 @@ export class RpcSession {
 		const durable = model.entries.slice(0, model.durableCount);
 		if (model.leafId !== request.expectedLeafId && !leafReaches(durable, request.expectedLeafId)) return "stale";
 		switch (request.kind) {
-			case "rewind": {
-				const target = durable.find(entry => entry.id === request.targetId);
-				if (target === undefined) return "target";
-				if (own && isUserSkillInvocation(target)) return null;
-				return !isRewindTarget(target) || !rewindTargets(durable).some(candidate => candidate.id === target.id) ? "target" : null;
-			}
+			case "rewind":
+				return rewindTargets(durable).some(candidate => candidate.id === request.targetId) ? null : "target";
 			case "undo":
 				return undoOffer(durable, model.leafId)?.from === request.targetId ? null : "stale";
 			case "switch":

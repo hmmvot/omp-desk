@@ -282,6 +282,23 @@ describe("navigate outcomes", () => {
 		assert.equal(undoOffer(durable(session.model), session.model.leafId)?.from, "a2");
 	});
 
+	it("rewinds to a skill invocation the user typed: it is a target, the draft is the text typed, and an agent's own skill row is not", async () => {
+		// OMP writes `/skill:name …` as a `skill-prompt` custom message attributed to the user, not as a user message.
+		const skill = { type: "custom_message", id: "s3", parentId: "a2", timestamp: isoOf(5_000), customType: "skill-prompt", content: "expanded skill body", display: true, attribution: "user", details: { name: "release-notes", prompt: "/skill:release-notes for 0.5.0" } };
+		const auto = { type: "custom_message", id: "s4", parentId: "a3", timestamp: isoOf(7_000), customType: "skill-prompt", content: "expanded skill body", display: true, attribution: "agent", details: { name: "release-notes" } };
+		const a3 = messageEntry("a3", "s3", assistantMessage("written", 6_000));
+		const a4 = messageEntry("a4", "s4", assistantMessage("done", 8_000));
+		const { channel, session } = await boot({ child: { entries: [u1, a1, u2, a2, skill, a3, auto, a4] as never, leafId: "a4" } });
+		assert.deepEqual(await session.navigate(rewind("s4", "a4")), { status: "refused", reason: "target" }, "the agent's autoload is not a prompt of the user");
+		assert.equal(channel.commandsOfType("prompt").length, 0);
+		const calls = completes(channel);
+		const outcome = await session.navigate(rewind("s3", "a4"));
+		assert.deepEqual(outcome, { status: "done", kind: "rewind", summarized: false, raced: false, draft: { text: "/skill:release-notes for 0.5.0", images: [], unavailableImages: 0 } });
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0]!.args.targetId, "s3");
+		assert.deepEqual(ids(session.model), ["u1", "a1", "u2", "a2", `nav-${markerSeq}`], "the skill invocation and what followed left the active entries");
+	});
+
 	it("counts a marker on the path but no longer at the leaf, and carries raced and summarized", async () => {
 		const { channel, session } = await boot();
 		completes(channel, {

@@ -6,15 +6,12 @@
  * false it stays false, so the host drops the anchor and a long-turn Stop pays nothing), and the verdict after the stop
  * settled (`withdrawVerdict`). The host (`host/rpc/session.ts`) holds the clock, the ledger and the move itself.
  */
-import type { ChatContent, ChatEntry, UserMessage } from "./messages.ts";
+import { isUserSkillInvocation, type ChatContent, type ChatEntry, type UserMessage } from "./messages.ts";
 import type { ChatSlashCommand } from "./model.ts";
 import { invokesListedSkill, leadingCommandToken, startsWithLocalExecution } from "./prompt-routing.ts";
 
 /** How long after the send an already started answer still counts as "a moment ago". The only number of the rule. */
 export const WITHDRAW_GRACE_MS = 5_000;
-
-/** `customType` OMP gives the entry of a skill invocation (`/skill:name …`). */
-const SKILL_PROMPT_TYPE = "skill-prompt";
 
 /**
  * What the sent message is to OMP. `plain`: user input stored as typed. `template`: a markdown command or prompt template,
@@ -46,12 +43,6 @@ function customMessageOf(entry: ChatEntry): { customType: string; attribution?: 
 	if (entry.type === "custom_message") return entry;
 	if (entry.type === "message" && (entry.message.role === "custom" || entry.message.role === "hookMessage")) return entry.message;
 	return null;
-}
-
-/** A skill invocation the user typed (OMP's `isUserInvokedSkillPrompt`): a request, like a user message. */
-export function isUserSkillInvocation(entry: ChatEntry): boolean {
-	const custom = customMessageOf(entry);
-	return custom !== null && custom.customType === SKILL_PROMPT_TYPE && custom.attribution === "user";
 }
 
 function userMessage(entry: ChatEntry): UserMessage | null {

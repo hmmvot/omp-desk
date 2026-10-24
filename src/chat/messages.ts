@@ -253,13 +253,28 @@ export function advisorNotes(message: CustomMessage): AdvisorNote[] {
 	});
 }
 
+/** `customType` OMP gives the entry of a skill invocation (`/skill:name …`). */
+const SKILL_PROMPT_TYPE = "skill-prompt";
+
 export interface UserSkill { name: string; args: string; prompt: string; reconstructed: boolean }
 /** Provenance is native metadata, never prose parsed out of the expanded skill. */
 export function userSkill(message: CustomMessage): UserSkill | null {
-	if (!message.display || message.customType !== "skill-prompt" || message.attribution !== "user" || !isRecord(message.details)) return null;
+	if (!message.display || message.customType !== SKILL_PROMPT_TYPE || message.attribution !== "user" || !isRecord(message.details)) return null;
 	const { name, args, prompt } = message.details;
 	if (typeof name !== "string" || !name.trim() || (args !== undefined && typeof args !== "string")) return null;
 	if (prompt !== undefined && (typeof prompt !== "string" || !prompt.trim())) return null;
 	const argumentsText = typeof args === "string" ? args : "";
 	return { name, args: argumentsText, prompt: typeof prompt === "string" ? prompt : `Invoked /skill:${name}${argumentsText ? ` · ${argumentsText}` : ""}`, reconstructed: prompt === undefined };
+}
+
+/**
+ * A skill invocation the user typed (OMP's `isUserInvokedSkillPrompt`): a request like a user message, which OMP
+ * stores as a `skill-prompt` custom message attributed to `user` instead of a user message. Reads a parsed entry or
+ * the raw record of a session line or `get_entries`, in either of the two shapes OMP's custom rows take
+ * (`custom_message`, or a `message` of role `custom` or `hookMessage`).
+ */
+export function isUserSkillInvocation(entry: object): boolean {
+	if (!isRecord(entry)) return false;
+	const custom = entry.type === "custom_message" ? entry : entry.type === "message" && isRecord(entry.message) && (entry.message.role === "custom" || entry.message.role === "hookMessage") ? entry.message : null;
+	return custom !== null && custom.customType === SKILL_PROMPT_TYPE && custom.attribution === "user";
 }

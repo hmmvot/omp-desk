@@ -189,6 +189,7 @@ LaTeX in a reply is shown as readable text, as in OMP's terminal UI: `$x^2 + \al
 **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again:
 
 - `Esc` `Esc` in an empty composer or anywhere else on the Chat page (while no turn runs), **Rewind to here** on a prompt, `/rewind` or `/branch`, **OMP Desk: Rewind Conversation…**, or **Branch…** in a running session's context menu in Sessions.
+- A skill invocation (`/skill:name …`) is one of your prompts: Rewind lists it, offers **Rewind to here** on its row, and puts the text you typed back into the composer.
 - **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
 - Rewind never restores files; it lists the files changed after that point.
 - A chat started by an older OMP Desk must be restarted before it can rewind.

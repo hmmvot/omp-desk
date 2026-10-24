@@ -7816,6 +7816,35 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a skill invocation between two messages is a Rewind target: its row offers Rewind to here, the keys stop on it and Enter rewinds to it", async () => {
+			await reset("rewind-skill-invocation");
+			// OMP stores a skill invocation as a `skill-prompt` entry attributed to the user, not as a user message.
+			const invocation = { type: "custom_message", id: "s1", parentId: "a1", timestamp: rewindAt(3), customType: "skill-prompt", content: "Expanded skill body", display: true, attribution: "user", details: { name: "docs-review", prompt: "/skill:docs-review the changelog" } };
+			const rows = [rewindRows[0], rewindRows[1], invocation, rewindReply("a1s", "s1", 3, "Skill answer"), { ...rewindRows[2], parentId: "a1s" }, ...rewindRows.slice(3)];
+			await pushRewind({ entries: rows, durableCount: rows.length });
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===3");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('[aria-label=\"Rewind to here\"]')].map(button=>{const row=button.closest('.omp-row');return[row.classList.contains('omp-row--user'),row.textContent.includes('/skill:docs-review the changelog')]})"), [[true, false], [true, true], [true, false]], "the skill's row offers it like the messages around it");
+			await ui.evaluate("window.composer.focus()");
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+			assert.equal(await pickedPreview(), "fix the parser", "picking starts at the newest message");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='/skill:docs-review the changelog'");
+			assert.equal(await ui.evaluate("window.rewindState('/skill:docs-review the changelog')"), "selected", "the skill's row is the selected one");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='first prompt'");
+			await press("ArrowDown", "ArrowDown", 40);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='/skill:docs-review the changelog'");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-navigate')");
+			assert.deepEqual((await navigations())[0], { ...(await navigations())[0]!, kind: "rewind", targetId: "s1", expectedLeafId: "a2", summarize: false });
+			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "/skill:docs-review the changelog", images: [], unavailableImages: 0 } });
+			await ui.wait("window.composer.value()==='/skill:docs-review the changelog' && !document.querySelector('.omp-rewind-bar')");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "Rewind never sends a prompt");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("an empty chat names the folder and model, shows the key hints, lists the folder's recent sessions and opens one by the answer's id and ordinal; a short answer is asked again, a full one is not", async () => {
 			await reset("empty-state");
 			await ui.evaluate("window.ui.push({header:{id:'empty-h',cwd:'D:/work/alpha-desk/',timestamp:'2026-10-13T10:00:00.000Z'},entries:[],durableCount:0,working:false,settled:true})");

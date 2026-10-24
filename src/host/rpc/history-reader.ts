@@ -13,7 +13,7 @@
  * reader never holds a Windows lock on a file OMP may rewrite.
  */
 import { open, stat, type FileHandle } from "node:fs/promises";
-import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
+import { isUserSkillInvocation, parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
 import { computeBranchPoints, rewindTargets, type BranchInfo, type BranchPoint } from "../../chat/rewind.ts";
 import { todoPhasesFromEntry, type TodoPhase } from "../../chat/todos.ts";
 import { todoFingerprint, TODO_HUD_STATE_CUSTOM_TYPE, type TodoHudHistory, type TodoHudVisibility } from "../../chat/todo-hud.ts";
@@ -60,7 +60,7 @@ interface IndexEntry {
 	offset: number;
 	length: number;
 	renders: boolean;
-	/** Message role (`user`, `assistant`, …) for a `message` entry, else null; branch points count messages. */
+	/** Message role (`user`, `assistant`, …) for a `message` entry, `user` for a skill invocation the user typed, else null; branch points count messages. */
 	role: string | null;
 	todoCandidate: boolean;
 	/** A `todo_hud_state` custom entry (OMP's record of a cleared or revealed TODO row). */
@@ -122,6 +122,8 @@ interface LineFacts {
 	display: boolean;
 	todoCandidate: boolean;
 	hudCandidate: boolean;
+	/** A skill invocation the user typed: OMP's `skill-prompt` custom message attributed to `user`, which counts as a user prompt. */
+	userSkill: boolean;
 }
 
 const HEAD_PATTERN = /^\{"type":"([^"\\]*)","id":"([^"\\]*)","parentId":(?:null|"([^"\\]*)")/;
@@ -159,10 +161,10 @@ function factsOf(line: Buffer): LineFacts | null {
 		if (type === "message") {
 			const role = ROLE_PATTERN.exec(head);
 			if (role !== null && role[1] !== "custom" && role[1] !== "hookMessage") {
-				return { type, id: match[2]!, parentId: match[3] ?? null, role: role[1]!, customType: null, display: false, todoCandidate: role[1] === "toolResult", hudCandidate: false };
+				return { type, id: match[2]!, parentId: match[3] ?? null, role: role[1]!, customType: null, display: false, todoCandidate: role[1] === "toolResult", hudCandidate: false, userSkill: false };
 			}
 		} else if (type !== "custom_message" && type !== "custom") {
-			return { type, id: match[2]!, parentId: match[3] ?? null, role: null, customType: null, display: false, todoCandidate: false, hudCandidate: false };
+			return { type, id: match[2]!, parentId: match[3] ?? null, role: null, customType: null, display: false, todoCandidate: false, hudCandidate: false, userSkill: false };
 		}
 	}
 	let parsed: unknown;
@@ -182,6 +184,7 @@ function factsOf(line: Buffer): LineFacts | null {
 		display: parsed.display === true || (isObject(message) && message.display === true),
 		todoCandidate: (parsed.type === "custom" && parsed.customType === "user_todo_edit") || (isObject(message) && message.role === "toolResult"),
 		hudCandidate: parsed.type === "custom" && parsed.customType === TODO_HUD_STATE_CUSTOM_TYPE,
+		userSkill: isUserSkillInvocation(parsed),
 	};
 }
 
@@ -403,7 +406,7 @@ export class HistoryReader {
 		const renders = rendersByFacts(facts);
 		// Legacy files (version < 3) may carry no parent links; the active path is then the file order.
 		const activeLeafId = activeLeafOf(content);
-		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate, hudCandidate: facts.hudCandidate, ...(activeLeafId === undefined ? {} : { activeLeafId }) });
+		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.userSkill ? "user" : facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate, hudCandidate: facts.hudCandidate, ...(activeLeafId === undefined ? {} : { activeLeafId }) });
 		this.#byId.set(facts.id, position);
 		this.#pathCache = null;
 		this.#lastTag = { offset, length: line.length, text: line.toString("utf8", 0, Math.min(line.length, 128)) };

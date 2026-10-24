@@ -130,7 +130,7 @@ export interface TranscriptProps {
 }
 
 export interface TranscriptRewind {
-	/** Prompts that can be rewound to: durable user messages of the loaded branch. Empty hides the action. */
+	/** Prompts that can be rewound to: durable user messages and skill invocations of the loaded branch. Empty hides the action. */
 	targets: ReadonlySet<string>;
 	/** The prompt being picked, or null. */
 	selectedId: string | null;
@@ -226,10 +226,11 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	}
 	const message = card.kind === "entry" ? entryMessage(card.entry) : null;
 	const user = message?.role === "user" && !message.synthetic;
+	const skill = message?.role === "custom" && userSkill(message) !== null;
 	// A message that carries files copies its text as sent, markers included and blocks left out; each row copies its own file.
 	const copyText = user ? sentTextOf(message.content) : "";
 	const rewind = props.rewind;
-	const rewindId = rewind !== undefined && card.kind === "entry" && user && rewind.targets.has(card.entry.id) ? card.entry.id : null;
+	const rewindId = rewind !== undefined && card.kind === "entry" && (user || skill) && rewind.targets.has(card.entry.id) ? card.entry.id : null;
 	const copy = copyText.trim().length > 0 ? <CopyButton text={copyText} label="Copy message" /> : null;
 	const actions = copy !== null || rewindId !== null ? (
 		<div className="omp-row-actions">
@@ -244,7 +245,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	const points = props.branchesByCard?.get(card.id);
 	return (
 		<CodeWrapScope id={`${props.conversationKey ?? "chat"}:${card.id}`}>
-		<Row kind={user || message?.role === "custom" && userSkill(message) !== null ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined} actions={actions}
+		<Row kind={user || skill ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined} actions={actions}
 			findId={(props.depth ?? 0) === 0 && props.findable !== false && (user || card.kind === "assistant" && !card.streaming || card.kind === "tool") ? findIdOf(card) : undefined}
 			rewindState={rewindState} onPick={picking && rewindId !== null ? () => rewind!.onPick(rewindId) : undefined}>
 			{body}

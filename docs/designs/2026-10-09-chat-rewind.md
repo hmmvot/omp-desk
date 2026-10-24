@@ -188,7 +188,7 @@ Page-only interaction state is a reducer, `reduceRewind` (`src/chat/rewind-mode.
 - **Undo past metadata Desk does not model.** The handler's `UNDO_TRANSPARENT` set also skips `label`, `service_tier_change` and `mode_change`, but the host and page never see those entries under their own type (`HistoryReader` drops them; `parseChatEntry` maps them to `unknown`), so Desk does not offer Undo after one. This is safe: Undo is withheld, never wrong.
 - **`wrapSessionChange` side effects.** A navigation closes an open `/btw` side conversation and quiesces goals, as the TUI's own navigation does.
 - **Undo is inexact for a user `from`.** When the previous tip is a user message (a prompt with no reply yet), `navigateTree` moves to its parent, so Undo lands one entry earlier.
-- **Skill-prompt targets.** Only role `user` messages are targets; a user-invoked skill prompt is not restored as `/skill:name args`.
+- **Skill-prompt targets.** (2026-10-24) A skill invocation the user typed is a target like a user message: OMP stores it as a `skill-prompt` custom message attributed to `user`, the page shows it as the user's own skill row, and OMP's `navigateTree` rewinds past it. The picker, **Rewind to here**, the keyboard path and the host QuickPick list it with its typed text (`details.prompt`) as the preview and the draft; a branch that starts at one is a branch point. Until then only role `user` messages were targets and Rewind skipped a skill invocation between two prompts.
 - **The `ask` re-answer protocol** is not offered.
 - **The control generation changes** on every navigation, because the host-control `session_tree` observer fires. This is intended: it invalidates a pending native rename or stop confirmation for the moved branch.
 

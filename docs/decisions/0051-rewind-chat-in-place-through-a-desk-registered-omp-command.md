@@ -5,7 +5,9 @@ date: 2026-10-09
 
 # ADR-0051: Rewind Chat in place through a Desk-registered OMP command with a durable marker
 
-> Amended 2026-10-21 by [ADR-0082](0082-stop-takes-a-message-back-out-of-the-conversation-when-nothing-was-answered-or-done.md): the host also starts a rewind itself (a Stop that takes a just-sent message back), and the command accepts the user's own skill invocation (a `skill-prompt` custom message attributed to the user, which OMP's own `navigateTree` rewinds past like a user message) as a target besides a user message; the picker's target list is unchanged.
+> Amended 2026-10-21 by [ADR-0082](0082-stop-takes-a-message-back-out-of-the-conversation-when-nothing-was-answered-or-done.md): the host also starts a rewind itself (a Stop that takes a just-sent message back), and the command accepts the user's own skill invocation (a `skill-prompt` custom message attributed to the user, which OMP's own `navigateTree` rewinds past like a user message) as a target besides a user message.
+>
+> Amended 2026-10-24: that skill invocation is also a target of the picker, the page's **Rewind to here**, the keyboard path and the Command Palette list (`isRewindTarget`), not only of the Stop; the draft it returns is the text the user typed (`details.prompt`, else `/skill:name args` rebuilt from the entry's name and arguments) with the images the entry carries, and a branch that starts at one is a branch the switcher shows. Before this the picker listed user messages only, so Rewind skipped a skill invocation between two messages.
 
 ## Context and Problem Statement
 
