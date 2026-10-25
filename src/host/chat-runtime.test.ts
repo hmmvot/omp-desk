@@ -1433,3 +1433,43 @@ describe("navigating a conversation in place (omp:chat-navigate)", () => {
 		runtime.dispose();
 	});
 });
+
+describe("a prompt OMP accepted and then failed on", () => {
+	const PNG = "iVBORw0KGgo=";
+	const failure = { message: "No API key found for anthropic.", retryable: true };
+
+	async function failedRig() {
+		const { runtime, channel } = await liveRig();
+		const roomy = new RecordingPage("editor");
+		const small = new RecordingPage("bridge");
+		small.refuse = message => (message.type === "omp:chat-prompt-failed" && message.images !== undefined ? "too-large" : "sent");
+		runtime.attachPage(TAB, roomy);
+		runtime.attachPage(TAB, small);
+		const sent = await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "a".repeat(32), text: "look at this", images: [{ type: "image", data: PNG, mimeType: "image/png" }] }, roomy);
+		assert.equal(sent, "accepted");
+		channel.emit({ type: "prompt_result", id: `vsc:${"a".repeat(32)}`, status: "error", agentInvoked: true, sessionSettled: true, error: failure });
+		await waitUntil(() => roomy.ofType("omp:chat-prompt-failed").length === 1 && small.ofType("omp:chat-prompt-failed").length === 1);
+		return { runtime, roomy, small };
+	}
+
+	it("hands the message back to every page of the tab, without its images to a route that cannot carry them", async () => {
+		const { runtime, roomy, small } = await failedRig();
+		const [whole] = roomy.ofType("omp:chat-prompt-failed");
+		assert.deepEqual(whole, { type: "omp:chat-prompt-failed", requestId: "a".repeat(32), text: "look at this", error: failure.message, retryable: true, images: [{ type: "image", data: PNG, mimeType: "image/png" }] });
+		const [thin] = small.ofType("omp:chat-prompt-failed");
+		assert.deepEqual(thin, { type: "omp:chat-prompt-failed", requestId: "a".repeat(32), text: "look at this", error: failure.message, retryable: true, unavailableImages: 1 });
+		runtime.dispose();
+	});
+
+	it("is a message the page's own parser accepts, and the client keeps it for the composer", async () => {
+		const { runtime, roomy } = await failedRig();
+		const [message] = roomy.ofType("omp:chat-prompt-failed");
+		assert.deepEqual(parseChatHostMessage(JSON.parse(JSON.stringify(message))), message);
+		const client = new ChatClient({ post: () => true });
+		client.handle(message!);
+		const kept: unknown[] = [];
+		client.subscribePromptFailures(failed => kept.push(failed.text));
+		assert.deepEqual(kept, ["look at this"], "a failure that arrived before the composer listened is delivered on subscribe");
+		runtime.dispose();
+	});
+});

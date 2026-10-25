@@ -70,6 +70,7 @@ import {
 	type ClearRefusal,
 } from "../../chat/clear.ts";
 import type { ForkSource } from "../../chat/fork.ts";
+import type { ChatPromptError } from "../../chat/host-signals.ts";
 import { routesAsPrompt } from "../../chat/prompt-routing.ts";
 import { anchorKind, mayStillWithdraw, withdrawVerdict, type AnchorKind, type AnchorResult } from "../../chat/stop-withdraw.ts";
 import {
@@ -248,6 +249,12 @@ export type RpcSessionOutput =
 	| { type: "prompt-result"; requestId: string | null; result: ChatPromptResult }
 	/** A prompt sent, unconfirmed across a disconnect, never showed up: *not delivered — send again manually*. */
 	| { type: "prompt-lost"; requestId: string }
+	/**
+	 * A prompt OMP acknowledged and then failed on (`prompt_result` with `status: "error"`, e.g. no API key, a refresh that could
+	 * not reach the network) before its text reached the conversation: nothing in the transcript shows it, so the page keeps the
+	 * message for a retry. `error` is OMP's own reason, when it gave one.
+	 */
+	| { type: "prompt-failed"; requestId: string; text: string; images: readonly RpcImage[]; error: ChatPromptError | null }
 	/** A retained `vsc:` response no pending command claims (learned after a host restart). */
 	| { type: "late-response"; requestId: string; success: boolean; code?: string }
 	/** Fires after every applied frame or reconciliation while live; consumers read the model for activity. */
@@ -652,6 +659,10 @@ interface LedgerEntry {
 	unconfirmed: boolean;
 	/** OMP answered this prompt as one it handled itself, or refused it: no `prompt_result` is owed, so the entry no longer counts as an open prompt. */
 	quiet?: boolean;
+	/** The images sent with the text, kept while the prompt is open so a failure can hand them back with it; emptied once the entry is quiet. */
+	images: readonly RpcImage[];
+	/** The text lands in the transcript as typed (plain input or a skill invocation), so a prompt that failed without such a row never reached the conversation. A template is stored as its expansion, a command acts without a row. */
+	verbatim: boolean;
 	anchor: Anchor | null;
 }
 
@@ -751,6 +762,8 @@ export class RpcSession {
 	readonly #queueRequests = new Map<string, Promise<RemoveQueuedOutcome>>();
 	readonly #abortRequests = new Map<string, Promise<AbortRestoreOutcome>>();
 	readonly #ledger: LedgerEntry[] = [];
+	/** Prompts whose `prompt_result` said `error`, until the next reconcile pass tells whether their text reached the conversation. */
+	readonly #failedPrompts: { entry: LedgerEntry; error: ChatPromptError | null }[] = [];
 	/** The Stop that holds the anchor of the turn and has not decided (ADR-0082); its fence refuses every other mutation. */
 	#withdrawal: Withdrawal | null = null;
 	/** Clears the TODO row of a fully closed list after OMP's delay (`src/host/rpc/todo-hud.ts`). */
@@ -1103,7 +1116,8 @@ export class RpcSession {
 	#sendPrompt(request: PromptRequest, streamingBehavior: "steer" | "followUp"): Promise<SendOutcome> {
 		this.cancelDeferredClear();
 		this.#slashArmed = request.text.trimStart().startsWith("/");
-		this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false, anchor: this.#newAnchor(request) });
+		const kind = anchorKind(request.text, this.#model.commands);
+		this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false, images: request.images ?? [], verbatim: kind === "plain" || kind === "skill", anchor: this.#newAnchor(request) });
 		return this.#sendUser(request.requestId, {
 			type: "prompt",
 			message: request.text,
@@ -1113,7 +1127,10 @@ export class RpcSession {
 			// OMP 18.12.2 acknowledges a prompt that starts the agent bare (`agentInvoked` comes with the `prompt_result`); only an
 			// acknowledgement that says the agent is not invoked (a command OMP ran itself), a refusal or an unknown fate disarms.
 			const entry = this.#ledger.find(item => item.requestId === request.requestId);
-			if (entry !== undefined && (outcome.status === "refused" || (outcome.status === "accepted" && outcome.agentInvoked === false))) entry.quiet = true;
+			if (entry !== undefined && (outcome.status === "refused" || (outcome.status === "accepted" && outcome.agentInvoked === false))) {
+				entry.quiet = true;
+				entry.images = [];
+			}
 			if (entry !== undefined && entry.anchor !== null) entry.anchor = outcome.status === "accepted" && outcome.agentInvoked !== false ? { ...entry.anchor, armed: true } : null;
 			return outcome;
 		});
@@ -2974,7 +2991,12 @@ export class RpcSession {
 		};
 		if (requestId !== null) {
 			const at = this.#ledger.findIndex(entry => entry.requestId === requestId);
-			if (at >= 0) this.#ledger.splice(at, 1);
+			const [entry] = at >= 0 ? this.#ledger.splice(at, 1) : [];
+			// A prompt whose own Stop restores it, and one already shown to the page as unconfirmed, are accounted for there.
+			if (entry !== undefined && frame.status === "error" && entry.verbatim && !entry.unconfirmed && this.#withdrawal?.promptRequestId !== requestId) {
+				this.#failedPrompts.push({ entry, error: frame.error ?? null });
+				if (this.#failedPrompts.length > MAX_LEDGER) this.#failedPrompts.shift();
+			}
 			const withdrawal = this.#withdrawal;
 			if (withdrawal !== null && withdrawal.promptRequestId === requestId) {
 				withdrawal.result = { status: frame.status, agentInvoked: frame.agentInvoked };
@@ -3023,6 +3045,7 @@ export class RpcSession {
 		})) this.#navigationFence = null;
 		this.#syncHeld();
 		if (!this.#live) return;
+		this.#failedPromptCheck();
 		if (this.#model.pending.size === 0) {
 			this.#reconcileAttempts = 0;
 			this.#lostPromptCheck();
@@ -3336,6 +3359,21 @@ export class RpcSession {
 			const delivered = this.#model.entries.some(row => isSendRow(row, entry));
 			this.#ledger.splice(this.#ledger.indexOf(entry), 1);
 			if (!delivered) this.#emit({ type: "prompt-lost", requestId: entry.requestId });
+		}
+	}
+
+	/**
+	 * A prompt that OMP acknowledged and then failed on — an API key it could not resolve, a token refresh the network refused —
+	 * writes no user message: the composer already cleared and the transcript has nothing to show. Once a pass has read the file, a
+	 * failed prompt whose text is neither on the branch nor still queued is handed back with OMP's reason; one that did reach the
+	 * conversation (a provider error mid-turn) already shows its message and the failed reply.
+	 */
+	#failedPromptCheck(): void {
+		if (this.#failedPrompts.length === 0) return;
+		const queued = this.#model.state?.queuedMessages;
+		for (const { entry, error } of this.#failedPrompts.splice(0)) {
+			const delivered = this.#model.entries.some(row => isSendRow(row, entry)) || queued?.steering.includes(entry.text) === true || queued?.followUp.includes(entry.text) === true;
+			if (!delivered) this.#emit({ type: "prompt-failed", requestId: entry.requestId, text: entry.text, images: entry.images, error });
 		}
 	}
 

@@ -5121,6 +5121,33 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a message OMP accepted and then failed on comes back as an unsent message, beside whatever was typed since", async () => {
+			await reset("prompt-failed-card");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "Please review the diff" });
+			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+			await ui.wait("window.ui.sends().length===1");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Dismiss recoverable message\"]').length"), 0, "an accepted message leaves nothing behind");
+			await ui.call("Input.insertText", { text: "typed meanwhile" });
+			const failed = { type: "omp:chat-prompt-failed", requestId: "b".repeat(32), text: "Please review the diff", error: "No API key found for anthropic.\n\nUse /login", retryable: true };
+			await ui.evaluate(`window.ui.receive(${JSON.stringify(failed)})`);
+			await ui.wait("document.querySelector('[aria-label=\"Dismiss recoverable message\"]')");
+			const card = await ui.evaluate<{ reason: string; summary: string; text: string }>("(()=>{const card=document.querySelector('[aria-label=\"Dismiss recoverable message\"]').parentElement;return{reason:card.firstElementChild.textContent,summary:card.querySelector('summary').textContent,text:card.querySelector('details pre').textContent}})()");
+			assert.match(card.reason, /failed before saving it to the conversation/);
+			assert.match(card.reason, /OMP said: No API key found for anthropic\. Use \/login/);
+			assert.match(card.reason, /sending the message again may work/);
+			assert.equal(card.summary, "Unsent message");
+			assert.equal(card.text, failed.text);
+			assert.equal(await draftValue(), "typed meanwhile", "what the user typed since is untouched");
+			await ui.evaluate("[...document.querySelectorAll('.omp-attach-error button')].find(button=>button.textContent==='Add to draft').click()");
+			await ui.wait("window.composer.value().includes('Please review the diff')");
+			assert.ok((await draftValue()).includes("typed meanwhile"));
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 1, "adding it back sends nothing");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("an image arriving during an IME composition waits for it: the composition is never interrupted", async () => {
 			await reset("image-refs-ime");
 			await installImages();

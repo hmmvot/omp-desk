@@ -111,6 +111,25 @@ export type ChatAbortAnswer = Omit<ChatAbortResultMessage, "type" | "epoch" | "r
 /** Stops awaiting their queue hand-back; bounded so a host that never answers cannot grow it. */
 const MAX_PENDING_ABORTS = 16;
 
+/** A message OMP acknowledged and then failed on before it reached the conversation, as the composer keeps it for another try (see {@link ChatClient.subscribePromptFailures}). */
+export interface ChatPromptFailure {
+	readonly text: string;
+	readonly images: readonly ImageContent[];
+	/** Attachments the route could not carry back: they must be attached again. */
+	readonly unavailableImages: number;
+	/** The fixed sentence the composer shows beside the message. */
+	readonly reason: string;
+}
+
+/** Failures that arrived while no composer listened; bounded so a page that never mounts one cannot grow it. */
+const MAX_UNCLAIMED_FAILURES = 16;
+
+/** What the card beside the composer says: OMP took the message, did not save it, and why. */
+export function promptFailureSentence(error: string | undefined, retryable: boolean): string {
+	const why = error === undefined ? "" : error.replace(/\s+/g, " ").trim();
+	return `OMP accepted this message but failed before saving it to the conversation, so it was not answered.${why.length === 0 ? "" : ` OMP said: ${why}`}${retryable ? " The failure looks temporary: sending the message again may work." : ""}`;
+}
+
 /** The outcome of one in-place navigation (see {@link ChatClient.navigate}). */
 export type ChatNavigateAnswer = Omit<ChatNavigateResultMessage, "type">;
 /** Past the host's worst case: a summarizing rewind may wait 180 s for OMP, then re-reads the session. */
@@ -188,6 +207,8 @@ export class ChatClient {
 	readonly #textSends = new Map<string, { resolve(result: ChatSendResult): void; timer: unknown; restart(): void }>();
 	readonly #aborts = new Map<string, (answer: ChatAbortAnswer) => void>();
 	readonly #navigations = new Map<string, { resolve(answer: ChatNavigateAnswer): void; timer: unknown }>();
+	readonly #failureListeners = new Set<(failure: ChatPromptFailure) => void>();
+	#unclaimedFailures: ChatPromptFailure[] = [];
 	readonly #navigationListeners = new Set<(answer: ChatNavigateAnswer) => void>();
 	readonly #operations: ChatOperationStore;
 	/** The side-question store (`/btw`): outside the chat model, so a side answer is never a row of the transcript. */
@@ -286,6 +307,11 @@ export class ChatClient {
 			case "omp:chat-send-result": {
 				// Admission has already run: correlate by id even if reconciliation changed the epoch.
 				this.#finishTextSend(message.requestId, message.status);
+				return true;
+			}
+			case "omp:chat-prompt-failed": {
+				// The host sends the message back itself, so no epoch or request of this page is needed to place it.
+				this.#promptFailed({ text: message.text, images: message.images ?? [], unavailableImages: message.unavailableImages ?? 0, reason: promptFailureSentence(message.error, message.retryable === true) });
 				return true;
 			}
 			case "omp:chat-abort-result": {
@@ -529,6 +555,24 @@ export class ChatClient {
 	subscribeNavigations(listener: (answer: ChatNavigateAnswer) => void): () => void {
 		this.#navigationListeners.add(listener);
 		return () => { this.#navigationListeners.delete(listener); };
+	}
+
+	/**
+	 * Every message OMP accepted and then failed on before it reached the conversation (no API key, a refresh the network refused):
+	 * the composer keeps each as an unsent message. One that arrived while nobody listened is delivered to the first subscriber.
+	 */
+	subscribePromptFailures(listener: (failure: ChatPromptFailure) => void): () => void {
+		this.#failureListeners.add(listener);
+		for (const failure of this.#unclaimedFailures.splice(0)) listener(failure);
+		return () => { this.#failureListeners.delete(listener); };
+	}
+
+	#promptFailed(failure: ChatPromptFailure): void {
+		if (this.#failureListeners.size === 0) {
+			this.#unclaimedFailures = [...this.#unclaimedFailures, failure].slice(-MAX_UNCLAIMED_FAILURES);
+			return;
+		}
+		for (const listener of [...this.#failureListeners]) listener(failure);
 	}
 
 	/**

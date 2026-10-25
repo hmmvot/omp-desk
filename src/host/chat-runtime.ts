@@ -843,6 +843,22 @@ export class ChatRuntime {
 			case "prompt-lost":
 				this.#tellAll(conversation, CHAT_PROMPT_LOST_SENTENCE);
 				return;
+			case "prompt-failed": {
+				// The route that cannot carry the images gets the text and the count of what must be attached again.
+				const base = {
+					type: "omp:chat-prompt-failed" as const,
+					requestId: output.requestId,
+					text: output.text.slice(0, MAX_CHAT_TEXT_LENGTH),
+					...(output.error === null ? {} : { error: output.error.message, ...(output.error.retryable ? { retryable: true as const } : {}) }),
+				};
+				const images = output.images.slice(0, MAX_ATTACH_ITEMS).map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data }));
+				const unavailable = output.images.length - images.length;
+				for (const page of this.#pageList(tabId)) {
+					if (page.post({ ...base, ...(images.length > 0 ? { images } : {}), ...(unavailable > 0 ? { unavailableImages: unavailable } : {}) }) !== "too-large") continue;
+					page.post({ ...base, ...(output.images.length > 0 ? { unavailableImages: output.images.length } : {}) });
+				}
+				return;
+			}
 			case "late-response":
 				return;
 			case "prompt-result":

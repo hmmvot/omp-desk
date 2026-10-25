@@ -26,6 +26,7 @@ const VALUES: Record<string, "kept"> = {
 	fieldRules: "kept",
 	insertCommand: "kept",
 	insertText: "kept",
+	keepUnsent: "kept",
 	keyEdit: "kept",
 	knowsReference: "kept",
 	quote: "kept",

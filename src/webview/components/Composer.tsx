@@ -63,6 +63,7 @@ import {
 	fieldRules,
 	insertCommand,
 	insertText,
+	keepUnsent,
 	keyEdit,
 	knowsReference,
 	readingBy,
@@ -846,6 +847,18 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (outcome.result.attach !== undefined) setAttachError(outcome.result.attach);
 			if (outcome.result.send !== undefined) setSendError(outcome.result.send);
 		});
+	}), [cell, client]);
+	// A message OMP took and then failed on before saving it (no API key, a token refresh the network refused): the composer cleared at
+	// admission and the transcript has nothing to show, so the host hands the message back with OMP's reason and it waits as an unsent
+	// message beside the draft. Nothing typed since is touched; "Add to draft" puts it back.
+	useEffect(() => client.subscribePromptFailures(failure => {
+		cell.perform(keepUnsent({
+			text: failure.text,
+			images: failure.images,
+			reason: failure.reason,
+			unconfirmed: false,
+			...(failure.unavailableImages > 0 ? { lostAttachments: failure.unavailableImages } : {}),
+		}), { composing: "now", held: "wait" });
 	}), [cell, client]);
 	const doubleEscapeRef = useRef(createDoubleEscape());
 	// `Esc` `Esc` with the focus on the page around the composer (the transcript, a tool row, a link, the body) opens Rewind

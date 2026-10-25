@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chat: a message OMP accepted and then failed on no longer disappears.** OMP acknowledges a message before it checks the model's API key; when that check fails (a token refresh the network refused, no key found) it writes no user message and reports the failure only in its `prompt_result`/error frame, which Desk dropped: the composer had already cleared, the transcript showed nothing and no reply came. Once a read of the session file shows the message is neither on the branch nor still queued, the Chat now keeps it as an **Unsent message** card beside the composer (the images come with it, or are counted as to be attached again), with OMP's own reason and, when OMP calls the failure temporary, a hint that sending again may work. **Add to draft** puts it back; nothing you typed since is touched. A message whose turn failed after it was saved, a Stop, and a local or slash command are unchanged.
+
 ## [0.4.10] - 2026-10-25
 
 ### Added

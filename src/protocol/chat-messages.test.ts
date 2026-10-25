@@ -167,6 +167,17 @@ describe("parseChatHostMessage", () => {
 		}
 	});
 
+	it("carries a failed prompt back with OMP's reason and what could not be carried, and nothing it cannot trust", () => {
+		const image = { type: "image", mimeType: "image/png", data: "AA==" };
+		const message = { type: "omp:chat-prompt-failed", requestId: REQUEST_ID, text: "review the diff", images: [image], unavailableImages: 1, error: "No API key found for anthropic.", retryable: true };
+		assert.deepEqual(parseChatHostMessage({ ...message, extra: "ignored" }), message);
+		assert.deepEqual(parseChatHostMessage({ type: message.type, requestId: REQUEST_ID, text: "plain" }), { type: message.type, requestId: REQUEST_ID, text: "plain" });
+		assert.deepEqual(parseChatHostMessage({ ...message, images: "nope" }), { type: message.type, requestId: REQUEST_ID, text: "review the diff", unavailableImages: 2, error: message.error, retryable: true }, "an unreadable set of images is counted as lost, the text kept");
+		for (const patch of [{ requestId: "" }, { requestId: 7 }, { text: 7 }, { text: "x".repeat(MAX_CHAT_TEXT_LENGTH + 1) }, { unavailableImages: -1 }, { error: "e".repeat(2_001) }]) {
+			assert.equal(parseChatHostMessage({ ...message, ...patch }), null, JSON.stringify(patch).slice(0, 60));
+		}
+	});
+
 	it("carries a Stop's hand-back of queued messages, bounded, with what could not be carried flagged", () => {
 		const message = { type: "omp:chat-abort-result", epoch: EPOCH, requestId: REQUEST_ID, status: "accepted", entries: [{ text: "steer" }, { text: "follow", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] }], truncated: true };
 		assert.deepEqual(parseChatHostMessage(message), message);

@@ -17,7 +17,7 @@ import type { ChatEpoch, ChatPhase, ChatSnapshotPayload, ChatUiRequest } from ".
 import { REWIND_ARGUMENTS_SENTENCE, SLASH_DENIED_SENTENCE } from "../../protocol/rpc.ts";
 import { splitChatSnapshot } from "../../protocol/chat-messages.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
-import { ChatClient, LIVE_LOAD_FACTOR, LIVE_PACE_MAX_MS, LIVE_PACE_WHILE_TYPING_MS } from "./chat-client.ts";
+import { ChatClient, LIVE_LOAD_FACTOR, LIVE_PACE_MAX_MS, LIVE_PACE_WHILE_TYPING_MS, promptFailureSentence, type ChatPromptFailure } from "./chat-client.ts";
 
 const EPOCH: ChatEpoch = { nonce: "host-a", counter: 1 };
 const OTHER_EPOCH: ChatEpoch = { nonce: "host-b", counter: 1 };
@@ -121,6 +121,35 @@ function textRequestId(message: GuestWebviewMessage | undefined): string {
 	return message.requestId;
 }
 
+describe("a message OMP accepted and then failed on", () => {
+	const failed = (patch: Record<string, unknown> = {}): GuestHostMessage => ({ type: "omp:chat-prompt-failed", requestId: "c".repeat(32), text: "review the diff", error: "No API key found for anthropic.\n\nUse /login", retryable: true, ...patch }) as GuestHostMessage;
+
+	it("reaches a listening composer with OMP's reason on one line and the count of images to attach again", () => {
+		const { client } = live();
+		const seen: ChatPromptFailure[] = [];
+		client.subscribePromptFailures(failure => seen.push(failure));
+		assert.equal(client.handle(failed({ unavailableImages: 2 })), true);
+		assert.deepEqual(seen, [{ text: "review the diff", images: [], unavailableImages: 2, reason: promptFailureSentence("No API key found for anthropic. Use /login", true) }]);
+		assert.match(seen[0]!.reason, /OMP said: No API key found for anthropic\. Use \/login The failure looks temporary/);
+	});
+
+	it("waits for the first composer that listens, and is delivered once", () => {
+		const { client } = live();
+		client.handle(failed());
+		client.handle(failed({ text: "second", error: undefined, retryable: undefined }));
+		const first: string[] = [];
+		const unsubscribe = client.subscribePromptFailures(failure => first.push(failure.text));
+		assert.deepEqual(first, ["review the diff", "second"]);
+		unsubscribe();
+		const second: string[] = [];
+		client.subscribePromptFailures(failure => second.push(failure.text));
+		assert.deepEqual(second, [], "what a composer took is not handed to the next one");
+	});
+
+	it("says nothing about OMP's words when it gave none", () => {
+		assert.equal(promptFailureSentence(undefined, false), "OMP accepted this message but failed before saving it to the conversation, so it was not answered.");
+	});
+});
 describe("text admission receipts", () => {
 	it("waits for the matching native outcome, without inventing turn or queue state", async () => {
 		const { client, sent } = live({}, false);

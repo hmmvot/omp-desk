@@ -29,6 +29,7 @@
  * | `omp:chat-operation` | the action the user asked for on this tab that is still being processed (kind, step id, elapsed time, request id), or none, with the end of the last one; epoch-free presentation only |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
+ * | `omp:chat-prompt-failed` | a prompt OMP acknowledged and then failed on before its text reached the conversation: the message and OMP's reason, for every page's composer to keep as an unsent message |
  * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, and the message that started the turn when the Stop took it back (ADR-0082), for its composer |
  * | `omp:chat-navigate-result` | the outcome of an in-place Rewind/Undo/branch switch, and a rewound prompt for the composer |
  * | `omp:chat-btw`, `omp:chat-btw-delta`, `omp:chat-btw-result` | `/btw` side questions: records, streamed text and the answer to a panel request (`btw-messages.ts`); never part of the transcript |
@@ -133,6 +134,8 @@ const MAX_ASK_PREVIEW = 20_000;
 const MAX_ACTIVE_TOOLS = 256;
 const MAX_PENDING_ROWS = 1_024;
 const MAX_COMMANDS = 500;
+/** Longest reason OMP gives for a failed prompt that crosses to the page (`parsePromptError` bounds it at the source). */
+const MAX_PROMPT_FAILURE_CHARS = 2_000;
 
 /** Mutation ids: 128 random bits as lowercase hex, the bridge's own token grammar. */
 const REQUEST_ID = /^[0-9a-f]{32}$/;
@@ -318,6 +321,24 @@ export interface ChatSendResultMessage {
 	status: "accepted" | "refused" | "unconfirmed" | "explained";
 }
 
+/**
+ * A prompt OMP acknowledged and then failed on (no API key, a token refresh the network refused) before its text reached the
+ * conversation: the transcript shows nothing, so the host hands the message back with OMP's reason. The page keeps it as an unsent
+ * message beside the composer. It names no epoch: the message belongs to the user, not to one incarnation of the conversation.
+ * `unavailableImages` counts attachments the route could not carry.
+ */
+export interface ChatPromptFailedMessage {
+	type: "omp:chat-prompt-failed";
+	requestId: string;
+	text: string;
+	images?: ChatImageWire[];
+	unavailableImages?: number;
+	/** OMP's own words for the failure (`prompt_result.error.message`), when it gave any. */
+	error?: string;
+	/** OMP classed the failure as transient: sending the message again later may succeed. */
+	retryable?: true;
+}
+
 /** One message a Stop withdrew from OMP's queues, as the composer takes it back. */
 export interface ChatRestoredMessage {
 	text: string;
@@ -402,6 +423,7 @@ export type ChatHostMessage =
 	| ChatSubagentChunkMessage
 	| ChatQueueResultMessage
 	| ChatSendResultMessage
+	| ChatPromptFailedMessage
 	| ChatAbortResultMessage
 	| ChatNavigateResultMessage
 	| ChatBtwHostMessage
@@ -1149,6 +1171,23 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 			const epoch = parseChatEpoch(value.epoch);
 			if (epoch === null || !isChatRequestId(value.requestId) || (value.status !== "accepted" && value.status !== "refused" && value.status !== "unconfirmed" && value.status !== "explained")) return null;
 			return { type: value.type, epoch, requestId: value.requestId, status: value.status };
+		}
+		case "omp:chat-prompt-failed": {
+			if (!isChatRequestId(value.requestId) || !isText(value.text, MAX_CHAT_TEXT_LENGTH) || (value.unavailableImages !== undefined && !isCount(value.unavailableImages))) return null;
+			if (value.error !== undefined && !isText(value.error, MAX_PROMPT_FAILURE_CHARS)) return null;
+			const images = parseRestoredImages(value.images, false);
+			// A set the page cannot take is dropped as a whole: every image of it is one the user must attach again.
+			const lost = images.imagesDropped ? (Array.isArray(value.images) ? Math.max(1, value.images.length) : 1) : 0;
+			const unavailable = (typeof value.unavailableImages === "number" ? value.unavailableImages : 0) + lost;
+			return {
+				type: value.type,
+				requestId: value.requestId,
+				text: value.text,
+				...(images.images === undefined ? {} : { images: images.images }),
+				...(unavailable > 0 ? { unavailableImages: unavailable } : {}),
+				...(typeof value.error === "string" && value.error.length > 0 ? { error: value.error } : {}),
+				...(value.retryable === true ? { retryable: true as const } : {}),
+			};
 		}
 		case "omp:chat-abort-result": {
 			const epoch = parseChatEpoch(value.epoch);

@@ -5,7 +5,7 @@
  */
 import type { DraftHandoffContent } from "../../../protocol/messages.ts";
 import { activeDocuments, type DraftDocument } from "./draft-documents.ts";
-import type { Change } from "./field.ts";
+import type { Change, Op } from "./field.ts";
 import { activeImages, findReferences } from "./image-references.ts";
 import type { Draft, Recoverable } from "./value.ts";
 
@@ -72,6 +72,14 @@ export function dismissLost(draft: Draft): Change {
 /** A message kept as a card beside the draft: a refused or uncertain send. */
 export function addRecoverable(draft: Draft, entry: Omit<Recoverable, "id">): Change {
 	return { draft: { ...draft, recoverable: [...draft.recoverable, { ...entry, id: draft.next.card }], next: { ...draft.next, card: draft.next.card + 1 } }, writes: [] };
+}
+
+/**
+ * A message OMP took and then failed on before saving it (`omp:chat-prompt-failed`), kept as a card beside the draft. Run with
+ * `held: "wait"`, it applies once a hand-off releases the draft; it never touches what the user typed.
+ */
+export function keepUnsent(entry: Omit<Recoverable, "id">): Op<void> {
+	return draft => ({ change: addRecoverable(draft, entry), result: undefined });
 }
 
 export function dismissRecoverable(draft: Draft, id: number): Change {
