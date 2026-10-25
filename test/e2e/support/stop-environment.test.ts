@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -49,7 +49,9 @@ function stop(): { status: number | null; output: string } {
 
 describe("test-vscode.ps1 -Stop", { skip: process.platform !== "win32" }, () => {
 	before(() => {
-		root = mkdtempSync(join(tmpdir(), "omp-stop-"));
+		// Windows PowerShell 5.1 (.NET Framework) expands an 8.3 short name in `-Root` (a runner's `RUNNER~1`) while the processes
+		// carry it as given, so the stand-in is placed under the long form, as the real environments are.
+		root = realpathSync.native(mkdtempSync(join(tmpdir(), "omp-stop-")));
 		base = join(root, NAME);
 	});
 
