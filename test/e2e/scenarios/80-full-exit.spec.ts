@@ -52,7 +52,7 @@ test("a full VS Code exit and reopen re-adopts the running Chat's own OMP proces
 	await reopened.ready(after);
 
 	const tree = await reopened.sessionsTree(after);
-	await expect(tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) })).toBeVisible({ timeout: 90_000 });
+	await reopened.revealSessionRow(after, tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) }), 90_000);
 	expect(pidAlive(childPid!), "the reopened window did not replace the OMP process").toBe(true);
 	expect(recordedSession(state, marker)!.childPid, "the same process serves the session").toBe(childPid);
 	const chat = reopened.chat(after);

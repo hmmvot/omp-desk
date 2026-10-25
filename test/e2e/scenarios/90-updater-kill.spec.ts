@@ -78,18 +78,24 @@ test(`an emulated updater kill of the install's Code.exe processes: a ${EXPECT}-
 	const after = await reopened.window("alpha-desk");
 	await reopened.ready(after);
 	const tree = await reopened.sessionsTree(after);
+	// A kill leaves no editor to restore, so nothing scrolls the Sessions list to this row; every earlier scenario left a session in it, and the row of a title that sorts last is outside the lines the pane renders (the list is virtualised).
 	if (!SURVIVE) {
-		await expect(tree.getByRole("treeitem", { name: new RegExp(marker) })).toBeVisible({ timeout: 90_000 });
+		await reopened.revealSessionRow(after, tree.getByRole("treeitem", { name: new RegExp(marker) }), 90_000);
 		await reopened.close();
 		return;
 	}
-	await expect(tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) })).toBeVisible({ timeout: 90_000 });
+	const row = tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) });
+	await reopened.revealSessionRow(after, row, 90_000);
 	expect(recordedSession(state, marker)?.childPid, "the same OMP process serves the session").toBe(childPid);
 	expect(recordedSession(state, marker)?.brokerPid, "the same broker serves the session").toBe(brokerPid);
 	// A kill is not a quit: VS Code never wrote down the editor this Chat had opened, so it is not restored. The row is how a user gets it back.
-	await tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) }).click();
+	// The click is repeated until this session's own Chat shows its reply: while the window finishes restoring, Desk scrolls the Sessions list to the row of an editor VS Code did restore, and a click that lands as the list moves opens another session's row instead (seen: the restored active session's).
 	const chat = reopened.chat(after);
-	await expect(chat.getByText(`Mock reply to: ${marker}`)).toBeVisible({ timeout: 90_000 });
+	await expect(async () => {
+		await reopened.revealSessionRow(after, row, 30_000);
+		await row.click();
+		await expect(chat.getByText(`Mock reply to: ${marker}`)).toBeVisible({ timeout: 30_000 });
+	}, "the row opens this session's Chat").toPass({ timeout: 180_000, intervals: [1_000] });
 	await reopened.send(chat, `after updater ${marker}`);
 	await expect(chat.getByText(`Mock reply to: after updater ${marker}`)).toBeVisible({ timeout: 60_000 });
 	await reopened.close();

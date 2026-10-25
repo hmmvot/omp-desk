@@ -23,7 +23,7 @@ test("Reload Window keeps the running Chat's process: the row, the transcript an
 	expect(await after.evaluate(() => (globalThis as { e2eRenderer?: string }).e2eRenderer), "the window was reloaded, not merely refreshed").toBeUndefined();
 
 	const tree = await desk.sessionsTree(after);
-	await expect(tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) })).toBeVisible({ timeout: 60_000 });
+	await desk.revealSessionRow(after, tree.getByRole("treeitem", { name: new RegExp(`${marker}, .*process running`) }), 60_000);
 	expect(pidAlive(childPid!), "the reload did not end the session's OMP process").toBe(true);
 	expect(recordedSession(state, marker)!.childPid, "the same process serves the session").toBe(childPid);
 	const chat = desk.chat(after);
