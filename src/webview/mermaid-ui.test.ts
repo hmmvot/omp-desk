@@ -240,11 +240,15 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 		 const attributes=[...doc.querySelectorAll('*')].flatMap(element=>[...element.attributes].map(attribute=>attribute.name.toLowerCase()+'='+attribute.value));
 		 return {text:doc.documentElement.textContent+styles,tags,attributes,width:Number(document.querySelector(${JSON.stringify(selector)}).getAttribute('width'))};
 		})()`);
-		const clean = async (): Promise<void> => {
+		// `allowed`: violations that are the policy refusing the payload itself. Chromium 156 reports the inline `onerror` of a hostile
+		// label once per element when the renderer parses it inside the page's document (older builds parsed it silently); it is
+		// refused either way, which the image facts, `alerted` and the absence of any other violation prove.
+		const clean = async (allowed: string[] = []): Promise<void> => {
 			// A policy violation is reported in a task of its own: let anything queued run before reading.
 			await ui.settle();
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
-			assert.deepEqual(await ui.evaluate("window.violations"), [], "the document's policy refused nothing");
+			const violations = await ui.evaluate<string[]>("window.violations");
+			assert.deepEqual(violations.filter(violation => !allowed.includes(violation)), [], "the document's policy refused nothing");
 			assert.equal(await ui.evaluate("window.alerted"), false);
 		};
 
@@ -464,7 +468,7 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			assert.ok(!facts.text.includes("#cde498") && !/fill:\s*blue/i.test(facts.text), "the diagram did not pick its own theme or CSS");
 			assert.ok(facts.text.includes("#cccccc"), "it is drawn in the page's theme: Dark Modern's foreground");
 			await ui.settle();
-			await clean();
+			await clean(["script-src-attr inline"]);
 		});
 
 		await t.test("a source packed with statements, or a block diagram, is refused without loading the renderer", async () => {
