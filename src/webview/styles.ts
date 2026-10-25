@@ -49,6 +49,8 @@ ${ANSI_STYLES}
 	flex: 1 1 auto;
 	height: 100%;
 	min-height: 0;
+	position: relative;
+	overflow: clip;
 }
 
 /* The bottom block: the TODO/Agents rows (when any) and the composer card. It is one flex item of

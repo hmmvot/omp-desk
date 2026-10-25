@@ -40,7 +40,10 @@ html, body {
 	overflow: hidden;
 }
 
+/* The page never scrolls: the body is a real box (the document element owns the viewport overflow), and a body that is only hidden stays
+   scrollable by the keyboard and by caret reveal as soon as anything in it overflows. Clip is not scrollable at all. */
 body {
+	overflow: clip;
 	background: var(--vscode-editor-background);
 	color: var(--vscode-foreground);
 	font-family: var(--vscode-font-family, system-ui, sans-serif);
@@ -48,4 +51,4 @@ body {
 	line-height: 1.5;
 }
 
-#root { height: 100vh; }`;
+#root { height: 100vh; overflow: clip; }`;
