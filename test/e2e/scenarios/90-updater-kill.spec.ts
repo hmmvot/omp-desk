@@ -78,7 +78,7 @@ test(`an emulated updater kill of the install's Code.exe processes: a ${EXPECT}-
 	const after = await reopened.window("alpha-desk");
 	await reopened.ready(after);
 	const tree = await reopened.sessionsTree(after);
-	// A kill leaves no editor to restore, so nothing scrolls the Sessions list to this row; every earlier scenario left a session in it, and the row of a title that sorts last is outside the lines the pane renders (the list is virtualised).
+	// No editor is restored for this session, so nothing scrolls the Sessions list to its row. Every earlier scenario left a session in the list and the row of a title that sorts last is outside the lines the pane renders (the list is virtualised).
 	if (!SURVIVE) {
 		await reopened.revealSessionRow(after, tree.getByRole("treeitem", { name: new RegExp(marker) }), 90_000);
 		await reopened.close();
