@@ -1,15 +1,16 @@
 /**
- * A long transcript in an owned headless Chromium with the real Chat page, on a CPU slowed down as a loaded machine is:
- * a reply streams into it, and an auto-compaction or a resync replaces the transcript's entries in the middle of the stream.
+ * A long transcript in the real Chat page (an owned headless Chromium): a reply streams into it, and an auto-compaction or
+ * a resync replaces the transcript's entries.
  *
- * The page must stay responsive through it. Every frame of a streaming reply used to project every loaded entry again, a
- * snapshot made every row a new object so every cache missed, and the page drew every frame that arrived however long
- * drawing took, so a backlog of frames became one long task after another: the working spinner stalled for seconds
- * and the page took no input. The budgets below are counts of long tasks and shares of the main thread, measured on a
- * CPU slowed 4 times; they hold with a wide margin for the fixed page and are far exceeded by the old one.
+ * The page must not do work in proportion to the length of the history for something that did not change. Every frame of
+ * a streaming reply used to project every loaded entry again, and a snapshot made every row a new object, so the
+ * measured heights, the tool metadata and the mounted rows all missed and the whole transcript was drawn again; on a long
+ * session the frames behind that queued into a run of long tasks and the working spinner stalled for seconds.
  *
- * The clocks here are real: the page's own timers, frames and long tasks under a slowed CPU are the thing under test, and a
- * fake clock would measure nothing.
+ * The test counts that work instead of timing it, so it does not depend on the machine: the entries handed to the
+ * position and projection steps, the tool-call presentations computed, the measured heights thrown away and the mounted
+ * rows replaced. The counters are statements put next to the functions that do the work while the page is bundled (`COUNTERS`
+ * below), which fails loudly if one of them is renamed.
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -17,11 +18,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { test } from "node:test";
-import { build } from "esbuild";
+import { build, type Plugin } from "esbuild";
 import { createGuestHtml } from "../host/guest-webview.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
@@ -125,14 +126,13 @@ const SETUP = (turns: number): string => `(() => {
   words += 3;
   frame({ type: "message_update", messageId: "live1", message: { role: "assistant", timestamp: 2_000_000, model: "m", stopReason: "stop", content: [{ type: "text", text: "Streaming reply: " + "alpha beta gamma delta ".repeat(Math.ceil(words / 4)).slice(0, words * 6) + "\\n\\n\`code\` and **bold** text" }] } });
  };
- let timer = 0;
- // Long tasks, and when the working row's glyph takes each of its steps.
- window.longTasks = [];
- new PerformanceObserver(list => { for (const entry of list.getEntries()) window.longTasks.push(entry.duration); }).observe({ entryTypes: ["longtask"] });
- window.steps = [];
- new MutationObserver(() => { const glyph = document.querySelector(".omp-working-status-text"); if (!glyph) return; const value = glyph.style.getPropertyValue("--omp-spin"); if (value !== window.lastStep) { window.lastStep = value; window.steps.push(performance.now()); } })
-  .observe(document.body, { subtree: true, attributes: true, attributeFilter: ["style"] });
- // The loaded transcript, the two replacements prepared before any clock runs (a host sends them already split), and a stream under way.
+ const W = globalThis.__work;
+ // Mounted rows that came into the page, whatever the reason: a row the page replaced is one added again.
+ new MutationObserver(records => { for (const record of records) for (const node of record.addedNodes) if (node instanceof Element) W.rowsAdded += (node.matches(".omp-measured-row") ? 1 : 0) + node.querySelectorAll(".omp-measured-row").length; })
+  .observe(document.body, { subtree: true, childList: true });
+ // Wait until the page has nothing left to do: its counters and mounted rows have not changed for a while.
+ const quiet = async () => { let last = "", still = 0; while (still < 6) { await frames(); await sleep(50); const now = JSON.stringify(W) + document.querySelectorAll(".omp-measured-row").length; still = now === last ? still + 1 : 0; last = now; } };
+ // The loaded transcript, the two replacements prepared before anything is counted (a host sends them already split), and a stream under way.
  window.setUp = async () => {
   const kept = fresh(entries.slice(480));
   const compaction = { type: "compaction", id: "cmp1", parentId: kept.at(-1).id, timestamp: "2026-10-05T01:00:00Z", summary: "Summary of the earlier conversation. " + prose.repeat(4), firstKeptEntryId: kept[0].id, tokensBefore: 90000, tokensAfter: 12000, method: "soft" };
@@ -141,35 +141,58 @@ const SETUP = (turns: number): string => `(() => {
    compact: window.ui.parts({ phase: "live", entries: [...kept, compaction], durableCount: kept.length + 1, olderCount: 480, working: true, settled: false }),
   };
   window.ui.push({ entries: fresh(entries), durableCount: entries.length, olderCount: 0, working: true, settled: false, workingIntent: "Streaming" });
-  await frames(); await sleep(1500);
+  await frames(); await sleep(500);
   frame({ type: "agent_start" });
+  await quiet();
  };
- // Run \`what\` while a reply streams, and say what the page did meanwhile.
- window.during = async (what, ms) => {
-  window.longTasks.length = 0; window.steps.length = 0;
-  const from = performance.now();
-  timer = setInterval(tick, 33);
-  await sleep(1000);
-  const mounted = [...document.querySelectorAll(".omp-measured-row")];
+ // What the action made the page do, and which of the rows mounted before it are no longer the same elements.
+ window.work = async action => {
+  await quiet();
+  const before = { ...W }, mounted = [...document.querySelectorAll(".omp-measured-row")];
   for (const element of mounted) element.dataset.mark = "kept";
-  what();
-  await sleep(ms);
-  clearInterval(timer);
-  await frames(); await sleep(300);
-  const steps = window.steps.filter(time => time > from);
-  let gap = 0; for (let index = 1; index < steps.length; index++) gap = Math.max(gap, steps[index] - steps[index - 1]);
-  return { tasks: window.longTasks.length, worst: Math.round(Math.max(0, ...window.longTasks)), busy: Math.round(window.longTasks.reduce((sum, value) => sum + value, 0)),
-   steps: steps.length, gap: Math.round(gap), survivors: [...document.querySelectorAll(".omp-measured-row")].filter(element => element.dataset.mark === "kept").length, mounted: mounted.length };
+  await action(); await quiet();
+  const spent = {}; for (const key of Object.keys(W)) spent[key] = W[key] - before[key];
+  return { ...spent, mounted: mounted.length, replaced: mounted.filter(element => !element.isConnected || element.dataset.mark !== "kept").map(element => element.dataset.windowRow ?? element.className) };
  };
+ window.stream = async count => { for (let index = 0; index < count; index++) { tick(); await frames(); } };
  window.replace = which => () => window.ui.deliver(window.prepared[which]);
 })()`;
 
-interface During { tasks: number; worst: number; busy: number; steps: number; gap: number; survivors: number; mounted: number }
+interface Work { positioned: number; projected: number; toolRoutes: number; heightResets: number; heightsMeasured: number; rowsAdded: number; mounted: number; replaced: string[] }
 
-test("a reply streaming into a long transcript keeps the page responsive while a compaction or a resync replaces the entries", { skip: browserPath === undefined && "no Chromium is available", timeout: 300_000 }, async t => {
+/**
+ * Counters in the bundled page: each edit puts a statement next to one of the functions that do the work. An anchor
+ * that is not found exactly once fails the test, so a renamed function cannot leave a counter silently at zero.
+ */
+const COUNTERS: { file: RegExp; edits: [anchor: string, statement: string, where: "before" | "after"][] }[] = [
+	{ file: /src[\\/]chat[\\/]transcript\.ts$/, edits: [["export function projectTranscript(entries: readonly ChatEntry[], options: TranscriptProjectionOptions = {}): TranscriptCard[] {", "globalThis.__work.projected += entries.length;", "after"]] },
+	{ file: /src[\\/]chat[\\/]projection\.ts$/, edits: [["\tconst additions: { entry: ChatEntry; position: TranscriptPosition }[] = [];", "globalThis.__work.positioned += entries.length;", "before"]] },
+	{ file: /src[\\/]chat[\\/]tool-presentation\.ts$/, edits: [["export function resolveToolRoute(name: string, args: Record<string, unknown>, details: Record<string, unknown>): ToolRoute {", "globalThis.__work.toolRoutes++;", "after"]] },
+	{ file: /src[\\/]webview[\\/]lib[\\/]transcript-virtualizer\.ts$/, edits: [
+		["measurement = { context, revision: row.revision, height: null };", "if (measurement?.height != null) globalThis.__work.heightResets++;", "before"],
+		["measurement.height = height; return true;", "globalThis.__work.heightsMeasured++;", "before"],
+	] },
+];
+const countingPlugin: Plugin = {
+	name: "work-counters",
+	setup(builder) {
+		for (const { file, edits } of COUNTERS) {
+			builder.onLoad({ filter: file }, args => {
+				let contents = readFileSync(args.path, "utf8");
+				for (const [anchor, statement, where] of edits) {
+					assert.equal(contents.split(anchor).length - 1, 1, `counter anchor not found exactly once in ${args.path}: ${anchor}`);
+					contents = contents.replace(anchor, () => where === "after" ? `${anchor} ${statement}` : `${statement} ${anchor}`);
+				}
+				return { contents, loader: "ts", resolveDir: dirname(args.path) };
+			});
+		}
+	},
+};
+
+test("a long transcript costs the page nothing for what did not change: a streaming reply, a resync and a compaction", { skip: browserPath === undefined && "no Chromium is available", timeout: 300_000 }, async t => {
 	const bundle = await build({
 		stdin: { contents: FIXTURE, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") },
-		bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", loader: { ".css": "text" }, define: { "process.env.NODE_ENV": '"production"' },
+		bundle: true, write: false, format: "iife", plugins: [countingPlugin], banner: { js: "globalThis.__work = { positioned: 0, projected: 0, toolRoutes: 0, heightResets: 0, heightsMeasured: 0, rowsAdded: 0 };" }, platform: "browser", jsx: "automatic", loader: { ".css": "text" }, define: { "process.env.NODE_ENV": '"production"' },
 	});
 	const script = bundle.outputFiles[0]!.text;
 	const server = createServer((request, response) => {
@@ -218,34 +241,36 @@ test("a reply streaming into a long transcript keeps the page responsive while a
 		for (let attempt = 0; attempt < 400 && !await evaluate<boolean>("Boolean(window.ui)").catch(() => false); attempt++) await delay(25);
 		await evaluate(SETUP(900));
 		await evaluate("window.setUp()");
-		// A machine that is busy with other work: the same page at a quarter of the speed.
-		await page.call("Emulation.setCPUThrottlingRate", { rate: 4 });
-		const during = async (what: string, ms: number): Promise<During> => {
-			const outcome = await evaluate<During>(`window.during(${what}, ${ms})`);
+		const work = async (what: string): Promise<Work> => {
+			const outcome = await evaluate<Work>(`window.work(${what})`);
 			process.stdout.write(`# ${what}: ${JSON.stringify(outcome)}\n`);
 			return outcome;
 		};
+		const LOADED = 4500;
 
-		await t.test("a reply streams into 4,500 loaded entries without long tasks piling up", async () => {
-			const outcome = await during("() => {}", 2500);
-			assert.ok(outcome.tasks <= 14, `${outcome.tasks} long tasks (${outcome.busy} ms) in the 3 s of a stream`);
-			assert.ok(outcome.busy <= 1200, `${outcome.busy} ms of long tasks in the 3 s of a stream`);
-			assert.ok(outcome.gap <= 700, `the working spinner paused for ${outcome.gap} ms`);
+		await t.test("a reply streams into 4,500 loaded entries: a frame projects the reply, not the history", async () => {
+			const outcome = await work("() => window.stream(40)");
+			assert.ok(outcome.projected <= 3 * 40, `${outcome.projected} entries projected over 40 frames (the reply alone is one entry a frame)`);
+			assert.ok(outcome.positioned <= LOADED, `${outcome.positioned} entries positioned over 40 frames (once for the history, not once a frame)`);
+			assert.ok(outcome.toolRoutes <= 40, `${outcome.toolRoutes} tool presentations computed over 40 frames`);
+			assert.equal(outcome.heightResets, 0, "no measured height is thrown away by a streamed frame");
+			assert.ok(outcome.replaced.length <= 2, `rows replaced by a streamed frame: ${outcome.replaced.join(", ")}`);
 		});
 
-		await t.test("a resync of the same 4,500 entries does not stall the page", async () => {
-			const outcome = await during("window.replace('resync')", 2500);
-			assert.ok(outcome.tasks <= 16, `${outcome.tasks} long tasks (${outcome.busy} ms) around a resync`);
-			assert.ok(outcome.busy <= 1400, `${outcome.busy} ms of long tasks around a resync`);
-			assert.ok(outcome.worst <= 800, `the longest task of a resync was ${outcome.worst} ms`);
-			assert.ok(outcome.gap <= 1500, `the working spinner paused for ${outcome.gap} ms around a resync`);
+		await t.test("a resync of the same 4,500 entries projects them once and keeps every tool presentation and measured height", async () => {
+			const outcome = await work("window.replace('resync')");
+			assert.ok(outcome.projected <= LOADED && outcome.positioned <= LOADED, `${outcome.projected} entries projected and ${outcome.positioned} positioned for one resync`);
+			assert.ok(outcome.toolRoutes <= 8, `${outcome.toolRoutes} tool presentations computed again for entries that did not change`);
+			assert.equal(outcome.heightResets, 0, "no measured height is thrown away by a resync");
+			assert.ok(outcome.replaced.length <= 2, `rows replaced by a resync: ${outcome.replaced.join(", ")}`);
 		});
 
-		await t.test("an auto-compaction that drops 480 older messages in the middle of the stream does not stall the page", async () => {
-			const outcome = await during("window.replace('compact')", 2500);
-			assert.ok(outcome.tasks <= 16, `${outcome.tasks} long tasks (${outcome.busy} ms) around a compaction`);
-			assert.ok(outcome.busy <= 1400, `${outcome.busy} ms of the page's time went to long tasks around a compaction`);
-			assert.ok(outcome.gap <= 900, `the working spinner paused for ${outcome.gap} ms around a compaction`);
+		await t.test("an auto-compaction that drops 480 older messages projects what is left once and keeps its tool presentations and measured heights", async () => {
+			const outcome = await work("window.replace('compact')");
+			assert.ok(outcome.projected <= LOADED && outcome.positioned <= LOADED, `${outcome.projected} entries projected and ${outcome.positioned} positioned for one compaction`);
+			assert.ok(outcome.toolRoutes <= 8, `${outcome.toolRoutes} tool presentations computed again for entries that did not change`);
+			assert.equal(outcome.heightResets, 0, "no measured height is thrown away by a compaction");
+			assert.ok(outcome.replaced.length <= 2, `rows replaced by a compaction: ${outcome.replaced.join(", ")}`);
 		});
 	} finally {
 		page?.socket.close();
