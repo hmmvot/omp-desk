@@ -25,9 +25,9 @@ import type { EphemeralItem, TranscriptPosition } from "../../chat/projection";
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import type { MaintenanceState, RetryState } from "../../chat/events";
 import type { SubagentReader } from "../../chat/subagent-transcript";
-import { positionTranscript } from "../../chat/projection";
 import { projectTranscript, type ProjectedTool, type TranscriptCard } from "../../chat/transcript";
-import { splitClearedHistory, type ClearedHistorySplit } from "../../chat/cleared-history";
+import type { ClearedHistorySplit } from "../../chat/cleared-history";
+import { appendLive, projectStable, projectWhole, type LiveMessage, type TranscriptSources } from "../../chat/live-tail";
 import { CLEAR_REFUSAL_SENTENCES } from "../../chat/clear";
 import { isOverviewMessage, overviewMemberId, projectToolOverview, type DensityCard, type OverviewProjection } from "../../chat/tool-overview";
 import { replyFooters, turnMeta, type ReplyFooter as ReplyFooterData } from "../../chat/reply-turns";
@@ -303,14 +303,20 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const controllerRef = useRef<TranscriptScrollController | null>(null);
 	const previousPaged = useRef(Boolean(props.pagedHistory));
 	const activatingPaged = Boolean(props.pagedHistory) && !previousPaged.current;
-	const { rows, topId, olderRows, earlierTopId, canonical, page, cleared, projected } = useMemo(() => {
-		const live = stream && props.streamId && props.streamPosition ? { message: stream, messageId: props.streamId, position: props.streamPosition } : null;
-		const positioned = positionTranscript(entries, props.durableCount ?? entries.length - pending.size, pending, cards, live, props.durablePositions);
-		const cleared = splitClearedHistory(positioned, olderCount);
-		const canonical = projectTranscript(cleared?.after ?? positioned, {
-			pending, activeTools, working, stream: live === null ? stream : null, streamId: props.streamId ?? (stream === null ? null : "stream"),
-			retrySuppressedIds: props.retrySuppressedIds, sealedSeq: props.sealedSeq, cwd: props.cwd,
-		});
+	// The reply being streamed is a new object on every frame; everything before it is projected once (`chat/live-tail.ts`), not on every frame.
+	const live = useMemo<LiveMessage | null>(() => stream && props.streamId && props.streamPosition ? { message: stream, messageId: props.streamId, position: props.streamPosition } : null, [stream, props.streamId, props.streamPosition]);
+	const sources = useMemo<TranscriptSources>(() => ({
+		entries, durableCount: props.durableCount ?? entries.length - pending.size, pending, ephemeral: cards, durablePositions: props.durablePositions, olderCount, activeTools, working,
+		retrySuppressedIds: props.retrySuppressedIds, sealedSeq: props.sealedSeq, cwd: props.cwd,
+	}), [entries, pending, cards, olderCount, props.durableCount, activeTools, working, props.retrySuppressedIds, props.sealedSeq, props.cwd, props.durablePositions]);
+	const stable = useMemo(() => projectStable(sources), [sources]);
+	const projection = useMemo(() => {
+		if (live !== null) return appendLive(stable, sources, live, props.streamId ?? null) ?? projectWhole(sources, live, stream, props.streamId ?? null);
+		if (stream === null && props.streamId == null) return stable;
+		return projectWhole(sources, null, stream, props.streamId ?? (stream === null ? null : "stream"));
+	}, [stable, sources, live, stream, props.streamId]);
+	const { canonical, cleared, totals } = projection;
+	const { rows, topId, olderRows, earlierTopId, page } = useMemo(() => {
 		let end = pageEndId ?? heldPageEndId;
 		const anchor = activatingPaged ? controllerRef.current?.anchor : null;
 		if (anchor) {
@@ -319,8 +325,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		}
 		const page = pageTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, end);
 		const window = props.pagedHistory ? page : windowTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, pinnedTopId ?? (previousPaged.current ? page.topId : null));
-		return { ...window, canonical, page, cleared, projected: cleared?.after ?? positioned };
-	}, [entries, pending, cards, pinnedTopId, activeTools, working, stream, olderCount, props.durableCount, props.streamId, props.streamPosition, props.retrySuppressedIds, props.sealedSeq, props.cwd, props.durablePositions, props.pagedHistory, pageEndId, heldPageEndId, activatingPaged]);
+		return { ...window, page };
+	}, [canonical, pinnedTopId, props.pagedHistory, pageEndId, heldPageEndId, activatingPaged]);
 
 	const overviewRef = useRef<OverviewProjection | undefined>(undefined);
 	const namespace = props.conversationKey ?? "chat";
@@ -335,7 +341,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const overview = useMemo(() => projectToolOverview(rows, namespace, overviewRef.current, props.cwd), [rows, namespace, props.cwd]);
 	overviewRef.current = overview;
 	// Turn totals and served-model candidates come from every request of the loaded transcript, not only the rows in the window.
-	const { byEntry: metaByEntry, served: servedCandidates } = useMemo(() => turnMeta(projected, props.displayTurns), [projected, props.displayTurns]);
+	const { byEntry: metaByEntry, served: servedCandidates } = useMemo(() => turnMeta(totals, props.displayTurns), [totals, props.displayTurns]);
 	const servedPairs = useMemo(() => servedCandidates.map(candidate => candidate.pair), [servedCandidates]);
 	const { verdictOf, revision: verdictRevision } = useServedVerdicts(servedPairs);
 	const servedByEntry = useMemo(() => announcedMismatches(servedCandidates, verdictOf), [servedCandidates, verdictRevision]);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { fmtDuration, fmtTokens } from "./format.ts";
+import { clockTime, fmtDuration, fmtTokens, groupedCount } from "./format.ts";
 
 describe("fmtDuration", () => {
 	it("uses shared, spaced duration units", () => {
@@ -31,5 +31,13 @@ describe("fmtTokens", () => {
 		assert.equal(fmtTokens(1_000), "1k");
 		assert.equal(fmtTokens(950), "950");
 		assert.equal(fmtTokens(Number.NaN), "0");
+	});
+});
+
+describe("groupedCount and clockTime", () => {
+	it("say what toLocaleString says, from one formatter each", () => {
+		for (const count of [0, 7, 999, 1000, 12_345, 1_234_567, 0.5]) assert.equal(groupedCount(count), count.toLocaleString("en-US"));
+		const time = Date.UTC(2026, 9, 25, 9, 41);
+		assert.equal(clockTime(time), new Date(time).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }));
 	});
 });

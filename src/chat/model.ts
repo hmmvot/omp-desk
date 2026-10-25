@@ -27,6 +27,7 @@ import { transcriptWindow, type TranscriptWindow } from "./transcript-window.ts"
 import type { BranchPoint } from "./rewind.ts";
 import type { ChatExitReason } from "./exit-reason.ts";
 import { sanitizeAnsi, stripAnsi, withoutCutSgr } from "./ansi.ts";
+import { entrySharer } from "./entry-sharing.ts";
 
 // Vocabulary
 
@@ -815,14 +816,16 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 	const agents = new Map(snapshot.agents.map(agent => [agent.id, agent]));
 	const pending = new Map<string, PendingRow>();
 	const pendingRows: ChatEntry[] = [];
+	// Rows the page already holds stay the same objects: its caches and measured row heights are keyed on them.
+	const shared = entrySharer(model.entries);
 	for (const row of snapshot.pending) {
 		const message = entryMessage(row.entry);
 		if (message === null) continue;
 		const key = messageKey(message);
 		pending.set(row.entry.id, { entryId: row.entry.id, messageId: row.messageId, ...key, fingerprint: customFingerprint(message), unsaved: row.unsaved, anchorId: row.anchorId, seq: row.seq, hidden: (message.role === "custom" || message.role === "hookMessage") && !message.display });
-		pendingRows.push(row.entry);
+		pendingRows.push(shared(row.entry));
 	}
-	const durable = [...snapshot.entries];
+	const durable = snapshot.entries.map(shared);
 	const tools = new Map<string, ActiveTool>();
 	for (const tool of snapshot.activeTools) tools.set(tool.toolCallId, tool);
 	const [head, ...rest] = snapshot.uiRequests;

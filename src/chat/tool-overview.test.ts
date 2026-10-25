@@ -195,3 +195,14 @@ it("live native IRC observations and saved incoming rows produce the same counte
  assert.equal(reconciled.summary, live.summary);
  assert.equal(reconciled.members.length, 2, "saving incoming replaces its observation rather than counting it twice");
 });
+it("remembers a call's presentation until its result, live state, status or attachments change, and hands back the same object meanwhile",()=>{
+ const card=tool("memo","read",{path:"a.ts"});
+ const first=toolPresentation(card.tool,"/work");
+ assert.equal(toolPresentation({...card.tool,attachments:[]},"/work"),first,"the same call in a rebuilt projection");
+ assert.notEqual(toolPresentation(card.tool,"/other"),first,"another working directory");
+ const settledAgain=toolPresentation(card.tool,"/work");
+ assert.notEqual(toolPresentation({...card.tool,status:"error"},"/work"),settledAgain,"another status");
+ assert.equal(toolPresentation(card.tool,"/work"),toolPresentation(card.tool,"/work"),"the first answer comes back after a different one was asked");
+ assert.notEqual(toolPresentation({...card.tool,result:{...card.tool.result!,details:{resolvedPath:"b.ts"}}},"/work"),settledAgain,"another result");
+ assert.deepEqual(toolPresentation({...card.tool,result:{...card.tool.result!,details:{resolvedPath:"b.ts"}}},"/work").paths,["b.ts"],"and the answer is the new result's");
+});

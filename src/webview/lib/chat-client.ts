@@ -77,6 +77,17 @@ const LIVE_FRAMES: ReadonlySet<string> = new Set(["message_update", "tool_execut
 /** The longest a subscriber waits for a live frame while the user is typing (the host sends a reply's frames every 33 ms, so this is every fifth). */
 export const LIVE_PACE_WHILE_TYPING_MS = 150;
 
+/**
+ * A page that cannot draw a reply's frames as fast as they come must not try: every frame it draws is a render of the
+ * whole transcript, and a backlog of them is one long task after another, which stops the page's clocks and its input.
+ * The cost of drawing a live frame is measured, and the next one is drawn once {@link LIVE_LOAD_FACTOR} times that cost has
+ * passed since the draw ended, so the stream takes at most a third of the page's time however slow the page is; a page that
+ * keeps up is never held back.
+ */
+export const LIVE_LOAD_FACTOR = 2;
+/** The longest a live frame is held for the cost of drawing (a snapshot's render is not a frame's, and the text must not stall). */
+export const LIVE_PACE_MAX_MS = 500;
+
 export interface ChatClientOptions {
 	/** Whether the user is typing in the composer; defaults to the page's activity tracker. Injectable for tests. */
 	typing?: () => boolean;
@@ -166,6 +177,8 @@ export class ChatClient {
 	readonly #typing: () => boolean;
 	#heldNotice: unknown;
 	#lastNotice = Number.NEGATIVE_INFINITY;
+	/** What the last live frames cost the page to draw, in ms (see {@link LIVE_LOAD_FACTOR}). */
+	#liveCost = 0;
 	readonly #newRequestId: () => string;
 	readonly #listeners = new Set<() => void>();
 	readonly #assembler = new ChatSnapshotAssembler();
@@ -230,18 +243,26 @@ export class ChatClient {
 	}
 
 	/** Tell every subscriber now, and drop a held notice: this one carries what it was waiting for. */
-	#notify(): void {
+	#notify(live = false): void {
 		clearTimeout(this.#heldNotice as number);
 		this.#heldNotice = undefined;
-		this.#lastNotice = this.#now();
+		const started = this.#now();
+		this.#lastNotice = started;
 		for (const listener of [...this.#listeners]) listener();
+		if (!live) return;
+		// React redraws in a microtask it queued while the subscribers ran; this one is queued after it, so the time to here is what drawing the frame cost.
+		queueMicrotask(() => {
+			const sample = this.#now() - started;
+			this.#liveCost = sample > this.#liveCost ? sample : this.#liveCost * 0.8 + sample * 0.2;
+		});
 	}
 
-	/** A live frame changed the model: tell subscribers now, or once the pace has passed while the user is typing. */
+	/** A live frame changed the model: tell subscribers now, or once the pace has passed (the user is typing, or drawing a frame takes long). */
 	#notifyLive(): void {
-		const wait = this.#lastNotice + LIVE_PACE_WHILE_TYPING_MS - this.#now();
-		if (!this.#typing() || wait <= 0) { this.#notify(); return; }
-		this.#heldNotice ??= setTimeout(() => this.#notify(), wait);
+		const pace = Math.max(this.#typing() ? LIVE_PACE_WHILE_TYPING_MS : 0, Math.min(LIVE_PACE_MAX_MS, this.#liveCost * (1 + LIVE_LOAD_FACTOR)));
+		const wait = this.#lastNotice + pace - this.#now();
+		if (wait <= 0) { this.#notify(true); return; }
+		this.#heldNotice ??= setTimeout(() => this.#notify(true), wait);
 	}
 
 	#commit(next: ChatModel, live = false): void {

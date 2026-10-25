@@ -5,6 +5,7 @@
  *
  * Silent success: an exit code of 0, an empty result and a duration that is only derived and short are not said.
  */
+import { groupedCount } from "../shared/format.ts";
 import { isRecord } from "../shared/guards.ts";
 import { backgroundJobOf, exitCodeOf, wallTimeOf, type ToolNotice } from "./tool-notices.ts";
 
@@ -45,7 +46,7 @@ const num = (value: unknown): number | undefined => typeof value === "number" &&
 const text = (value: unknown): string => typeof value === "string" ? value : "";
 
 function plural(count: number, word: string, many = `${word}s`): string {
-	return `${count.toLocaleString("en-US")} ${count === 1 ? word : many}`;
+	return `${groupedCount(count)} ${count === 1 ? word : many}`;
 }
 
 /** `205 ms`, `4.67 s`, `41.3 s`, `2m 5s`. */

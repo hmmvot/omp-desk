@@ -17,7 +17,7 @@ import type { ChatEpoch, ChatPhase, ChatSnapshotPayload, ChatUiRequest } from ".
 import { REWIND_ARGUMENTS_SENTENCE, SLASH_DENIED_SENTENCE } from "../../protocol/rpc.ts";
 import { splitChatSnapshot } from "../../protocol/chat-messages.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
-import { ChatClient, LIVE_PACE_WHILE_TYPING_MS } from "./chat-client.ts";
+import { ChatClient, LIVE_LOAD_FACTOR, LIVE_PACE_MAX_MS, LIVE_PACE_WHILE_TYPING_MS } from "./chat-client.ts";
 
 const EPOCH: ChatEpoch = { nonce: "host-a", counter: 1 };
 const OTHER_EPOCH: ChatEpoch = { nonce: "host-b", counter: 1 };
@@ -647,14 +647,20 @@ describe("a running reply while the user types", () => {
 		frame: { type: "message_update", messageId: "live", message: { role: "assistant", model: "m", timestamp: 1, stopReason: "stop", content: [{ type: "text", text }] } as never },
 	});
 
-	function pacedClient(): { client: ChatClient; notified: () => number; setTyping(value: boolean): void; advance(ms: number): void } {
+	function pacedClient(): { client: ChatClient; notified: () => number; elapsed: () => number; setTyping(value: boolean): void; setDrawMs(value: number): void; advance(ms: number): void } {
 		let typing = false;
-		let clock = 1_700_000_000_000;
+		let drawMs = 0;
+		const origin = 1_700_000_000_000;
+		let clock = origin;
 		const client = new ChatClient({ post: () => true }, { now: () => clock, typing: () => typing });
 		client.handle(snapshotMessage({ working: true }));
 		let count = 0;
-		client.subscribe(() => { count += 1; });
-		return { client, notified: () => count, setTyping: value => { typing = value; }, advance: ms => { clock += ms; mock.timers.tick(ms); } };
+		// What drawing a notification costs the page is time that passes inside its subscribers.
+		client.subscribe(() => { count += 1; clock += drawMs; });
+		return {
+			client, notified: () => count, elapsed: () => clock - origin, setTyping: value => { typing = value; }, setDrawMs: value => { drawMs = value; },
+			advance: ms => { clock += ms; mock.timers.tick(ms); },
+		};
 	}
 
 	beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
@@ -693,6 +699,43 @@ describe("a running reply while the user types", () => {
 		assert.equal(notified(), 2, "a state change is not paced");
 		advance(LIVE_PACE_WHILE_TYPING_MS * 2);
 		assert.equal(notified(), 2, "the held notice was delivered by the state change, not again later");
+	});
+
+	it("holds the frames of a page that is slow to draw them, to a share of its time, and keeps up when it is not", async () => {
+		const { client, notified, elapsed, setDrawMs, advance } = pacedClient();
+		setDrawMs(60);
+		advance(1000);
+		client.handle(update("x"));
+		assert.equal(notified(), 1, "the first frame is drawn at once");
+		await Promise.resolve();
+		const from = elapsed();
+		let frames = 1;
+		while (elapsed() - from < 2000) { frames += 1; client.handle(update("x".repeat(frames))); await Promise.resolve(); advance(33); }
+		const share = (notified() - 1) * 60 / (elapsed() - from);
+		assert.ok(share <= 1 / (1 + LIVE_LOAD_FACTOR) + 0.05, `drawing took ${Math.round(share * 100)}% of the page's time`);
+		assert.ok(notified() >= 5, "the stream still advances");
+		advance(LIVE_PACE_MAX_MS * 2);
+		const drawn = notified();
+		assert.equal(client.getSnapshot().stream?.content[0]?.type, "text");
+		assert.equal(drawn, notified(), "nothing is announced twice");
+		setDrawMs(0);
+		for (let index = 0; index < 60; index++) { client.handle(update("y".repeat(index + 1))); await Promise.resolve(); advance(33); }
+		const before = notified();
+		for (let index = 0; index < 10; index++) { client.handle(update("z".repeat(index + 1))); await Promise.resolve(); advance(33); }
+		assert.equal(notified() - before, 10, "once drawing is cheap again, every frame is drawn");
+	});
+
+	it("never holds a frame longer than the cap, whatever the cost, and the last frame is always drawn", async () => {
+		const { client, notified, setDrawMs, advance } = pacedClient();
+		setDrawMs(400);
+		advance(1000);
+		client.handle(update("a"));
+		await Promise.resolve();
+		client.handle(update("ab"));
+		const held = notified();
+		assert.equal(held, 1, "the second frame is held: 2 x 400 ms is over the cap, so it waits the cap, counted from the first");
+		advance(LIVE_PACE_MAX_MS);
+		assert.equal(notified(), held + 1, "the held frame arrives within the cap");
 	});
 
 	it("goes back to every frame when the user stops typing", () => {

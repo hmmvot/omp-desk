@@ -86,6 +86,21 @@ describe("a tool's observed start", () => {
 	});
 });
 
+describe("a snapshot of rows the page already holds", () => {
+	it("keeps the held object of every row whose content did not change, and takes the new object of one that did", () => {
+		const rows = [messageEntry("u1", null, userMessage("first", 1)), messageEntry("u2", "u1", userMessage("second", 2)), messageEntry("u3", "u2", userMessage("third", 3))];
+		const held = live({ entries: rows });
+		// A snapshot is parsed anew: the same rows come back as new objects, one of them edited, one of them new.
+		const fresh: ChatEntry[] = JSON.parse(JSON.stringify([rows[0], rows[1], messageEntry("u3", "u2", userMessage("third, edited", 3)), messageEntry("u4", "u3", userMessage("fourth", 4))]));
+		const next = applyChatSnapshot(held, emptySnapshot({ entries: fresh }), { now: 2 });
+		assert.equal(next.entries[0], held.entries[0], "an unchanged row is the held object: what the page keyed on it stays valid");
+		assert.equal(next.entries[1], held.entries[1]);
+		assert.equal(next.entries[2], fresh[2], "a changed row is the new object");
+		assert.equal(next.entries[3], fresh[3], "a row the page did not hold is the new object");
+		assert.deepEqual(ids(next), ["u1", "u2", "u3", "u4"], "the order and the set are the snapshot's");
+	});
+});
+
 describe("turn working status", () => {
 	it("retains streamed and active intents across engine gaps, snapshots and asks until settle", () => {
 		let model = reduceChatFrame(live(), { type: "agent_start" }, { now: 100 });

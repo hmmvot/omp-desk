@@ -17,6 +17,21 @@ export function escapeHtml(s: string): string {
 		.replaceAll("'", "&#39;");
 }
 
+const GROUPED_COUNT = new Intl.NumberFormat("en-US");
+/**
+ * `12,345`: a count with grouped digits. The formatter is built once: `toLocaleString` makes a new one on every call,
+ * and a streaming reply asks for a count on every row it draws, many times a second.
+ */
+export function groupedCount(count: number): string {
+	return GROUPED_COUNT.format(count);
+}
+
+const CLOCK_TIME = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+/** `09:41` in the reader's own locale and time zone (a formatter built once, as {@link groupedCount}). */
+export function clockTime(timeMs: number): string {
+	return CLOCK_TIME.format(timeMs);
+}
+
 /** "950", "12.3k", "1.2M" — tolerant of non-finite input. */
 export function fmtTokens(n: number): string {
 	if (!Number.isFinite(n) || n <= 0) return "0";

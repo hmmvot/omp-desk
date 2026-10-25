@@ -75,7 +75,22 @@ function readFilePath(path: string): string {
  }
  return base;
 }
+interface PresentationMemo { result: unknown; active: unknown; status: string; attachments: readonly unknown[]; cwd: string | undefined; value: ToolPresentation }
+/**
+ * The presentation of a projected call, remembered by the call block it came from. A projection is rebuilt on every
+ * frame of a streaming reply and the metadata is read several times per call (the overview's eligibility, its
+ * summary, the card), but only a changed result, live state, status, attachment or working directory changes it.
+ */
+const presentations = new WeakMap<object, PresentationMemo>();
 export function toolPresentation(tool: ProjectedTool, cwd?: string): ToolPresentation {
+ const held = presentations.get(tool.call);
+ if (held !== undefined && held.result === tool.result && held.active === tool.active && held.status === tool.status && held.cwd === cwd
+  && held.attachments.length === tool.attachments.length && held.attachments.every((message, index) => message === tool.attachments[index])) return held.value;
+ const value = presentationOf(tool, cwd);
+ presentations.set(tool.call, { result: tool.result, active: tool.active, status: tool.status, attachments: tool.attachments, cwd, value });
+ return value;
+}
+function presentationOf(tool: ProjectedTool, cwd?: string): ToolPresentation {
  const partial = record(tool.active?.partialResult);
  const route = resolveToolRoute(tool.call.name,record(tool.active?.args ?? tool.call.arguments),record(tool.result?.details ?? partial.details));
  const {name,args,details} = route;

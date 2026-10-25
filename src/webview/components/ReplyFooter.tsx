@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { ReplyFooter as ReplyFooterData } from "../../chat/reply-turns.ts";
 import { formatTurnUsage } from "../../chat/reply-usage.ts";
 import { servedModelLabel, type ServedModelMismatch } from "../../chat/served-model.ts";
-import { fmtDuration } from "../../shared/format";
+import { clockTime, fmtDuration } from "../../shared/format";
 
 export function ReplyFooter({ reply, served = [] }: { reply: ReplyFooterData; served?: readonly ServedModelMismatch[] }) {
 	const [copyStatus, setCopyStatus] = useState<string | null>(null);
@@ -10,7 +10,7 @@ export function ReplyFooter({ reply, served = [] }: { reply: ReplyFooterData; se
 	const duration = reply.durationMs === null ? "duration unavailable" : fmtDuration(reply.durationMs);
 	const timingExplanation = reply.durationKind === "response" ? "Final model request; total turn duration unavailable" : reply.durationKind === "history" ? "History user→reply interval; historical steer/follow-up attribution is unavailable" : reply.durationKind === "turn" ? "Observed agent invocation" : "No attributable start and completion timing is available";
 	const time = reply.endTime ?? reply.startedTime;
-	const localTime = time === null ? "time unavailable" : `${reply.endTime === null ? "started " : ""}${new Date(time).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+	const localTime = time === null ? "time unavailable" : `${reply.endTime === null ? "started " : ""}${clockTime(time)}`;
 	// Totals of the whole turn, as the terminal UI: only the span of the prompt to the answer is the turn's own time, so a response-only duration stays out of the tooltip.
 	const usage = reply.usage === null ? null : formatTurnUsage(reply.usage, reply.durationKind === "turn" || reply.durationKind === "history" ? duration : undefined);
 	return <footer className="omp-reply-footer" aria-label="Finished reply">
