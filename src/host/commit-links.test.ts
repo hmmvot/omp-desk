@@ -17,13 +17,20 @@ interface FakeRepo extends CommitRepository {
 	readonly calls: string[];
 	/** The hashes `viewCommit` was asked to open. */
 	readonly viewed: string[];
+	/** Every Graph and diff step in the order it ran: `graph` for a HEAD selection, `view <hash>` for a diff. */
+	readonly steps: string[];
 	/** What `viewCommit` rejects with, when set. */
 	failure: unknown;
+	/** What `revealHeadInGraph` rejects with, when set. */
+	graphFailure: unknown;
+	/** The commit HEAD points at now (a click reads it fresh); `undefined` reads as no commit. */
+	head: string | undefined;
 }
 
 /** A repository that answers nothing. */
 function inert(root: string): CommitRepository {
-	return { root, getCommit: async () => { throw new Error("unused"); }, viewCommit: async () => { throw new Error("unused"); } };
+	const unused = async (): Promise<never> => { throw new Error("unused"); };
+	return { root, getCommit: unused, viewCommit: unused, headCommit: unused, revealHeadInGraph: unused };
 }
 
 /** A repository whose commits are `commits` (full hashes): a hex resolves when exactly one starts with it; `refs` are branch names that resolve to a commit whatever they look like. */
@@ -32,7 +39,10 @@ function repo(root: string, commits: readonly string[], refs: Record<string, str
 		root,
 		calls: [],
 		viewed: [],
+		steps: [],
 		failure: undefined,
+		graphFailure: undefined,
+		head: undefined,
 		async getCommit(ref) {
 			state.calls.push(ref);
 			if (refs[ref] !== undefined) return { hash: refs[ref]! };
@@ -43,6 +53,14 @@ function repo(root: string, commits: readonly string[], refs: Record<string, str
 		async viewCommit(hash) {
 			if (state.failure !== undefined) throw state.failure;
 			state.viewed.push(hash);
+			state.steps.push(`view ${hash.slice(0, 7)}`);
+		},
+		async headCommit() {
+			return state.head;
+		},
+		async revealHeadInGraph() {
+			if (state.graphFailure !== undefined) throw state.graphFailure;
+			state.steps.push("graph");
 		},
 	};
 	return state;
@@ -199,17 +217,70 @@ test("validation answers true for every commit that exists, HEAD or not, and fal
 	assert.deepEqual([project.viewed, talk.logged, talk.warnings], [[], [], []], "validation alone shows nothing");
 });
 
-test("a click on any commit that exists opens its changes by the full hash the lookup found, in the session's repository", async () => {
+test("a click on a commit that is not HEAD opens only its changes, by the full hash the lookup found, in the session's repository", async () => {
 	const project = repo("C:\\work\\project", [FULL, OTHER]);
+	project.head = OTHER;
 	const outer = repo("C:\\work", [FULL]);
+	outer.head = FULL;
 	const resolver = resolverOf([outer, project]);
 	const talk = exchange();
 	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, talk.host);
-	await handleCommitLink(request("omp:terminal-link-open", "commit://1111111"), resolver, talk.host);
-	assert.deepEqual(project.viewed, [FULL, OTHER], "the page's abbreviation is never passed on: the full lower-case hash is");
-	assert.deepEqual(outer.viewed, [], "the deepest repository that has the commit is the one that shows it");
-	assert.deepEqual(talk.logged, [`commit link ${SHORT}: view commit`, `commit link ${OTHER.slice(0, 12)}: view commit`]);
+	assert.deepEqual(project.viewed, [FULL], "the page's abbreviation is never passed on: the full lower-case hash is");
+	assert.deepEqual(project.steps, ["view c739807"], "no Graph step for a commit that is not HEAD");
+	assert.deepEqual([outer.viewed, outer.steps], [[], []], "the deepest repository that has the commit is the one that shows it, and the outer one's HEAD is not its business");
+	assert.deepEqual(talk.logged, [`commit link ${SHORT}: view commit`]);
 	assert.deepEqual([talk.warnings, talk.replies], [[], []]);
+});
+
+test("a click on the HEAD commit selects it in the Graph first and then opens its changes, so the diff editor is last", async () => {
+	const project = repo("C:\\work\\project", [FULL, OTHER]);
+	project.head = FULL.toUpperCase();
+	const talk = exchange();
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolverOf([project]), talk.host);
+	assert.deepEqual(project.steps, ["graph", "view c739807"]);
+	assert.deepEqual(project.viewed, [FULL]);
+	assert.deepEqual(talk.logged, [`commit link ${SHORT}: HEAD, select in graph, view commit`]);
+	assert.deepEqual([talk.warnings, talk.replies], [[], []], "a Graph selection is silent");
+});
+
+test("HEAD is read at the click: a link remembered while its commit was HEAD does not select once HEAD has moved on, and selects again when HEAD returns", async () => {
+	const project = repo("C:\\work\\project", [FULL, OTHER]);
+	const resolver = resolverOf([project]);
+	const talk = exchange();
+	project.head = FULL;
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, talk.host);
+	project.head = OTHER;
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, talk.host);
+	project.head = undefined;
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, talk.host);
+	project.head = FULL;
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, talk.host);
+	assert.deepEqual(project.steps, ["graph", "view c739807", "view c739807", "view c739807", "graph", "view c739807"]);
+	assert.equal(project.calls.length, 1, "the lookup was remembered: only HEAD was asked again");
+	assert.deepEqual(talk.warnings, []);
+});
+
+test("a Graph that cannot select is logged at info and never stops the diff or shows a notice", async () => {
+	const project = repo("C:\\work\\project", [FULL]);
+	project.head = FULL;
+	project.graphFailure = new Error("2 repositories are open and the Graph may show another one");
+	const talk = exchange();
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolverOf([project]), talk.host);
+	assert.deepEqual(project.steps, ["view c739807"]);
+	assert.deepEqual(talk.logged, [`commit link ${SHORT}: HEAD, select in graph failed: 2 repositories are open and the Graph may show another one, view commit`]);
+	assert.deepEqual(talk.warnings, []);
+	project.graphFailure = "not an Error";
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolverOf([project]), talk.host);
+	assert.equal(talk.logged[1], `commit link ${SHORT}: HEAD, select in graph failed: not an Error, view commit`);
+});
+
+test("a HEAD that cannot be read counts as not HEAD: the diff opens and the Graph is left alone", async () => {
+	const project = repo("C:\\work\\project", [FULL]);
+	project.headCommit = async () => { throw new Error("status failed"); };
+	const talk = exchange();
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolverOf([project]), talk.host);
+	assert.deepEqual(project.steps, ["view c739807"]);
+	assert.deepEqual([talk.logged, talk.warnings], [[`commit link ${SHORT}: view commit`], []]);
 });
 
 test("a click on a commit that does not exist warns, shows nothing and logs it", async () => {
@@ -221,7 +292,7 @@ test("a click on a commit that does not exist warns, shows nothing and logs it",
 	assert.deepEqual(talk.logged, ["commit link 2222222: nothing shown, no such commit in this session's repository"]);
 });
 
-test("a repository that cannot show the commit gives a notice with its reason and a log line", async () => {
+test("a repository that cannot show the commit gives a notice with its reason and a log line, after the Graph step for HEAD", async () => {
 	const project = repo("C:\\work\\project", [FULL]);
 	project.failure = new Error("the repository is no longer open in this window");
 	const talk = exchange();
@@ -229,8 +300,10 @@ test("a repository that cannot show the commit gives a notice with its reason an
 	assert.deepEqual(talk.warnings, ["cannot show commit c7398070: the repository is no longer open in this window."]);
 	assert.deepEqual(talk.logged, [`commit link ${SHORT}: view commit failed: the repository is no longer open in this window`]);
 	project.failure = "not an Error";
+	project.head = FULL;
 	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolverOf([project]), talk.host);
 	assert.equal(talk.warnings[1], "cannot show commit c7398070: not an Error.");
+	assert.equal(talk.logged[1], `commit link ${SHORT}: HEAD, select in graph, view commit failed: not an Error`);
 });
 
 test("a request of a replaced document is dropped, and a target that is not a canonical commit link is never looked up", async () => {

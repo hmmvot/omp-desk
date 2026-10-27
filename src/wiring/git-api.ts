@@ -6,8 +6,9 @@ import * as vscode from "vscode";
 
 export interface GitRepository {
 	readonly rootUri: vscode.Uri;
-	readonly state: { readonly indexChanges?: readonly { readonly uri: vscode.Uri }[] };
+	readonly state: { readonly HEAD?: { readonly commit?: string }; readonly indexChanges?: readonly { readonly uri: vscode.Uri }[] };
 	getCommit(ref: string): Promise<{ readonly hash: string }>;
+	status(): Promise<void>;
 }
 
 export interface GitExtensionApi {

@@ -4,6 +4,9 @@
  * VS Code's Git extension has open and that contain THIS session's folder (the deepest first), and only then answers that the hash is a link.
  * Any commit that exists in the session's repository is a link, HEAD or not. A click opens the commit's changes as a multi-file diff
  * with the Git extension's own command (`git.viewCommit`, run by the wiring on the repository the lookup found, with the full hash it found).
+ * When the commit is the one HEAD points at (read fresh at the click) the click first selects it in the Source Control Graph, the one
+ * commit the built-in Graph can select, and then opens the diff, so the diff editor ends up focused with the Graph's selection behind it.
+ * A Graph that cannot select (several repositories open, no Graph in this VS Code, a failing command) is logged and never stops the diff.
  * A click on a link whose commit no longer exists shows a notice and opens nothing.
  *
  * Nothing here takes a path or a repository from the page, runs a `git` process of its own or executes a command the page names.
@@ -20,6 +23,10 @@ export interface CommitRepository {
 	getCommit(ref: string): Promise<{ readonly hash: string }>;
 	/** Open the changes of the commit with this full hash in a multi-file diff editor (the Git extension's `git.viewCommit`); rejects when this window cannot show it. */
 	viewCommit(hash: string): Promise<void>;
+	/** The commit HEAD points at (a detached HEAD included), read after the Git extension refreshed its state; `undefined` for a branch with no commit yet or a refresh that failed. */
+	headCommit(): Promise<string | undefined>;
+	/** Select the HEAD commit in the Source Control Graph (shows the view first); rejects when it cannot be done for this repository in this window. The Graph cannot select any other commit. */
+	revealHeadInGraph(): Promise<void>;
 }
 
 /** A commit that exists: `hash` is its full lower-case hash. */
@@ -156,7 +163,9 @@ export interface CommitLinkHost {
 /**
  * Answer a validation or activation request whose target is `commit://<hex>` (`parseCommitLinkTarget` has already accepted `request.target`).
  * Valid means: the commit exists in the session's repository. A click opens the commit's changes there, by the full hash the lookup found
- * (never the page's text), and shows a notice when the commit is gone or the repository cannot show it.
+ * (never the page's text), and shows a notice when the commit is gone or the repository cannot show it. When the commit is the
+ * current HEAD of that repository (read now: HEAD moves, the remembered lookup does not) it is selected in the Source Control Graph
+ * first, so that the diff editor, opened last, keeps the focus; a Graph step that fails is only logged.
  */
 export async function handleCommitLink(request: TerminalLinkRequest, resolver: CommitLinkResolver, host: CommitLinkHost): Promise<void> {
 	const hex = parseCommitLinkTarget(request.target);
@@ -173,12 +182,23 @@ export async function handleCommitLink(request: TerminalLinkRequest, resolver: C
 		return;
 	}
 	const short = hit.hash.slice(0, 12);
+	const steps: string[] = [];
+	const head = (await hit.repo.headCommit().catch(() => undefined))?.toLowerCase();
+	if (head === hit.hash) {
+		steps.push("HEAD");
+		try {
+			await hit.repo.revealHeadInGraph();
+			steps.push("select in graph");
+		} catch (error) {
+			steps.push(`select in graph failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 	try {
 		await hit.repo.viewCommit(hit.hash);
-		host.log(`commit link ${short}: view commit`);
+		host.log(`commit link ${short}: ${[...steps, "view commit"].join(", ")}`);
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
-		host.log(`commit link ${short}: view commit failed: ${reason}`);
+		host.log(`commit link ${short}: ${[...steps, `view commit failed: ${reason}`].join(", ")}`);
 		host.warn(`cannot show commit ${hex}: ${reason}.`);
 	}
 }
