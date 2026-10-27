@@ -1,7 +1,7 @@
 /**
  * Text that one of the user's link rules matches (`ompDesk.chatLinkRules`, `docs/designs/2026-10-27-chat-link-rules.md`): the same characters in a
- * focusable `role="link"` span with the look of a web link, never an `<a href>`. A click or Enter asks the host to open it in the external
- * browser. The request carries the rule's position and the matched characters, never a URL: the host runs the rule again and builds
+ * focusable `role="link"` span with the look of a web link, never an `<a href>`. A click or Enter asks the host to open it in an editor tab, Ctrl+Click or Ctrl+Enter in the external
+ * browser, like every web link. The request carries the rule's position, the matched characters and that gesture, never a URL: the host runs the rule again and builds
  * the URL itself (`omp:terminal-link-open`, target `link-rule://<rule>/<text>`). The title shows the URL the host will build.
  * Only the assistant's own reply text is linked; user text, tool output, notices and thinking stay text, and so does a page without a link client.
  */
@@ -24,8 +24,8 @@ export function LinkRuleLink({ rule, text, url, children }: { rule: LinkRuleMatc
 		tabIndex={0}
 		data-rule-target={target}
 		title={linkRuleTitle(rule, url)}
-		onClick={event => { if (claimLinkActivation(event)) client.openLinkRule(target); }}
-		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) client.openLinkRule(target); }}
+		onClick={event => { if (claimLinkActivation(event)) client.openLinkRule(target, event.ctrlKey ? "external" : "editor"); }}
+		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) client.openLinkRule(target, event.ctrlKey ? "external" : "editor"); }}
 	>{children}</span>;
 }
 

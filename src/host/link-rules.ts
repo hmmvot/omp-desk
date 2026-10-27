@@ -8,7 +8,7 @@
  */
 import { buildLinkRuleUrl, compileLinkRules, linkRuleEntries, parseLinkRuleTarget } from "../shared/link-rules.ts";
 import type { LinkRule, LinkRuleEntry, LinkRuleProblem } from "../shared/link-rules.ts";
-import type { TerminalLinkRequest } from "../shared/terminal-links.ts";
+import type { TerminalLinkRequest, WebLinkMode } from "../shared/terminal-links.ts";
 
 export interface LinkRulesSnapshot {
 	readonly rules: readonly LinkRule[];
@@ -55,8 +55,8 @@ export function describeLinkRuleProblems(problems: readonly LinkRuleProblem[]): 
 export interface LinkRuleOpenHost {
 	/** Whether the page that asked is still the document this host answers (the same check every link open makes). */
 	readonly isCurrent: () => boolean;
-	/** Opens an `http(s)` URL in the external browser. */
-	readonly openExternal: (url: string) => Promise<void>;
+	/** Opens an `http(s)` URL the host built: in an editor tab (`editor`, a plain click) or the external browser (`external`, Ctrl+Click). */
+	readonly openUrl: (url: string, mode: WebLinkMode) => Promise<void>;
 	readonly warn: (message: string) => void;
 }
 
@@ -76,6 +76,6 @@ export async function handleLinkRuleOpen(request: TerminalLinkRequest, source: L
 		return true;
 	}
 	if (!host.isCurrent()) return true;
-	await host.openExternal(url);
+	await host.openUrl(url, request.mode ?? "editor");
 	return true;
 }

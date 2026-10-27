@@ -15,7 +15,7 @@ Chat already links what OMP Desk can prove: file paths and code symbols (the hos
 
 Goals:
 
-- A rule is a regular expression and a URL template (capture groups substituted, URL-encoded). Matching text of an assistant reply is a link; a click opens the built `http(s)` URL in the external browser.
+- A rule is a regular expression and a URL template (capture groups substituted, URL-encoded). Matching text of an assistant reply is a link; a click opens the built `http(s)` URL (originally in the external browser; since the 2026-10-27 amendment below an editor tab on a click and the external browser on Ctrl+Click, like every web link).
 - The rules come only from trusted configuration: the user's own settings, never a repository the user opened.
 - A rule link adds no new class of target: the page never supplies a *rule* URL; the host finds the rule itself, re-runs it and builds the URL, with a static host. (The existing web-link route, where a page names an `http(s)` URL and the host re-validates its scheme, is unchanged and is not made safer or weaker by this design.)
 - No character on screen changes; a link is keyboard reachable and its tooltip shows the URL.
@@ -24,7 +24,7 @@ Goals:
 
 Non-goals:
 
-- Opening files, running commands or opening an editor tab (Simple Browser) from a rule. Only the external browser, as the maintainer asked.
+- Opening files or running commands from a rule. (The original text also excluded the editor tab; the 2026-10-27 amendment below replaced that.)
 - A link in the user's own messages, in tool output, in thinking or in a fenced code block.
 - A rule editor in the Settings view (arrays of objects are shown read-only there and edited in `settings.json`, as the view already does for every such setting).
 - Proof that a pattern cannot be slow, or a time limit on a match. JavaScript has no regular-expression time limit and the page runs the rules synchronously while Markdown parses; the design bounds the cost of a mistake to a measured ceiling (see Validation and Risks) and relies on the setting being the user's own.
@@ -78,14 +78,14 @@ The page keeps the rules in a module-level store (`link-rules-store.ts`, attache
 
 ### Page to host: the click
 
-A rule link is `<span class="omp-web-link omp-rule-link" role="link" tabindex="0" data-rule-target title>` (`LinkRules.tsx`): the look of a web link, a click or Enter or Space activates it, and its title is the rule's name (when set), the URL the host will build and `Click to open in your browser`. The page builds that URL only for the title.
+A rule link is `<span class="omp-web-link omp-rule-link" role="link" tabindex="0" data-rule-target title>` (`LinkRules.tsx`): the look of a web link, a click, Enter or Space activates it (Ctrl+Click and Ctrl+Enter for the external browser, see the amendment), and its title is the rule's name (when set), the URL the host will build and the web-link hint `Open in editor · Ctrl+Click to open in browser`. The page builds that URL only for the title. The request carries `mode` (`editor` or `external`), nothing else beyond the target.
 
-A click posts the existing `omp:terminal-link-open` with `target = link-rule://<rule position>/<encoded matched text>` and nothing else: no `url`, no `mode`, no `action`. No new wire message and no change to `parseTerminalLinkRequest`: like `commit://`, a target shape is routed in `handleTerminalGuestMessage` before the file and internal-address branches (`handleLinkRuleOpen`). The host:
+A click posts the existing `omp:terminal-link-open` with `target = link-rule://<rule position>/<encoded matched text>` and the gesture's `mode`: no `url`, no `action`. No new wire message and no change to `parseTerminalLinkRequest` (it already carries `mode`): like `commit://`, a target shape is routed in `handleTerminalGuestMessage` before the file and internal-address branches (`handleLinkRuleOpen`). The host:
 
 1. parses the target (a position of at most 3 digits, the text at most 200 characters, a failing decode refuses it);
 2. reads the **current** rules from the user's settings, finds the rule by position (a rule that is gone, or another rule now at that position, is simply not matched);
 3. runs `buildLinkRuleUrl(rule, text)`; a result of `null` opens nothing and shows one warning ("This text no longer matches a link rule of ompDesk.chatLinkRules, so nothing was opened");
-4. checks that the page is still the current document, as every link open does, and calls `openPageWebLink(url, "external")` (`vscode.env.openExternal`); only the origin is logged.
+4. checks that the page is still the current document, as every link open does, and calls `openPageWebLink(url, mode)` with the gesture's mode (2026-10-27 amendment below): an editor tab, or `vscode.env.openExternal` on Ctrl+Click; only the origin is logged.
 
 The page cannot cause any other URL to open: every URL comes from the host's own rule and the page's text only fills encoded placeholders after the host. A `validate` request for such a target gets no reply and opens nothing (the page never sends one).
 
@@ -139,3 +139,13 @@ In a real window (`test/e2e/scenarios/31-chat-link-rules.spec.ts`, hidden deskto
 - Reviewer: independent `reviewer` agent, two passes (first review, then a confirmation pass that ran probes against the real modules; a re-check followed the last fixes).
 - Outcome: **accepted with changes, all applied**.
 - Notes: first pass: one must-fix (the claim that the pattern screen contains catastrophic patterns was wrong; the screen was tightened to the group and repeat rules above, text is scanned in 500-character pieces, and the measured worst cases are recorded in Risks), a should-fix (an alternation inside a repeated group was not tracked), a nit on unpaired surrogates, threat-model wording, and a rule that the list is posted on every announce. Confirmation passes found three more things, all fixed with tests: a `{n,}` quantifier with many leading zeros was invisible to the screen; the separate repeat caps allowed products of repeats (`\w+\w{1,40}\w{1,40}!`), so one repeat-cost budget replaced them; a `?` was free although a chain of them doubles the search, so it costs 1; and the whitespace a piece is cut at belonged to no piece. The remaining limit is stated in Risks: the screen is a measured judgement, not a containment, and a deliberately slow pattern of the user's own can freeze their own page for a second or two on a crafted text.
+
+## Amendment 2026-10-27: one rule for every web URL clicked in Chat
+
+The maintainer decided on 2026-10-27 that every web URL clicked in Chat opens by one rule: a plain click (or Enter or Space) opens it in VS Code's own browser in an editor tab, and Ctrl+Click (or Ctrl+Enter) opens it in the external system browser (`vscode.env.openExternal`). This covers Markdown links, autolinks and bare URLs of a reply (already so since the web links design), tool output and detail tabs, and now the links of `ompDesk.chatLinkRules`, which until this amendment always opened externally (the Goals and Non-goals above record the original decision, now replaced). A file link keeps its own Ctrl+Click (reveal in the Explorer); a web link and a file link are different elements, so the gestures do not collide.
+
+- **Page:** a rule link sends `omp:terminal-link-open` with `target` and `mode: "editor" | "external"` from `event.ctrlKey`; it still sends no URL. Its tooltip is the shared web-link hint (`WEB_LINK_HINT` in `src/shared/terminal-links.ts`): `Open in editor · Ctrl+Click to open in browser`.
+- **Host:** `handleLinkRuleOpen` rebuilds the URL from the rule and the matched text exactly as before and calls `LinkRuleOpenHost.openUrl(url, mode)` (wired to `openPageWebLink`); `parseTerminalLinkRequest` already refuses any `mode` other than the two names. Other web links keep their own re-validation (`webLinkUrl`) in `handleTerminalLink` and `DetailTabs`. The page chooses no command.
+- **The browser command (decision and evidence, installed VS Code 1.143.1):** `openWebLink` runs the built-in Simple Browser extension's `simpleBrowser.api.open`. Its bundle (`resources/app/extensions/simple-browser/dist/extension.js`) registers that command and, when `workbench.action.browser.open` is among the registered commands, forwards the URL to it (`executeCommand("workbench.action.browser.open", uri.toString(true))`), and only otherwise draws its own webview panel. The workbench registers `workbench.action.browser.open` (title "Open Integrated Browser"; its handler accepts a URL string or `{ url, openToSide, reuseUrlFilter, … }`). So the native integrated browser is used where VS Code has it, and the older Simple Browser panel is the fallback of VS Code itself; calling the workbench command directly was rejected because it would tie Desk to a command that older VS Code versions lack, for no gain.
+- **Fallback:** if the editor command is missing or throws, `openWebLink` opens the URL with `openExternal` and the host logs a warning with the origin and the reason, so a click never does nothing.
+- **Evidence:** unit tests of the page's mode per gesture, the host routing of both modes, the refusal of non-`http(s)` and page-forged URLs, and the fallback; and `test/e2e/scenarios/31-chat-link-rules.spec.ts` in a real VS Code 1.143.1 window: a click and Enter open an editor tab for the rule's host and log `in an editor tab`; Ctrl+Click and Ctrl+Enter reach `openExternal`, which VS Code answers with its trusted-domain prompt (cancelled, so no browser started) and the host logs `in the external browser`. Not observed: a completed external open (the test never lets the browser start).

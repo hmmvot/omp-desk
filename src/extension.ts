@@ -7068,7 +7068,7 @@ async function openWebLinkFromMenu(argument: unknown, mode: WebLinkMode): Promis
  */
 async function openPageWebLink(url: string, mode: WebLinkMode): Promise<void> {
   log.debug(`web link: opening ${new URL(url).origin} in ${mode === "external" ? "the external browser" : "an editor tab"}`);
-  await openWebLink(vscode, url, mode);
+  await openWebLink(vscode, url, mode, error => log.warn(`web link: the editor browser failed for ${new URL(url).origin} (${messageOf(error)}); opening it in the external browser`));
 }
 
 /** Confirmation the extension owns before an `open_url` request opens a browser. */
@@ -10805,7 +10805,10 @@ async function handleTerminalGuestMessage(
       // A rule link (`link-rule://<rule>/<matched text>`): the rule is found and run again here and the URL is built here; the page names no URL.
       if (typeof payload.target === "string" && await handleLinkRuleOpen(payload as unknown as TerminalLinkRequest, linkRules(), {
         isCurrent,
-        openExternal: url => openPageWebLink(url, "external"),
+        openUrl: async (url, mode) => {
+          try { await openPageWebLink(url, mode); }
+          catch (error) { log.warn(`link rule: cannot open ${new URL(url).origin}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
+        },
         warn: message => { log.warn(`link rule: ${message}`); showWarning(message); },
       })) return;
       // A commit hash (`commit://<hex>`) is proved and shown against the repositories of this session's folder, never as a file of the cwd.

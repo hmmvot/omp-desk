@@ -212,6 +212,22 @@ test("the editor mode opens the Simple Browser API command and the external mode
 	]);
 });
 
+test("an editor tab that cannot open falls back to the external browser and says why; an external open never tries the editor", async () => {
+	const calls: unknown[][] = [];
+	const reasons: string[] = [];
+	const api: WebLinkOpenApi<string> = {
+		Uri: { parse: value => value },
+		commands: { executeCommand: async command => { calls.push([command]); throw new Error(`command '${command}' not found`); } },
+		env: { openExternal: async target => { calls.push(["openExternal", target]); return true; } },
+	};
+	await openWebLink(api, "https://example.com/", "editor", error => reasons.push(error instanceof Error ? error.message : String(error)));
+	assert.deepEqual(calls, [["simpleBrowser.api.open"], ["openExternal", "https://example.com/"]]);
+	assert.deepEqual(reasons, ["command 'simpleBrowser.api.open' not found"]);
+	calls.length = 0;
+	await openWebLink(api, "https://example.com/", "external");
+	assert.deepEqual(calls, [["openExternal", "https://example.com/"]]);
+});
+
 test("an open request may name where a web link opens; a validation, an unknown mode or an extra key may not", () => {
 	assert.deepEqual(parseGuestWebviewMessage({ type: "omp:terminal-link-open", requestId: 4, target: "https://example.com", mode: "external" }), { type: "omp:terminal-link-open", requestId: 4, target: "https://example.com", mode: "external" });
 	assert.deepEqual(parseGuestWebviewMessage({ type: "omp:terminal-link-open", requestId: 4, target: "https://example.com", mode: "editor" }), { type: "omp:terminal-link-open", requestId: 4, target: "https://example.com", mode: "editor" });

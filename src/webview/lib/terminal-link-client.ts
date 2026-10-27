@@ -47,9 +47,9 @@ export class TerminalLinkClient {
 	openCommit(target: string): void {
 		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target });
 	}
-	/** Open a user link rule's URL in the external browser (`link-rule://<rule>/<matched text>`, `linkRuleTarget`); the host finds the rule itself and builds the URL, the page names none. */
-	openLinkRule(target: string): void {
-		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target });
+	/** Open a user link rule's URL (`link-rule://<rule>/<matched text>`, `linkRuleTarget`): `mode` is only the gesture (plain click: an editor tab, Ctrl+Click: the external browser); the host finds the rule itself and builds the URL, the page names none. */
+	openLinkRule(target: string, mode: WebLinkMode): void {
+		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, mode });
 	}
 	/**
 	 * Ask the host to open VS Code's workspace symbol search prefilled with the name of `symbol`, a code symbol with several definitions;

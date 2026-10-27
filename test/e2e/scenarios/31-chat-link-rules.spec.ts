@@ -2,10 +2,11 @@
  * Scenario: user link rules (`ompDesk.chatLinkRules`, docs/designs/2026-10-27-chat-link-rules.md) in a real VS Code window.
  *
  *   1. A rule in the profile's user settings turns the matching text of an assistant reply into a link while the user's own message
- *      stays text; a click and Enter reach `vscode.env.openExternal` with the URL the host built from the rule. The test window
- *      must not start a browser: VS Code asks "Do you want Code to open the external website?" for a domain that is not trusted
- *      (the rule's host is a reserved `.test` name), which proves the open request reached VS Code, and the test cancels it. The
- *      log line of `openPageWebLink` (origin only) is the host's own record of the decision.
+ *      stays text; a click and Enter open the URL the host built from the rule in a VS Code editor tab (the integrated browser), and
+ *      Ctrl+Click and Ctrl+Enter reach `vscode.env.openExternal` with it. The test window must not start a browser: VS Code asks
+ *      "Do you want Code to open the external website?" for a domain that is not trusted (the rule's host is a reserved `.test`
+ *      name), which proves the open request reached VS Code, and the test cancels it. The log line of `openPageWebLink` (origin only)
+ *      is the host's own record of each decision.
  *   2. Removing the rule makes the old reply's link text again (the setting is followed live).
  *   3. The same rule only in the workspace's `.vscode/settings.json` is ignored: the setting is application-scoped and the host reads
  *      the user's value only, so a cloned repository cannot inject links.
@@ -17,7 +18,8 @@ import { deskLogLines } from "../support/desk-log.ts";
 import { expect, test } from "../support/fixtures.ts";
 
 const RULE = { pattern: "\\bISSUE-(\\d{1,6})\\b", url: "https://issues.example.test/browse/$1", name: "Issue" };
-const OPENED = /web link: opening https:\/\/issues\.example\.test in the external browser/;
+const OPENED_IN_EDITOR = /web link: opening https:\/\/issues\.example\.test in an editor tab/;
+const OPENED_EXTERNALLY = /web link: opening https:\/\/issues\.example\.test in the external browser/;
 
 test("a rule in user settings links reply text and a click opens its URL through the host; the same rule in workspace settings does nothing", async ({ desk, state }) => {
 	test.slow();
@@ -47,23 +49,35 @@ test("a rule in user settings links reply text and a click opens its URL through
 		await expect(chat.locator(".omp-user .omp-rule-link"), "the user's own message stays text").toHaveCount(0);
 		expect(await reply.innerText(), "no character on screen changed").toContain("Mock reply to: see ISSUE-123 today");
 
-		// A click: VS Code is asked to open the URL the host built, and asks to trust the domain; cancel, so no browser starts.
+		// A plain click opens the URL the host built in VS Code's own browser, in an editor tab (no external browser, no trust prompt).
 		await link.click();
-		const dialog = desk.dialog(page);
-		await expect(dialog, "the open request reached VS Code").toBeVisible({ timeout: 30_000 });
-		await expect(dialog).toContainText("issues.example.test");
-		await page.keyboard.press("Escape");
-		await expect(dialog).toBeHidden();
-		await expect.poll(() => deskLogLines(state.dataDir, OPENED).length, { message: "the host logged the open" }).toBeGreaterThan(0);
-		const clicks = deskLogLines(state.dataDir, OPENED).length;
+		await expect.poll(() => deskLogLines(state.dataDir, OPENED_IN_EDITOR).length, { message: "the host logged the editor open" }).toBeGreaterThan(0);
+		await expect(page.locator(".tabs-container .tab", { hasText: /issues\.example\.test/ }).first(), "an editor tab holds the page").toBeVisible({ timeout: 30_000 });
+		await expect(desk.dialog(page), "an editor tab asks nothing").toBeHidden();
+		const clicks = deskLogLines(state.dataDir, OPENED_IN_EDITOR).length;
 
 		// The keyboard: Enter on the focused link does the same.
 		await link.focus();
 		await page.keyboard.press("Enter");
-		await expect(dialog, "Enter on the link reaches VS Code too").toBeVisible({ timeout: 30_000 });
+		await expect.poll(() => deskLogLines(state.dataDir, OPENED_IN_EDITOR).length, { message: "Enter opens in the editor too" }).toBeGreaterThan(clicks);
+
+		// Ctrl+Click: VS Code is asked to open the URL externally, and asks to trust the domain; cancel, so no browser starts.
+		await link.click({ modifiers: ["Control"] });
+		const dialog = desk.dialog(page);
+		await expect(dialog, "the external open request reached VS Code").toBeVisible({ timeout: 30_000 });
+		await expect(dialog).toContainText("issues.example.test");
 		await page.keyboard.press("Escape");
 		await expect(dialog).toBeHidden();
-		await expect.poll(() => deskLogLines(state.dataDir, OPENED).length).toBeGreaterThan(clicks);
+		await expect.poll(() => deskLogLines(state.dataDir, OPENED_EXTERNALLY).length, { message: "the host logged the external open" }).toBeGreaterThan(0);
+		const external = deskLogLines(state.dataDir, OPENED_EXTERNALLY).length;
+
+		// Ctrl+Enter does the same.
+		await link.focus();
+		await page.keyboard.press("Control+Enter");
+		await expect(dialog, "Ctrl+Enter on the link reaches VS Code too").toBeVisible({ timeout: 30_000 });
+		await page.keyboard.press("Escape");
+		await expect(dialog).toBeHidden();
+		await expect.poll(() => deskLogLines(state.dataDir, OPENED_EXTERNALLY).length).toBeGreaterThan(external);
 
 		// The setting is followed live: without the rule the reply's text is plain again.
 		setRules(undefined);

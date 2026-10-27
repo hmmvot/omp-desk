@@ -7,8 +7,8 @@ import type { TerminalTextLink } from "../../shared/terminal-links.ts";
  * characters the text already has and never changes them.
  */
 
-/** The tooltip line that states what each gesture on a web link does, in the Chat and the Terminal alike. */
-export const WEB_LINK_HINT = "Open in editor · Ctrl+Click to open in browser";
+/** The tooltip line that states what each gesture on a web link does (shared with the host-free rule titles). */
+export { WEB_LINK_HINT } from "../../shared/terminal-links.ts";
 
 /** A scheme that does not continue a word (`xhttps://` is not a URL) and everything up to whitespace, a quote, a backtick or an angle bracket. */
 const BARE_URL = /(?<![a-z\d+.-])https?:\/\/[^\s<>"`]+/gi;

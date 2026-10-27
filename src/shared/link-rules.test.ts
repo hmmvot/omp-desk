@@ -281,7 +281,7 @@ describe("the click target", () => {
 
 describe("linkRuleTitle", () => {
 	it("shows the name when there is one, always the URL, and what the click does", () => {
-		assert.equal(linkRuleTitle({ name: "Issue" }, "https://example.test/1"), "Issue\nhttps://example.test/1\nClick to open in your browser");
-		assert.equal(linkRuleTitle({ name: null }, "https://example.test/1"), "https://example.test/1\nClick to open in your browser");
+		assert.equal(linkRuleTitle({ name: "Issue" }, "https://example.test/1"), "Issue\nhttps://example.test/1\nOpen in editor · Ctrl+Click to open in browser");
+		assert.equal(linkRuleTitle({ name: null }, "https://example.test/1"), "https://example.test/1\nOpen in editor · Ctrl+Click to open in browser");
 	});
 });

@@ -159,12 +159,17 @@ export interface WebLinkOpenApi<Uri> {
 /**
  * Open a host-validated `http(s)` URL: `editor` in an editor tab through the built-in Simple
  * Browser's API command (which itself defers to VS Code's integrated browser where one exists),
- * `external` through `env.openExternal`, VS Code's own path to the default browser.
+ * `external` through `env.openExternal`, VS Code's own path to the default browser. When the editor
+ * command is missing or throws, the URL opens externally instead and `fellBack` is told why.
  */
-export async function openWebLink<Uri>(api: WebLinkOpenApi<Uri>, url: string, mode: WebLinkMode): Promise<void> {
+export async function openWebLink<Uri>(api: WebLinkOpenApi<Uri>, url: string, mode: WebLinkMode, fellBack?: (error: unknown) => void): Promise<void> {
 	const uri = api.Uri.parse(url, true);
-	if (mode === "external") await api.env.openExternal(uri);
-	else await api.commands.executeCommand("simpleBrowser.api.open", uri, { preserveFocus: false });
+	if (mode === "external") { await api.env.openExternal(uri); return; }
+	try { await api.commands.executeCommand("simpleBrowser.api.open", uri, { preserveFocus: false }); }
+	catch (error) {
+		fellBack?.(error);
+		await api.env.openExternal(uri);
+	}
 }
 
 export interface TerminalLinkHost {

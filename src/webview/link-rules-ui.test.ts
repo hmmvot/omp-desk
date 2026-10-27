@@ -198,24 +198,28 @@ test("link rules draw matching text of the assistant's reply as links, open thro
 		assert.equal(await reply(), before, "linking never changes the characters on screen");
 		assert.deepEqual(drawn.map(link => link.target), ["link-rule://0/PROJ-12", "link-rule://1/%2334", "link-rule://0/PROJ-56", "link-rule://1/%237", "link-rule://0/PROJ-78"]);
 		assert.ok(drawn.every(link => link.role === "link" && link.tab === 0), "every link is a focusable link");
-		assert.equal(drawn[0]!.title, "Tracker\nhttps://example.test/browse/12\nClick to open in your browser", "the title shows the URL the host will open");
-		assert.equal(drawn[1]!.title, "https://example.test/%3Cowner%3E/%3Crepo%3E/issues/34\nClick to open in your browser");
+		assert.equal(drawn[0]!.title, "Tracker\nhttps://example.test/browse/12\nOpen in editor · Ctrl+Click to open in browser", "the title shows the URL the host will open");
+		assert.equal(drawn[1]!.title, "https://example.test/%3Cowner%3E/%3Crepo%3E/issues/34\nOpen in editor · Ctrl+Click to open in browser");
 		assert.equal(drawn[2]!.inCode, true, "a code span keeps its code element inside the link");
 		assert.equal(drawn[3]!.strong, true, "a link inside emphasis stays inside it");
 		assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-md')].filter(node=>node.textContent.startsWith('Also PROJ-99')).flatMap(node=>[...node.querySelectorAll('.omp-rule-link')]).length"), 0, "the user's own message is text");
 		assert.equal(await ui.evaluate("document.querySelectorAll('pre .omp-rule-link').length"), 0, "a fenced block stays text");
 		assert.equal(await ui.evaluate("document.querySelectorAll('a[href]').length"), 0, "no anchor: the page never navigates itself");
 
-		// A plain click, Enter and Space each ask the host once, naming the rule and the characters and nothing else.
+		// A plain click, Enter and Space each ask for an editor tab, Ctrl+Click and Ctrl+Enter for the external browser; each names the rule and the characters and nothing else.
 		await ui.evaluate("document.querySelector('.omp-rule-link').click()");
 		await ui.evaluate("document.querySelectorAll('.omp-rule-link')[1].dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))");
 		await ui.evaluate("document.querySelectorAll('.omp-rule-link')[2].dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true,cancelable:true}))");
 		await ui.evaluate("document.querySelectorAll('.omp-rule-link')[3].dispatchEvent(new KeyboardEvent('keydown',{key:'a',bubbles:true,cancelable:true}))");
+		await ui.evaluate("document.querySelectorAll('.omp-rule-link')[0].dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true}))");
+		await ui.evaluate("document.querySelectorAll('.omp-rule-link')[1].dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true,cancelable:true}))");
 		assert.deepEqual(await opens(), [
-			{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-12" },
-			{ type: "omp:terminal-link-open", target: "link-rule://1/%2334" },
-			{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-56" },
-		], "no URL, no mode and no action travel with a click");
+			{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-12", mode: "editor" },
+			{ type: "omp:terminal-link-open", target: "link-rule://1/%2334", mode: "editor" },
+			{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-56", mode: "editor" },
+			{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-12", mode: "external" },
+			{ type: "omp:terminal-link-open", target: "link-rule://1/%2334", mode: "external" },
+		], "no URL and no action travel with a click, only the gesture's mode");
 		await ui.evaluate("document.querySelector('.omp-rule-link').focus()");
 		assert.equal(await ui.evaluate("document.activeElement.classList.contains('omp-rule-link')"), true, "a link takes the keyboard focus");
 

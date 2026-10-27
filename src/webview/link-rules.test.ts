@@ -9,7 +9,7 @@ type Entry = { id: number; pattern: string; url: string; ignoreCase: boolean; na
 type Render = (text: string, options: { rules?: Entry[]; eligible?: boolean; provider?: boolean }) => string;
 let render: Render;
 /** The messages a click on the rule target posts. */
-let clickMessages: (target: string) => Record<string, unknown>[];
+let clickMessages: (target: string, mode: "editor" | "external") => Record<string, unknown>[];
 
 before(async () => {
 	const bundled = await build({ stdin: { contents: `
@@ -34,9 +34,9 @@ before(async () => {
 			setLinkRules([]);
 			return html;
 		};
-		export const clickMessages = target => {
+		export const clickMessages = (target, mode) => {
 			const { sent, client } = fixture();
-			client.openLinkRule(target);
+			client.openLinkRule(target, mode);
 			client.dispose();
 			return sent.map(({ requestId, ...rest }) => rest);
 		};
@@ -58,7 +58,7 @@ test("matching text of an assistant reply is a link: in prose, emphasis, lists, 
 	const html = render(reply, { rules: [TICKET, ISSUE] });
 	assert.deepEqual(linked(html), ["PROJ-12", "#3", "PROJ-4", "#5", "PROJ-6", "PROJ-8", "PROJ-9", "#10", "PROJ-11"], "`see PROJ-7` is code with more than one match in it: it stays code");
 	assert.equal(textOf(html), textOf(render(reply, { rules: [] })), "linking never changes the characters on screen");
-	assert.match(html, /<span class="omp-web-link omp-rule-link" role="link" tabindex="0" data-rule-target="link-rule:\/\/0\/PROJ-12" title="Tracker\nhttps:\/\/example\.test\/browse\/12\nClick to open in your browser">PROJ-12<\/span>/);
+	assert.match(html, /<span class="omp-web-link omp-rule-link" role="link" tabindex="0" data-rule-target="link-rule:\/\/0\/PROJ-12" title="Tracker\nhttps:\/\/example\.test\/browse\/12\nOpen in editor · Ctrl\+Click to open in browser">PROJ-12<\/span>/);
 	assert.match(html, /<span[^>]*data-rule-target="link-rule:\/\/0\/PROJ-6"[^>]*><code>PROJ-6<\/code><\/span>/, "the code element stays inside the link");
 	assert.match(html, /<code>see PROJ-7<\/code>/);
 	assert.match(html, /<strong><span[^>]*data-rule-target="link-rule:\/\/0\/PROJ-4"/);
@@ -66,7 +66,7 @@ test("matching text of an assistant reply is a link: in prose, emphasis, lists, 
 
 test("the title and the target carry the encoded URL the host will build and the characters the rule matched, nothing else", () => {
 	const html = render("see #34", { rules: [ISSUE] });
-	assert.match(html, /data-rule-target="link-rule:\/\/1\/%2334" title="https:\/\/example\.test\/issues\/34\nClick to open in your browser"/);
+	assert.match(html, /data-rule-target="link-rule:\/\/1\/%2334" title="https:\/\/example\.test\/issues\/34\nOpen in editor · Ctrl\+Click to open in browser"/);
 	assert.doesNotMatch(html, /href|data-web-url|data-vscode-context/, "no anchor, and no right-click menu that would carry a URL");
 });
 
@@ -100,6 +100,7 @@ test("a rule the page's own check refuses is not drawn, whatever the host sent",
 	assert.deepEqual(linked(render("PROJ-1", { rules: [{ ...TICKET, url: "javascript:alert(1)" }] })), []);
 });
 
-test("a click posts a plain open request for the target only, with no URL, mode or action", () => {
-	assert.deepEqual(clickMessages("link-rule://0/PROJ-12"), [{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-12" }]);
+test("a click posts an open request for the target and the gesture's mode only, with no URL or action", () => {
+	assert.deepEqual(clickMessages("link-rule://0/PROJ-12", "editor"), [{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-12", mode: "editor" }]);
+	assert.deepEqual(clickMessages("link-rule://0/PROJ-12", "external"), [{ type: "omp:terminal-link-open", target: "link-rule://0/PROJ-12", mode: "external" }]);
 });

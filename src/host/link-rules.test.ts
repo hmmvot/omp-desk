@@ -31,7 +31,7 @@ function openRequest(target: string, over: Record<string, unknown> = {}): Termin
 function host(over: Partial<LinkRuleOpenHost> = {}): { host: LinkRuleOpenHost; opened: string[]; warnings: string[] } {
 	const opened: string[] = [];
 	const warnings: string[] = [];
-	return { opened, warnings, host: { isCurrent: () => true, openExternal: async url => { opened.push(url); }, warn: message => warnings.push(message), ...over } };
+	return { opened, warnings, host: { isCurrent: () => true, openUrl: async (url, mode) => { opened.push(`${mode} ${url}`); }, warn: message => warnings.push(message), ...over } };
 }
 
 describe("createLinkRuleSource", () => {
@@ -75,12 +75,13 @@ describe("createLinkRuleSource", () => {
 });
 
 describe("handleLinkRuleOpen", () => {
-	it("builds the URL itself from the rule and the matched characters and opens it externally", async () => {
+	it("builds the URL itself from the rule and the matched characters and opens it in an editor tab, or externally on Ctrl+Click", async () => {
 		const { source: rules } = source([ISSUE, TICKET]);
 		const fixture = host();
 		assert.equal(await handleLinkRuleOpen(openRequest(linkRuleTarget(1, "PROJ-45")), rules, fixture.host), true);
-		assert.equal(await handleLinkRuleOpen(openRequest(linkRuleTarget(0, "#7")), rules, fixture.host), true);
-		assert.deepEqual(fixture.opened, ["https://example.test/browse/45", "https://example.test/issues/7"]);
+		assert.equal(await handleLinkRuleOpen(openRequest(linkRuleTarget(0, "#7"), { mode: "editor" }), rules, fixture.host), true);
+		assert.equal(await handleLinkRuleOpen(openRequest(linkRuleTarget(0, "#8"), { mode: "external" }), rules, fixture.host), true);
+		assert.deepEqual(fixture.opened, ["editor https://example.test/browse/45", "editor https://example.test/issues/7", "external https://example.test/issues/8"]);
 		assert.deepEqual(fixture.warnings, []);
 	});
 

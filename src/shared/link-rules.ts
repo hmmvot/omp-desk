@@ -16,7 +16,7 @@
  * and every scan is bounded ({@link MAX_SCANNED_TEXT}, {@link MAX_MATCHES_PER_TEXT}). That limits the cost of an honest mistake to a
  * quadratic one; it is not a proof for a hostile pattern, and the setting is read from the user's own settings only for that reason.
  */
-import { webLinkUrl } from "./terminal-links.ts";
+import { WEB_LINK_HINT, webLinkUrl } from "./terminal-links.ts";
 
 /** The key under `ompDesk.`. */
 export const LINK_RULES_SETTING = "chatLinkRules";
@@ -358,9 +358,9 @@ export function parseLinkRuleTarget(target: string): { id: number; text: string 
 	return id <= MAX_RULE_ID && text !== "" && text.length <= MAX_MATCH_LENGTH ? { id, text } : null;
 }
 
-/** The hover text of a rule link: the rule's name when it has one, the URL a click opens, and what the click does. */
+/** The hover text of a rule link: the rule's name when it has one, the URL a click opens, and what each gesture does (the same line as every web link). */
 export function linkRuleTitle(rule: Pick<LinkRule, "name">, url: string): string {
-	return [...(rule.name === null ? [] : [rule.name]), url, "Click to open in your browser"].join("\n");
+	return [...(rule.name === null ? [] : [rule.name]), url, WEB_LINK_HINT].join("\n");
 }
 
 /** An entry of an `omp:chat-link-rules` message with the fields it declares, or `null`: its shape only; the receiver compiles it ({@link compileLinkRule}). */
