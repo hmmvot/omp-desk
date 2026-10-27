@@ -289,11 +289,11 @@ describe("rpcExited", () => {
 			const answer = Promise.withResolvers<never>();
 			setImmediate(() => {
 				setImmediate(() => answer.resolve({} as never));
-				for (const until = Date.now() + 60; Date.now() < until;) { /* the host is stalled */ }
+				for (const until = Date.now() + 400; Date.now() < until;) { /* the host is stalled, for longer than the deadline by a margin a slow runner's jitter cannot close */ }
 			});
 			return answer.promise;
 		};
-		const f = fixture("chat", { code: 0, signal: 0 }, { attachBrokerClient: stalled, proofDeadlineMs: 20 });
+		const f = fixture("chat", { code: 0, signal: 0 }, { attachBrokerClient: stalled, proofDeadlineMs: 150 });
 		await f.ops.rpcExited(TAB, f.runtime);
 		assert.equal(f.closes[0]?.runIntent, "stopped", "the broker's own exit status was read");
 		assert.doesNotMatch(infoLines(f.lines, "exit proof")[0] ?? "", /no answer/);
