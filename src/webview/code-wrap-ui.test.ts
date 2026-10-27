@@ -241,7 +241,9 @@ test("wrap lines on code blocks in Chat", { skip: browserPath === undefined, tim
 		await t.test("pressing it keeps what the reader looks at in place in a long transcript", async () => {
 			await open("anchor");
 			const filler = Array.from({ length: 4 }, (_, index) => `Filler ${index}\n\n${"A line of prose.\n\n".repeat(8)}`);
-			const entries = [...filler.map((text, index) => entry(`f${index}`, index === 0 ? null : `f${index - 1}`, text)), entry("c", "f3", code(LONG)), ...filler.map((text, index) => entry(`t${index}`, index === 0 ? "c" : `t${index - 1}`, text))];
+			// Enough text after the block that, scrolled to the bottom, its row is certainly beyond the mounted window (a viewport of overscan), whatever the page's size.
+			const trailing = Array.from({ length: 16 }, (_, index) => `Trailing ${index}\n\n${"A line of prose.\n\n".repeat(8)}`);
+			const entries = [...filler.map((text, index) => entry(`f${index}`, index === 0 ? null : `f${index - 1}`, text)), entry("c", "f3", code(LONG)), ...trailing.map((text, index) => entry(`t${index}`, index === 0 ? "c" : `t${index - 1}`, text))];
 			await ui.evaluate(push(entries));
 			await ui.wait("document.querySelector('.omp-transcript .omp-row')");
 			// The transcript mounts only the rows near the reader: scroll down from the top until the block's row is there.
