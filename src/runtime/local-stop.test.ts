@@ -11,8 +11,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { silentLogger } from "../shared/logger.ts";
+import { recordingLogger, silentLogger } from "../shared/logger.ts";
+import type { LoggedLine } from "../shared/logger.ts";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import type { SessionHostRuntime } from "../host/native-session.ts";
@@ -31,21 +33,22 @@ after(async () => { await rm(temp, { recursive: true, force: true }); });
 const TAB = "tab:one";
 const runtime = { kind: "chat", pid: 4242, identity: { childCreationTime: "created-1" } } as unknown as SessionHostRuntime;
 
-function fixture(options: { rootGone?: boolean; broker?: boolean; settled?: boolean; epoch?: number } = {}) {
+function fixture(options: { rootGone?: boolean; broker?: boolean; settled?: boolean; epoch?: number; read?: () => Promise<unknown> } = {}) {
 	let aborted = 0;
+	const lines: LoggedLine[] = [];
 	const session = {
 		epoch: { nonce: "n", counter: options.epoch ?? 1 },
-		readSettlement: async () => ({ sessionFile: "s.jsonl", sessionId: "id-1", settled: options.settled ?? true, hasContent: true }),
+		readSettlement: options.read ?? (async () => ({ sessionFile: "s.jsonl", sessionId: "id-1", settled: options.settled ?? true, hasContent: true })),
 		abortForShutdown: async () => { aborted++; return { status: "accepted" }; },
 	};
 	const ops = new LocalStopOperations({
 		chat: () => ({ sessionOf: () => session }) as never,
 		attachBrokerClient: async () => (options.broker === false ? null : ({}) as never),
 		rootGone: async () => options.rootGone === true,
-		log: silentLogger,
+		log: options.read === undefined ? silentLogger : recordingLogger(lines),
 	});
 	const record: StopRecord = { tabId: TAB, runtime, control: null, transitioning: false, pipeline: null };
-	return { ops, record, aborts: () => aborted };
+	return { ops, record, lines, aborts: () => aborted };
 }
 
 describe("confirmEnded", () => {
@@ -91,5 +94,28 @@ describe("readTransitionFacts and awaitSettled", () => {
 		const confirmed = (await f.ops.readTransitionFacts(f.record, runtime))!;
 		assert.equal((await f.ops.awaitSettled(f.record, runtime, confirmed))?.settled, true);
 		assert.equal(await f.ops.awaitSettled(f.record, runtime, { ...confirmed, epoch: "n:0" }), null);
+	});
+
+	it("is null, never an exception, when OMP does not answer in time or the read fails: a hung session has to stay stoppable", async t => {
+		const failing = fixture({ read: async () => { throw new Error("the link closed"); } });
+		assert.equal(await failing.ops.readTransitionFacts(failing.record, runtime), null);
+		assert.match(failing.lines.find(line => line.level === "warn")?.message ?? "", /tab:one: the session's state could not be read \(the link closed\)/);
+
+		const silent = fixture({ read: () => new Promise<never>(() => undefined) });
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		try {
+			const reading = silent.ops.readTransitionFacts(silent.record, runtime);
+			t.mock.timers.tick(10_000); // SESSION_TRANSITION_READ_TIMEOUT_MS
+			assert.equal(await reading, null);
+			assert.match(silent.lines.find(line => line.level === "warn")?.message ?? "", /the session's state could not be read \(Session state read timed out\.\)/);
+			// What a Stop does with an unreadable session is to say so (the Force Stop question follows); it aborts and stops nothing.
+			const stopping = silent.ops.requestStop(silent.record, runtime, "graceful", true);
+			await nextTurn();
+			t.mock.timers.tick(10_000);
+			const verdict = await stopping;
+			assert.equal(verdict.writerGone, false);
+			assert.match(verdict.detail, /could not be checked/);
+			assert.equal(silent.aborts(), 0);
+		} finally { t.mock.timers.reset(); }
 	});
 });

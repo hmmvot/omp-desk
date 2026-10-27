@@ -112,22 +112,34 @@ export class LocalStopOperations implements StopOperations {
 		return null;
 	}
 
+	/**
+	 * The facts a stop is confirmed against, or `null` when they cannot be read: the record no longer holds this runtime,
+	 * the session is not live, or the process did not answer within `SESSION_TRANSITION_READ_TIMEOUT_MS` (a hung or
+	 * wedged OMP) or its link failed. An unreadable session is an answer, never an exception: a caller that threw here
+	 * would end its Stop or Close with nothing asked and nothing stopped, and a hung process is the one that has to be
+	 * stoppable (the Force Stop question follows `null`).
+	 */
 	async readTransitionFacts(state: StopRecord, runtime: SessionHostRuntime): Promise<SessionTransitionFacts | null> {
 		if (state.tabId === null || state.runtime !== runtime) return null;
-		if (runtime.kind === "chat") {
-			const session = this.#deps.chat().sessionOf(state.tabId);
-			if (session === null) return null;
-			const facts = await withSessionReadDeadline(session.readSettlement());
-			return facts === null ? null : { file: facts.sessionFile, sessionId: facts.sessionId, epoch: `${session.epoch.nonce}:${session.epoch.counter}`, settled: facts.settled, hasContent: facts.hasContent, nativeTarget: null };
+		try {
+			if (runtime.kind === "chat") {
+				const session = this.#deps.chat().sessionOf(state.tabId);
+				if (session === null) return null;
+				const facts = await withSessionReadDeadline(session.readSettlement());
+				return facts === null ? null : { file: facts.sessionFile, sessionId: facts.sessionId, epoch: `${session.epoch.nonce}:${session.epoch.counter}`, settled: facts.settled, hasContent: facts.hasContent, nativeTarget: null };
+			}
+			const client = state.control?.client;
+			if (client === undefined || !isOpenControlClient(client)) return null;
+			const snapshot = await withSessionReadDeadline(client.snapshot());
+			const facts = await withSessionReadDeadline(client.nativeState(true));
+			if (!facts.available) return null;
+			runtime.observed = facts;
+			const target = { epoch: snapshot.host.epoch, sessionFile: facts.sessionFile, sessionId: facts.sessionId };
+			return { file: facts.sessionFile, sessionId: facts.sessionId, epoch: target.epoch, settled: facts.settled === true, hasContent: facts.hasContent, nativeTarget: target };
+		} catch (error) {
+			this.#deps.log.warn(`tab ${state.tabId}: the session's state could not be read (${messageOf(error)}); it is treated as unreadable`);
+			return null;
 		}
-		const client = state.control?.client;
-		if (client === undefined || !isOpenControlClient(client)) return null;
-		const snapshot = await withSessionReadDeadline(client.snapshot());
-		const facts = await withSessionReadDeadline(client.nativeState(true));
-		if (!facts.available) return null;
-		runtime.observed = facts;
-		const target = { epoch: snapshot.host.epoch, sessionFile: facts.sessionFile, sessionId: facts.sessionId };
-		return { file: facts.sessionFile, sessionId: facts.sessionId, epoch: target.epoch, settled: facts.settled === true, hasContent: facts.hasContent, nativeTarget: target };
 	}
 
 	/** Native graceful shutdown is an SDK request, never a ConPTY close. */

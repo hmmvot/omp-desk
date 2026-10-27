@@ -443,6 +443,7 @@ interface WindowFixture {
     refreshReadiness(tabId: string): void;
   };
   readonly hostControlAttempts: WeakMap<object, Promise<void>>;
+  readonly stoppingTabs: Set<string>;
   readonly pending: { get(key: string): unknown; settle(key: string): void };
 }
 
@@ -4948,6 +4949,42 @@ describe("same-editor Chat and native Terminal actions", () => {
 					f.saved.secrets.set(`omp.hostControl.recipient.${owner}`, "recipient");
 					return () => [...f.saved.secrets.keys()].some(name => name.endsWith(owner));
 				},
+				/** Close the session, then Resume it from the page in the same editor: the record then holds a new, live chat process and the editor never changed. */
+				async closeAndResume() {
+					await harness.closeSession(f.saved.context, f.index, f.row.tabId);
+					assert.equal(harness.record(f.state).runtime, null);
+					assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
+					const base = runtime(41500);
+					const resumedChannel = new FakeRpcChannel({ sessionFile: f.file, sessionId: "mode-session" });
+					Object.defineProperties(resumedChannel, Object.getOwnPropertyDescriptors(base.handle));
+					const resumed = { ...base, kind: "chat" as const, sessionFile: f.file, cwd: f.directory, observed: null, stopping: false, observedSurvivors: [] as readonly number[], handle: resumedChannel };
+					harness.policy(f.saved.context, { readProcessIdentity: async () => ({ kind: "gone" }), isProcessAlive: () => false,
+						probeRpc: async () => ({ kind: "unreachable", reason: "gone" }), brokerProvenance: () => ({ kind: "none" }) },
+						harness.localLauncher(f.saved.context, f.index), {});
+					(globalThis as typeof globalThis & { __nativeLaunch: unknown }).__nativeLaunch = { state: "running", runtime: resumed, reason: "fixture resumed" };
+					harness.controlClient.connectVerified = async () => ({ client: client(Promise.resolve(snapshot)), key: "resume-key" });
+					await harness.openTab(f.saved.context, f.index, f.row.tabId, "resumed");
+					assert.equal(harness.record(f.state).runtime, resumed, "Resume put the new process in the same editor's record");
+					assert.equal(f.index.get(f.row.tabId)?.runIntent, "running");
+					assert.equal(harness.record(f.state).transitioning, false);
+					await bounded(f.chat.sessionOf(f.row.tabId)!.start());
+					assert.equal(f.chat.stateOf(f.row.tabId)?.phase, "live", "the resumed conversation is live in the same editor");
+				},
+				/**
+				 * Press Close while OMP does not answer: its state read never returns, and the time of the read deadlines passes by mock
+				 * timers. Resolves to how Close ended: `{ error: null }` when it ran to its end, else the exception it ended in.
+				 */
+				async closeWhileOmpIsSilent(t: { readonly mock: { readonly timers: { enable(options: { apis: ["setTimeout"] }): void; tick(ms: number): void; reset(): void } } }): Promise<{ readonly error: unknown } | null> {
+					Object.assign(f.chat.sessionOf(f.row.tabId)!, { readSettlement: () => new Promise<never>(() => undefined) });
+					t.mock.timers.enable({ apis: ["setTimeout"] });
+					try {
+						let ended: { readonly error: unknown } | null = null;
+						const closing = harness.closeSession(f.saved.context, f.index, f.row.tabId).then(() => { ended = { error: null }; }, (error: unknown) => { ended = { error }; });
+						for (let turn = 0; turn < 600 && ended === null; turn++) { await nextTurn(); t.mock.timers.tick(10_000); }
+						await closing;
+						return ended;
+					} finally { t.mock.timers.reset(); }
+				},
 				async finish() {
 					harness.warning(async (_message, _options, action) => action);
 					harness.information(async () => undefined);
@@ -5044,6 +5081,62 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
 				assert.equal(await s.claimHeld(), false);
 				assert.equal(credentialsLeft(), false);
+			} finally { await s.finish(); }
+		});
+
+		it("Stop after Close and a page Resume in the same editor ends the resumed process and leaves no fence, Stopping state or credentials behind", async () => {
+			const s = await subject();
+			user(false);
+			const requests = s.model("stopped cleanly");
+			try {
+				await s.closeAndResume();
+				requests.length = 0;
+				const closing = user(false);
+				await harness.closeSession(s.saved.context, s.index, s.row.tabId);
+				assert.deepEqual(closing.modals, ["Close"]);
+				assert.deepEqual(requests, [], "the fixture's graceful stop belongs to the first process; the second one answered through its own handle");
+				assert.equal(harness.record(s.state).runtime, null, "the resumed process is gone from the record");
+				assert.equal(harness.record(s.state).transitioning, false, "no admission fence is left raised");
+				assert.equal(harness.window().stoppingTabs.has(s.row.tabId), false, "the tab is not left Stopping");
+				assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
+				assert.equal(await s.claimHeld(), false);
+			} finally { await s.finish(); }
+		});
+
+		it("Close of a session whose OMP stops answering still asks, offers Force Stop and ends the process when it is forced, instead of failing with a read timeout", async t => {
+			const s = await subject();
+			const ui = user(true);
+			const requests = s.model("stop unconfirmed, OMP alive", true);
+			const credentialsLeft = s.holdCredentials();
+			try {
+				const outcome = await s.closeWhileOmpIsSilent(t);
+				assert.deepEqual(outcome, { error: null }, "Close ended in a question, not in an exception");
+				assert.deepEqual(ui.modals, ["Close", "Force Stop"]);
+				assert.deepEqual(requests, ["force"], "nothing could be asked of the silent OMP, so only the forced stop reached the broker");
+				assert.equal(harness.record(s.state).runtime, null);
+				assert.equal(harness.record(s.state).transitioning, false, "no fence stays up");
+				assert.equal(harness.window().stoppingTabs.has(s.row.tabId), false);
+				assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
+				assert.equal(await s.claimHeld(), false);
+				assert.equal(credentialsLeft(), false);
+			} finally { await s.finish(); }
+		});
+
+		it("Close of a session Resumed in the same editor whose OMP stops answering offers Force Stop, and a declined one leaves it running and open to another try", async t => {
+			const s = await subject();
+			user(false);
+			s.model("stopped cleanly");
+			try {
+				await s.closeAndResume();
+				const ui = user(false);
+				const outcome = await s.closeWhileOmpIsSilent(t);
+				assert.deepEqual(outcome, { error: null }, "Close ended in a question, not in an exception");
+				assert.deepEqual(ui.modals, ["Close", "Force Stop"]);
+				assert.notEqual(harness.record(s.state).runtime, null, "a declined Force Stop keeps the process this window drives");
+				assert.equal(harness.record(s.state).transitioning, false, "no fence stays up: the editor shows no \"process is stopping\"");
+				assert.equal(harness.window().stoppingTabs.has(s.row.tabId), false);
+				assert.equal(s.index.get(s.row.tabId)?.runIntent, "running");
+				assert.equal(ui.read.length, 1, "the user is told once that the session could not be confirmed stopped");
 			} finally { await s.finish(); }
 		});
 
