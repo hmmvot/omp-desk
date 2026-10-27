@@ -25,6 +25,7 @@
  * | `omp:chat-display-preferences` | tool-call detail and accessibility settings |
  * | `omp:chat-code-theme` | the token rules of the colour themes that may be active (the page picks by its theme id), for fenced code; none means plain code |
  * | `omp:chat-keys` | the key each Desk command of the empty state effectively has (the user's own rebinding or removal applied) and the other commands that may take it; epoch-free, window-wide |
+ * | `omp:chat-link-rules` | the user's link rules (`ompDesk.chatLinkRules`, user settings only) that the page draws as links in assistant text; epoch-free, window-wide |
  * | `omp:chat-magic-keywords` | the magic keywords OMP currently acts on for the tab (the answer to `omp:chat-magic-keywords-read`, to the asking page only); epoch-free |
  * | `omp:chat-operation` | the action the user asked for on this tab that is still being processed (kind, step id, elapsed time, request id), or none, with the end of the last one; epoch-free presentation only |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
@@ -84,6 +85,7 @@ import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 import { isEmptyStateKeyCommand, MAX_KEY_CONFLICTS, MAX_KEY_HINTS, MAX_KEY_LENGTH, MAX_KEY_SOURCE_LENGTH, type ChatKeyConflict, type ChatKeyHint } from "../shared/key-hints.ts";
+import { MAX_LINK_RULES, parseLinkRuleEntry, type LinkRuleEntry } from "../shared/link-rules.ts";
 import { isMagicKeywordId, MAGIC_KEYWORDS, type MagicKeywordId } from "../shared/magic-keywords.ts";
 import { parseBtwHostMessage, parseBtwRequest, type ChatBtwHostMessage, type ChatBtwRequestMessage } from "./btw-messages.ts";
 
@@ -258,6 +260,17 @@ export interface ChatKeysMessage {
 }
 
 /**
+ * The link rules the user wrote in their own settings, already screened by the host and in the order of the setting (`id` is the position).
+ * The page compiles them again and never trusts a rule it did not check; a click names a rule by `id` and the host builds the URL.
+ * Not bound to a conversation epoch: the setting belongs to the window's user, so the host sends it to a page whenever the page announces itself and to
+ * every attached page when the setting changes; an empty list clears the rules (a document that outlived a host restart may still hold old ones).
+ */
+export interface ChatLinkRulesMessage {
+	type: "omp:chat-link-rules";
+	rules: LinkRuleEntry[];
+}
+
+/**
  * The magic keywords OMP currently acts on for the tab (the master switch and the keyword's own switch on, in OMP's effective settings for
  * the tab's profile and folder), in OMP's table order without duplicates; none is `[]`. The answer to `omp:chat-magic-keywords-read`, sent
  * to the asking page only. Not bound to a conversation epoch: the settings belong to the profile and folder, not to one session.
@@ -411,6 +424,7 @@ export type ChatHostMessage =
 	| ChatDisplayPreferencesMessage
 	| ChatCodeThemeMessage
 	| ChatKeysMessage
+	| ChatLinkRulesMessage
 	| ChatMagicKeywordsMessage
 	| ChatOperationMessage
 	| ChatStateMessage
@@ -1283,6 +1297,16 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				keys.push({ command: raw.command, key: raw.key, conflicts, more: raw.more });
 			}
 			return { type: value.type, keys };
+		}
+		case "omp:chat-link-rules": {
+			if (!Array.isArray(value.rules) || value.rules.length > MAX_LINK_RULES) return null;
+			const rules: LinkRuleEntry[] = [];
+			for (const raw of value.rules) {
+				const entry = parseLinkRuleEntry(raw);
+				if (entry === null || rules.some(other => other.id === entry.id)) return null;
+				rules.push(entry);
+			}
+			return { type: value.type, rules };
 		}
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);

@@ -396,6 +396,7 @@ export interface ConversationPort {
 	refreshDisplayPreferences(): void;
 	refreshCodeThemes(): void;
 	refreshKeyHints(): void;
+	refreshLinkRules(): void;
 	dispose(): void;
 
 	// The live Chat session of a conversation, by value. Every operation below names the incarnation the caller read

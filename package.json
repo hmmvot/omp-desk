@@ -142,6 +142,48 @@
           "default": true,
           "description": "Show a closed ```html block of an assistant reply in Chat as a live page (Page | Source toggle, Copy) instead of code, and tell the model in Chat sessions that it may write one (one short paragraph, about 240 tokens, added to the system prompt; subagents and Terminal sessions are unchanged). The page runs in a sandboxed frame served from a loopback address of this window, with no network, no storage and no access to Chat, VS Code or your files; it can read the theme as CSS variables. Turn it off and every `html` block stays code and the model is told nothing. The prompt applies to sessions started or resumed afterwards; a change of the display reaches open Chats at once, but turning it on needs a window reload to start the page server for Chats that were already open."
         },
+        "ompDesk.chatLinkRules": {
+          "type": "array",
+          "default": [],
+          "scope": "application",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pattern", "url"],
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "A JavaScript regular expression (case-sensitive unless `ignoreCase` is set). Every match in the assistant's replies becomes a link, and so does an inline code span the pattern matches entirely. Use `\\b` or other anchors yourself: nothing is added around the pattern. A match counts only when the pattern matches those characters on their own, so a pattern that needs text around its match (a look-ahead) links nothing. To keep matching fast it may not match the empty text, use back-references, repeat a group that holds a repeat or an alternative (`(a+)+`, `(a|b){2}`; only `?` may follow such a group), or spend more than a budget on repeats (two of `*`, `+`, `{n,}`, `{n,m}` with m over 40, or one of those and one `{n,m}` up to 40, or three `{n,m}` up to 40; each `?` counts a little too) or hold more than 8 quantifiers; write `{1,39}` instead of `+` where a length limit is known. Only the first 2000 characters of a paragraph are searched."
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https?://",
+                "patternErrorMessage": "The URL must start with http:// or https://.",
+                "maxLength": 1024,
+                "description": "The web address a click opens in your browser. `$0` is the whole match, `$1` to `$9` are the pattern's capture groups (each is URL-encoded), `$$` is a dollar sign. A placeholder may stand in the path or the query but not in the scheme or the host."
+              },
+              "ignoreCase": {
+                "type": "boolean",
+                "default": false,
+                "description": "Match letters of either case."
+              },
+              "name": {
+                "type": "string",
+                "maxLength": 80,
+                "description": "A label shown above the address when you point at a link of this rule."
+              }
+            }
+          },
+          "examples": [
+            [
+              { "name": "Issue", "pattern": "#(\\d+)\\b", "url": "https://github.com/<owner>/<repo>/issues/$1" }
+            ]
+          ],
+          "description": "Draw text of assistant replies in Chat as links that open a web address in your browser, for example issue numbers of your tracker. Each rule is a regular expression (`pattern`) and an address template (`url`), for instance `#(\\d+)\\b` and `https://github.com/<owner>/<repo>/issues/$1`; see `examples`. The characters on screen never change; a link is a focusable element whose tooltip shows the address. Only text of the assistant's own replies is linked, not your messages, tool output or fenced code blocks; a rule beats commit-hash and symbol links, a path-like word is never split, and where rules overlap the earlier one wins. This setting is read from your user settings only: a rule in a workspace or folder `settings.json` is ignored, so a repository you open cannot add links. A rule that is not valid is skipped and reported once. Changes reach open Chats at once. The rules are in your `settings.json`; the Settings view lists them read-only."
+        },
         "ompDesk.chatSendWith": {
           "type": "string",
           "enum": ["enter", "shiftEnter"],

@@ -177,9 +177,12 @@ test("the shipped manifest projects completely: every contributed ompDesk settin
 	// The hidden, deprecated names of 0.3.x (`included: false`, ADR-0068) have no row: the migration moves their values.
 	const contributed = sections.flatMap((section: { properties: Record<string, { included?: boolean }> }) => Object.entries(section.properties).filter(([, property]) => property.included !== false).map(([key]) => key));
 	assert.deepEqual(descriptors.map(descriptor => descriptor.key).sort(), [...contributed].sort());
+	// A list of objects has no faithful single-value control: the view shows it read-only beside Open in Settings editor.
+	const editedInSettingsJson: Record<string, true> = { "ompDesk.chatLinkRules": true };
 	for (const descriptor of descriptors) {
 		assert.notEqual(descriptor.description, "", `${descriptor.key} has a description`);
-		assert.notEqual(descriptor.control.kind, "json", `${descriptor.key} is editable in place`);
+		if (editedInSettingsJson[descriptor.key] === true) assert.equal(descriptor.control.kind, "json", `${descriptor.key} is shown read-only`);
+		else assert.notEqual(descriptor.control.kind, "json", `${descriptor.key} is editable in place`);
 	}
 });
 

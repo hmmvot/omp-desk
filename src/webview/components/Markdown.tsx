@@ -29,10 +29,14 @@ import { detectInternalLinks, internalTargetOf } from "../../shared/internal-lin
 import { detectProcLinks, parseProcLink } from "../../shared/proc-links";
 import { isHunkLocation, isRevisionLocation } from "../../shared/quote-location";
 import { commitTargetOfSpan, detectCommitHashes } from "../../shared/commit-links";
+import { findLinkRuleMatches, linkRuleTarget, matchWholeLinkRule } from "../../shared/link-rules";
+import type { LinkRuleMatch } from "../../shared/link-rules";
+import { currentLinkRules, useLinkRulesVersion } from "../lib/link-rules-store";
 import { webLinkUrl } from "../../shared/terminal-links";
 import type { TerminalTextLink } from "../../shared/terminal-links";
 import { CodeSymbolSpan, FileLink, FileLinkText, InternalLink, ProcJobLink } from "./FileLinks.tsx";
 import { CommitHashSpan, CommitLink } from "./CommitLinks.tsx";
+import { LinkRuleLink, LinkRuleSpan } from "./LinkRules.tsx";
 import { breakable } from "./BreakPoints.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
@@ -87,31 +91,48 @@ function files(text: string, key: string, breaks = false): ReactNode {
 	return detectChatFileLinks(text).length === 0 ? (breaks ? breakable(text) : text) : <FileLinkText key={key} text={text} breaks={breaks} />;
 }
 
-/** The bare web URLs, the internal OMP URLs (`agent://Name`), the `proc://` job addresses and the commit hashes of `text`, in order and without overlap; a URL inside a web link is only that link. */
-function textLinks(text: string): { link: TerminalTextLink; kind: "web" | "internal" | "proc" | "commit" }[] {
-	const links: { link: TerminalTextLink; kind: "web" | "internal" | "proc" | "commit" }[] = detectWebLinks(text).map(link => ({ link, kind: "web" as const }));
+/** One link found in a text by {@link textLinks}; a `rule` link carries what its rule built. */
+interface TextLink { link: TerminalTextLink; kind: "web" | "internal" | "proc" | "commit" | "rule"; rule?: LinkRuleMatch }
+
+/**
+ * The bare web URLs, the internal OMP URLs (`agent://Name`), the `proc://` job addresses, the matches of the user's link rules (`ompDesk.chatLinkRules`) and the commit hashes of `text`, in order and without overlap.
+ * A URL inside a web link is only that link, and a user rule beats a commit hash; a rule match inside a longer path-shaped token is left to the path, so a rule never splits a file reference.
+ */
+function textLinks(text: string): TextLink[] {
+	const links: TextLink[] = detectWebLinks(text).map(link => ({ link, kind: "web" as const }));
 	const addApart = (found: readonly TerminalTextLink[], kind: "internal" | "proc" | "commit"): void => {
 		const taken = links.slice();
 		for (const link of found) if (!taken.some(other => link.start < other.link.end && other.link.start < link.end)) links.push({ link, kind });
 	};
 	addApart(detectInternalLinks(text), "internal");
 	addApart(detectProcLinks(text).map(({ start, end }) => ({ target: text.slice(start, end), start, end })), "proc");
+	const ruled = findLinkRuleMatches(currentLinkRules(), text);
+	if (ruled.length > 0) {
+		const taken = links.slice();
+		const paths = detectChatFileLinks(text);
+		for (const rule of ruled) {
+			if (taken.some(other => rule.start < other.link.end && other.link.start < rule.end)) continue;
+			if (paths.some(path => path.start <= rule.start && rule.end <= path.end && path.end - path.start > rule.end - rule.start)) continue;
+			links.push({ link: { target: linkRuleTarget(rule.rule.id, text.slice(rule.start, rule.end)), start: rule.start, end: rule.end }, kind: "rule", rule });
+		}
+	}
 	addApart(detectCommitHashes(text), "commit");
 	return links.sort((a, b) => a.link.start - b.link.start);
 }
 
-/** Plain text with its bare web URLs, internal OMP URLs and commit hashes linked and its file references offered to the host; the characters are never altered. */
+/** Plain text with its bare web URLs, internal OMP URLs, link-rule matches and commit hashes linked and its file references offered to the host; the characters are never altered. */
 function plain(text: string, key: string): ReactNode {
 	const links = textLinks(text);
 	if (links.length === 0) return files(text, key);
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
-	links.forEach(({ link, kind }, index) => {
+	links.forEach(({ link, kind, rule }, index) => {
 		if (link.start > cursor) nodes.push(files(text.slice(cursor, link.start), `${key}-f${index}`));
 		const label = breakable(text.slice(link.start, link.end));
 		nodes.push(kind === "internal" ? <InternalLink key={`${key}-i${index}`} target={link.target}>{label}</InternalLink>
 			: kind === "proc" ? <ProcJobLink key={`${key}-p${index}`} target={link.target}>{label}</ProcJobLink>
 			: kind === "commit" ? <CommitLink key={`${key}-c${index}`} target={link.target}>{label}</CommitLink>
+			: kind === "rule" && rule !== undefined ? <LinkRuleLink key={`${key}-r${index}`} rule={rule.rule} text={text.slice(link.start, link.end)} url={rule.url}>{label}</LinkRuleLink>
 			: <WebLink key={`${key}-w${index}`} url={link.target}>{label}</WebLink>);
 		cursor = link.end;
 	});
@@ -124,6 +145,7 @@ function plain(text: string, key: string): ReactNode {
  * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name or the trailing part of a path (`session-index.ts:849`, `session-index.ts(849)`, `host/session-index.ts:579`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file lookup, in assistant text only.
  * A whole span that is one internal OMP URL of the session (`agent://Name`, `artifact://69`, `local://plan.md`) is one {@link InternalLink}: plain code until the host proves the session has what it names.
  * A whole span that is one commit hash (7 to 40 hex digits) is one {@link CommitHashSpan}: a link to the commit once the host proves it exists, otherwise what it would be without this rule.
+ * A whole span that one of the user's link rules matches entirely is one {@link LinkRuleSpan}, before the commit rule and the symbol and file lookups: the rule is the user's own statement of what the text is.
  * A whole span that is the location of a Git revision (`src/app.ts:42-50 @ HEAD (3f2a9c1)`, from an editor quote of a diff) or of a hunk of a diff (`src/app.ts:3-5 was src/app.ts:3-4 @ HEAD (3f2a9c1)`) is plain code: its path and lines are those of that version, or two paths at once, so a link to the file on disk would open other lines.
  */
 function codeSpan(content: string, key: string): ReactNode {
@@ -141,7 +163,9 @@ function codeSpan(content: string, key: string): ReactNode {
 		: <code key={key}>{path !== null ? <FileLink target={path}>{breakable(content)}</FileLink> : files(content, `${key}f`, true)}</code>;
 	// A span that is one commit hash is asked about as a commit first; `node` is what it is where the host knows no such commit.
 	const commit = commitTargetOfSpan(content);
-	return commit === null ? node : <CommitHashSpan key={key} target={commit} content={content} plain={node} />;
+	const base = commit === null ? node : <CommitHashSpan key={key} target={commit} content={content} plain={node} />;
+	const ruled = matchWholeLinkRule(currentLinkRules(), content);
+	return ruled === null ? base : <LinkRuleSpan key={key} rule={ruled.rule} text={ruled.text} url={ruled.url} content={breakable(content)} plain={base} />;
 }
 
 /** A link label keeps its inline code spans as code; nothing inside a label is linked again. */
@@ -691,8 +715,12 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 export const Markdown = memo(function Markdown({ text, quotable = false, emphasis = true }: { text: string; quotable?: boolean; emphasis?: boolean }): ReactNode {
 	// The previous parse feeds the next one: while a reply streams, only the tail is parsed again.
 	const previous = useRef<MarkdownParse | null>(null);
-	const parsed = useMemo(() => parseMarkdown(text, previous.current, quotable, emphasis), [text, quotable, emphasis]);
+	// The user's link rules shape what a parse draws, so when they change the text is parsed from scratch, not from the previous parse's kept blocks.
+	const rulesVersion = useLinkRulesVersion();
+	const parsedWith = useRef(rulesVersion);
+	const parsed = useMemo(() => parseMarkdown(text, parsedWith.current === rulesVersion ? previous.current : null, quotable, emphasis), [text, quotable, emphasis, rulesVersion]);
 	previous.current = parsed;
+	parsedWith.current = rulesVersion;
 	const root = useRef<HTMLDivElement>(null);
 	// A quotable message hands the page the parse that produced its DOM, once the DOM is committed.
 	useLayoutEffect(() => {

@@ -16,6 +16,7 @@ import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachCodeTheme } from "./lib/code-theme-store";
 import { attachKeyHints } from "./lib/key-hints-store";
+import { attachLinkRules } from "./lib/link-rules-store";
 import { attachMagicKeywordSettings } from "./lib/magic-keyword-settings";
 import { attachInsertedText } from "./lib/insert-text";
 import { restoreFocusTakenByHost } from "./lib/frame-focus";
@@ -54,6 +55,8 @@ function boot(): void {
 	attachSessionView(guestTransport);
 	attachCodeTheme(guestTransport);
 	attachKeyHints(guestTransport);
+	// The user's link rules (`ompDesk.chatLinkRules`): drawn as links in assistant text.
+	attachLinkRules(guestTransport);
 	// Which magic keywords OMP acts on: the host answers a question the page asks when a keyword is on screen.
 	attachMagicKeywordSettings(guestTransport);
 	// `omp:insert-text` (an editor reference) is attached here, not in a React effect: the host posts it as

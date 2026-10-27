@@ -184,6 +184,22 @@ LaTeX in a reply is shown as readable text, as in OMP's terminal UI: `$x^2 + \al
 - **OMP's internal addresses** in a reply are links when this session has what they name: `agent://<id>` (a nested agent is `Parent.Child`) opens the agent's read-only transcript tab while the live session knows it, and otherwise its published output `<id>.md` as a read-only document; `history://<id>` opens the transcript tab; `artifact://<n>` opens a tool result's full output; `local://<path>` opens a file of the session's scratch space. `Ctrl+Shift+Click` shows the file behind a link in File Explorer. An address this session does not have stays plain text. `skill://`, `memory://`, `rule://`, `omp://`, `pr://` and `issue://` are never links, because only OMP can resolve them.
 - **A commit's hash** in a reply is a link: an inline code span such as `` `c7398070` `` (7 to 40 hex digits), or a hash with both digits and letters in the text, when a commit with that hash exists in the repository of the session's folder, the current commit or any older one. Click it (or `Enter`) and VS Code opens that commit's changes as a multi-file diff editor (the Git extension's own **View Commit**). The Source Control Graph is not opened or changed. A hash that matches no commit and an abbreviation that several commits share stay plain text. If the commit has gone since the link was drawn, or VS Code cannot show it, the click shows a short notice. Each click writes one line to the OMP Desk log. No extension such as GitLens is involved. Only the assistant's replies are linked.
 
+### Your own links
+
+Turn text of a reply that only you know is a reference, such as the numbers of your issue tracker, into links with the setting `ompDesk.chatLinkRules` in your user `settings.json` (**Settings view → Chat link rules → Open in Settings editor**, or **Preferences: Open User Settings (JSON)**). A rule is a regular expression and a web address with the matched text in it:
+
+```json
+"ompDesk.chatLinkRules": [
+  { "name": "Issue", "pattern": "#(\\d+)\\b", "url": "https://github.com/<owner>/<repo>/issues/$1" }
+]
+```
+
+- Every match in an assistant reply is a link, and so is an inline code span the pattern matches entirely. A click, `Enter` or `Space` opens the address in your browser; the tooltip shows it. The characters on screen do not change.
+- In `url`, `$0` is the whole match, `$1` to `$9` are the pattern's groups (each URL-encoded) and `$$` is a dollar sign. The address must be `http` or `https` and its host must be written out: a placeholder can choose the path or the query, never the site.
+- The pattern is a JavaScript regular expression (`ignoreCase: true` ignores case; `name` is a label in the tooltip). Nothing is added around it, so write `\b` yourself where a match must not start or end inside a word. To keep matching fast, a pattern that matches the empty text, uses a back-reference, repeats a group that holds a repeat or an alternative (`(a+)+`, `(a|b){2}`; write `[ab]{2}`), or spends more than a budget on repeats (two of `*`, `+`, `{n,}`, `{n,m}` with m over 40, or one of those and one `{n,m}` up to 40, or three `{n,m}` up to 40; each `?` counts a little too) or has more than eight quantifiers is refused; write `{1,39}` instead of `+` where a length limit is known. Only the first 2000 characters of a paragraph are searched. A match counts only when the pattern matches those characters on their own, so a pattern that needs text around its match (a look-ahead) links nothing.
+- Only your user settings are read, never a workspace's or folder's: a repository you open cannot add links. At most 20 rules; where two rules match the same text the earlier one wins. A rule that is not valid is skipped, and a notice and the OMP Desk log say which and why, once. A change reaches open Chats at once.
+- A rule link never replaces what a reply already links: a web address, a file path and a link's own label keep theirs, a rule wins over a commit hash. Your own messages, tool output, thinking and code blocks are not linked.
+
 ## Rewind
 
 **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again:

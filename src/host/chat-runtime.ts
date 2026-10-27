@@ -61,6 +61,7 @@ import { rewindBlockedReason } from "../chat/rewind-mode.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "../chat/rewind.ts";
 import type { CodeTheme } from "../chat/code-theme.ts";
 import type { ChatKeyHint } from "../shared/key-hints.ts";
+import type { LinkRuleEntry } from "../shared/link-rules.ts";
 import type { MagicKeywordId } from "../shared/magic-keywords.ts";
 
 /** How long an answer to `omp:chat-magic-keywords-read` is reused for the same tab before OMP's CLI is asked again. */
@@ -166,6 +167,8 @@ export interface ChatRuntimeOptions {
 	readonly readCodeThemes?: () => readonly CodeTheme[];
 	/** The effective keys of the empty state's commands (`src/host/key-hints-source.ts`); empty while they are unknown, which sends nothing and leaves the page its defaults. */
 	readonly readKeyHints?: () => readonly ChatKeyHint[];
+	/** The user's link rules (`src/host/link-rules.ts`), an empty list when there are none; sent to a page on every announcement and when the setting changes. Without a reader nothing is sent. */
+	readonly readLinkRules?: () => readonly LinkRuleEntry[];
 	/** Opens native profile settings, not an OMP prompt or a hosted dashboard. */
 	readonly openSettings?: (kind: NativeSettingsTarget, tabId: string) => Promise<void>;
 	/** The installed OMP's builtin slash registry, or `null` while it is unknown (nothing is refused as TUI-only then). */
@@ -466,6 +469,7 @@ export class ChatRuntime {
 		if (page === undefined) return;
 		this.#postCodeThemes(page);
 		this.#postKeyHints(page);
+		this.#postLinkRules(page);
 		this.#postOperation(tabId, page);
 		const conversation = this.#conversations.get(tabId);
 		if (conversation === undefined) return;
@@ -496,6 +500,12 @@ export class ChatRuntime {
 	#postKeyHints(page: ChatPage): void {
 		const keys = this.#options.readKeyHints?.() ?? [];
 		if (keys.length > 0) page.post({ type: "omp:chat-keys", keys: [...keys] });
+	}
+
+	/** The current rules, an empty list included: a document that outlived a host restart may still hold rules the user has since removed. */
+	#postLinkRules(page: ChatPage): void {
+		const read = this.#options.readLinkRules;
+		if (read !== undefined) page.post({ type: "omp:chat-link-rules", rules: [...read()] });
 	}
 
 	/** The latest operation of the tab that a Chat page shows (see {@link PAGE_KINDS}), or `undefined`. */
@@ -539,6 +549,11 @@ export class ChatRuntime {
 	/** The effective keys changed: every attached page of every tab gets them (not epoch-bound). */
 	refreshKeyHints(): void {
 		for (const pages of this.#pages.values()) for (const page of pages.values()) this.#postKeyHints(page);
+	}
+
+	/** The link rules changed: every attached page of every tab gets them, an empty list included so the rules of the old setting stop applying (not epoch-bound). */
+	refreshLinkRules(): void {
+		for (const pages of this.#pages.values()) for (const page of pages.values()) this.#postLinkRules(page);
 	}
 
 	/**

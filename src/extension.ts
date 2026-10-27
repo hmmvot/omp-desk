@@ -294,6 +294,9 @@ import { handleInternalLink } from "./host/internal-links";
 import { CommitLinkResolver, handleCommitLink } from "./host/commit-links";
 import { createCommitLinkResolver } from "./wiring/commit-links";
 import { parseCommitLinkTarget } from "./shared/commit-links";
+import { handleLinkRuleOpen } from "./host/link-rules";
+import type { LinkRuleSource } from "./host/link-rules";
+import { createWindowLinkRules } from "./wiring/link-rules";
 import { parseInternalLink } from "./shared/internal-links";
 import {
   createShellSlotId,
@@ -842,6 +845,8 @@ interface WindowState {
   usageStatus: UsageStatusHandle | null;
   /** The effective keys of the empty state and what may take them; `null` before they register. */
   keyHints: KeyHintsHandle | null;
+  /** The user's link rules (`ompDesk.chatLinkRules`, user settings only); created on first use. */
+  linkRules: LinkRuleSource | null;
   /** The Sessions view's background processes: its reader, poll and stop commands. */
   sessionProcesses: SessionProcesses | null;
   /**
@@ -1392,6 +1397,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     contextView: null,
     usageStatus: null,
     keyHints: null,
+    linkRules: null,
     sessionProcesses: null,
     sessionActions: registerSessionActions(sessionActionsDeps()),
     launcherProvider: undefined,
@@ -1967,6 +1973,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     readDisplayPreferences: readChatDisplayPreferences,
     readCodeThemes: () => codeThemes.current(),
     readKeyHints: () => keyHints.current(),
+    readLinkRules: () => linkRules().current().entries,
     // Terminal-UI builtins typed into Chat are answered, not sent (ADR-0052); the list is the installed OMP's.
     slashRegistry: () => currentSlashRegistry(context),
     runDeskAction: async (action, tabId) => {
@@ -6990,6 +6997,12 @@ function chatHtmlPagesEnabled(): boolean {
   return vscode.workspace.getConfiguration("ompDesk").get<boolean>("chatHtmlPages", true);
 }
 
+/** `ompDesk.chatLinkRules`: this window's link rules, read from the user's own settings only (`wiring/link-rules.ts`); a value with refused rules is logged and shown once. */
+function linkRules(): LinkRuleSource {
+  const s = windowState();
+  return s.linkRules ??= createWindowLinkRules(log, showWarning);
+}
+
 /** These are editor presentation preferences, never OMP commands. */
 function readChatDisplayPreferences(): ChatDisplayPreferences {
   const s = windowState();
@@ -7036,6 +7049,7 @@ function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): 
     if (chatHtmlPagesEnabled()) void s.htmlPageServer.ensure();
     else void s.htmlPageServer.close();
   }
+  if (event.affectsConfiguration("ompDesk.chatLinkRules")) s.sessionRuntime.conversations.refreshLinkRules();
   if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("ompDesk.toolIntentDescriptions") || event.affectsConfiguration("ompDesk.chatHtmlPages") || event.affectsConfiguration("ompDesk.chatSendWith") || event.affectsConfiguration("editor.accessibilitySupport")) {
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
@@ -10788,6 +10802,12 @@ async function handleTerminalGuestMessage(
         }, symbolLinkResolver());
         return;
       }
+      // A rule link (`link-rule://<rule>/<matched text>`): the rule is found and run again here and the URL is built here; the page names no URL.
+      if (typeof payload.target === "string" && await handleLinkRuleOpen(payload as unknown as TerminalLinkRequest, linkRules(), {
+        isCurrent,
+        openExternal: url => openPageWebLink(url, "external"),
+        warn: message => { log.warn(`link rule: ${message}`); showWarning(message); },
+      })) return;
       // A commit hash (`commit://<hex>`) is proved and shown against the repositories of this session's folder, never as a file of the cwd.
       if (typeof payload.target === "string" && parseCommitLinkTarget(payload.target) !== null) {
         await handleCommitLink(payload as unknown as TerminalLinkRequest, s.commitLinks ??= createCommitLinkResolver(), {
