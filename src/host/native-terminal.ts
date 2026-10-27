@@ -304,6 +304,8 @@ interface OmpLaunchCandidate {
   readonly label: string;
   /** What the launch is: the program itself, or `bun.exe` running an entry the shim named. */
   readonly launcher: OmpLauncherKind;
+  /** `bun.exe` files that were passed over on the way to this candidate's runtime because they only forward to another Bun. */
+  readonly skippedRuntimes?: readonly string[];
 }
 
 /** One target to try, in search order, with the file path that identifies it. */
@@ -577,30 +579,28 @@ const PROGRAM_SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
 /** Overlap kept between chunks, so a marker split by the boundary still matches. */
 const PROGRAM_SCAN_CARRY_BYTES = 64;
 
-/** Memoised {@link isOmpRuntimeProgram} answers, keyed by file identity (path, size, mtime). */
-const ompProgramScans = new Map<string, boolean>();
+/** Memoised {@link fileCarriesMarkers} answers, keyed by what was asked and by file identity (path, size, mtime). */
+const markerScans = new Map<string, boolean>();
 
 /**
- * Does this file *contain* OMP's program, rather than merely run it?
+ * Does the file's content carry at least one marker of every group?
  *
- * The file is streamed and the scan stops as soon as both kinds of marker have
- * been seen, so an installed release is recognised without ever loading it
- * whole into memory and a small wrapper is read in one pass. A file that cannot
- * be read, or that carries no embedded runtime, is not OMP's program.
+ * The file is streamed and the scan stops as soon as every group has been seen, so an installed release is recognised without ever
+ * loading it whole into memory and a small wrapper is read in one pass. A file that cannot be read is not a match; a file that is
+ * merely busy or unreachable right now is a transient failure, never a mismatch.
  *
- * The answer is remembered per file identity — path, size and modification time
- * — because this is a property of those bytes. It is deliberately not a launcher
- * cache: nothing about which target resolution chooses is kept, and a binary the
- * user replaces is scanned again. Admission is also not identity: what makes a
- * process the writer is the child identity its broker recorded, never this scan.
+ * The answer is remembered per file identity — path, size and modification time — because this is a property of those bytes. It is
+ * deliberately not a launcher cache: nothing about which target resolution chooses is kept, and a binary the user replaces is scanned
+ * again, so a candidate is read once per window and then answered from memory. `kind` names the question, so two questions about one
+ * file stay apart.
  */
-async function isOmpRuntimeProgram(file: string): Promise<boolean> {
+async function fileCarriesMarkers(file: string, kind: string, groups: readonly (readonly string[])[]): Promise<boolean> {
   let handle: fs.FileHandle;
   let scanKey: string;
   try {
     const stats = await fs.stat(file);
-    scanKey = `${file}\u0000${stats.size}\u0000${stats.mtimeMs}`;
-    const remembered = ompProgramScans.get(scanKey);
+    scanKey = `${kind}\u0000${file}\u0000${stats.size}\u0000${stats.mtimeMs}`;
+    const remembered = markerScans.get(scanKey);
     if (remembered !== undefined) return remembered;
     handle = await fs.open(file, "r");
   } catch (error) {
@@ -609,18 +609,18 @@ async function isOmpRuntimeProgram(file: string): Promise<boolean> {
   }
   try {
     const buffer = Buffer.allocUnsafe(PROGRAM_SCAN_CHUNK_BYTES + PROGRAM_SCAN_CARRY_BYTES);
-    let program = false;
-    let runtime = false;
+    const seen = groups.map(() => false);
     let carry = 0;
     let offset = 0;
     for (;;) {
       const { bytesRead } = await handle.read(buffer, carry, PROGRAM_SCAN_CHUNK_BYTES, offset);
       if (bytesRead === 0) break;
       const window = buffer.subarray(0, carry + bytesRead);
-      if (!program) program = OMP_PROGRAM_MARKERS.some(marker => window.includes(marker));
-      if (!runtime) runtime = EMBEDDED_RUNTIME_MARKERS.some(marker => window.includes(marker));
-      if (program && runtime) {
-        ompProgramScans.set(scanKey, true);
+      groups.forEach((markers, index) => {
+        if (!seen[index]) seen[index] = markers.some(marker => window.includes(marker));
+      });
+      if (seen.every(Boolean)) {
+        markerScans.set(scanKey, true);
         return true;
       }
       offset += bytesRead;
@@ -628,7 +628,7 @@ async function isOmpRuntimeProgram(file: string): Promise<boolean> {
       buffer.copy(buffer, 0, carry + bytesRead - keep, carry + bytesRead);
       carry = keep;
     }
-    ompProgramScans.set(scanKey, false);
+    markerScans.set(scanKey, false);
     return false;
   } catch (error) {
     rethrowIfTransientInspection(file, error);
@@ -636,6 +636,26 @@ async function isOmpRuntimeProgram(file: string): Promise<boolean> {
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Does this file *contain* OMP's program, rather than merely run it? OMP's identity plus an embedded JavaScript engine; admission is
+ * not identity: what makes a process the writer is the child identity its broker recorded, never this scan.
+ */
+function isOmpRuntimeProgram(file: string): Promise<boolean> {
+  return fileCarriesMarkers(file, "omp-program", [OMP_PROGRAM_MARKERS, EMBEDDED_RUNTIME_MARKERS]);
+}
+
+/**
+ * Is this file Bun itself — a JavaScript engine inside the file — rather than a launcher that only names Bun?
+ *
+ * What a `bun.exe` is called says nothing: a package manager's shim folder can hold a launcher of that name that starts the real
+ * Bun as a second process. The launcher is a small program of a package manager's own and holds a path, never an engine; the real
+ * runtime holds JavaScriptCore, the same content rule that tells OMP's compiled program from a launcher that starts it. No process
+ * is started to ask, which a launcher would answer for the real Bun just as well.
+ */
+function isBunRuntimeProgram(file: string): Promise<boolean> {
+  return fileCarriesMarkers(file, "bun-runtime", [EMBEDDED_RUNTIME_MARKERS]);
 }
 
 /** What one candidate file is, judged by its content instead of by its name. */
@@ -674,8 +694,14 @@ async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | stri
   const binDirectory = path.dirname(shim);
   const cmd = path.extname(shim).toLowerCase() === ".cmd";
   const kind = cmd ? "package-manager shim" : "bun shim";
-  const bun = await bunRuntime(binDirectory);
-  if (bun === null) return `${shim} is a ${kind}, but no bun runtime was found beside it in ${binDirectory}${cmd ? " or on PATH" : ""}`;
+  const skipped: string[] = [];
+  const bun = await bunRuntime(binDirectory, skipped);
+  if (bun === null) {
+    const missing = `${shim} is a ${kind}, but no bun runtime was found beside it in ${binDirectory}${cmd || skipped.length > 0 ? " or on PATH" : ""}`;
+    return skipped.length === 0
+      ? missing
+      : `${missing}: ${describeForwardingRuntimes(skipped)}. Put Bun's own bun.exe (installed with Bun's installer) on PATH.`;
+  }
 
   const entry = cmd ? await cmdShimEntry(shim) : await bunShimEntry(shim, path.resolve(binDirectory, ".."));
   if (entry === null) {
@@ -688,6 +714,7 @@ async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | stri
     origin: `the ${kind} ${shim}, resolved to ${entry}`,
     label: shim,
     launcher: "bun-shim",
+    ...(skipped.length === 0 ? {} : { skippedRuntimes: skipped }),
   };
 }
 
@@ -697,25 +724,56 @@ async function resolveBunShim(shim: string, rejections: string[], probeTimeoutMs
     rejections.push(candidate);
     return null;
   }
-  return await verifyLaunchCandidate(candidate, rejections, probeTimeoutMs);
+  const resolved = await verifyLaunchCandidate(candidate, rejections, probeTimeoutMs);
+  // Said only for a launch that was accepted, so the line never claims a Bun was used when nothing starts.
+  if (resolved !== null && candidate.skippedRuntimes !== undefined) noteForwardingRuntimes(candidate.skippedRuntimes, candidate.executable.command);
+  return resolved;
 }
 
-/** The runtime beside a bun shim, or `bun` from PATH. */
-async function bunRuntime(binDirectory: string): Promise<string | null> {
-  const names = process.platform === "win32" ? ["bun.exe", "bun"] : ["bun"];
-  for (const name of names) {
-    const candidate = path.join(binDirectory, name);
-    if (await isRunnableFile(candidate)) return candidate;
+/**
+ * The Bun runtime a bun shim's launch runs on: the one beside the shim, else the first on PATH that is Bun itself, or `null`.
+ *
+ * A file named `bun.exe` is not Bun until its content says so ({@link isBunRuntimeProgram}). A package manager's forwarding launcher
+ * (the backlog named the shim folders of Scoop and Chocolatey) carries the name and hands the command line to the real Bun as a second process; started
+ * as the launch, it leaves the process id this extension observes pointing at the launcher, so host control would fail the pid check
+ * on every launch. Such a file is skipped, with its reason in `skipped`, and the search goes on to the next candidate.
+ */
+async function bunRuntime(binDirectory: string, skipped: string[]): Promise<string | null> {
+  const names = BUN_EXECUTABLE_NAMES;
+  const directories = [binDirectory];
+  for (const directory of (process.env.PATH ?? process.env.Path ?? "").split(path.delimiter)) {
+    if (directory) directories.push(directory);
   }
-  const pathValue = process.env.PATH ?? process.env.Path ?? "";
-  for (const directory of pathValue.split(path.delimiter)) {
-    if (!directory) continue;
+  const seen = new Set<string>();
+  for (const directory of directories) {
     for (const name of names) {
       const candidate = path.join(directory, name);
-      if (await isRunnableFile(candidate)) return candidate;
+      const key = process.platform === "win32" ? candidate.toLowerCase() : candidate;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!(await isRunnableFile(candidate))) continue;
+      if (await isBunRuntimeProgram(candidate)) return candidate;
+      skipped.push(candidate);
     }
   }
   return null;
+}
+
+/** Launchers already reported to the log as passed over, so the reason is written once per file for the window. */
+const reportedForwardingRuntimes = new Set<string>();
+
+function describeForwardingRuntimes(skipped: readonly string[]): string {
+  const listed = skipped.join(", ");
+  return `${listed} ${skipped.length === 1 ? "is" : "are"} not Bun's own runtime (no JavaScript engine found in the file): ` +
+    "a package manager's launcher that starts the real Bun as a second process, so the process Desk starts would not be the one that runs OMP";
+}
+
+function noteForwardingRuntimes(skipped: readonly string[], used: string): void {
+  const fresh = skipped.filter(file => !reportedForwardingRuntimes.has(process.platform === "win32" ? file.toLowerCase() : file));
+  const log = ompResolutionLog;
+  if (fresh.length === 0 || log === null) return;
+  for (const file of fresh) reportedForwardingRuntimes.add(process.platform === "win32" ? file.toLowerCase() : file);
+  log.info(`${describeForwardingRuntimes(fresh)}; Bun's own ${used} is used instead.`);
 }
 
 /**
@@ -1068,9 +1126,12 @@ function describeStderr(stderr: string): string {
 
 // Stopped-session title: the installed agent's own storage code, run by Bun
 
-/** The name a Bun executable has on this platform. */
+/**
+ * The name a Bun executable has on this platform. On Windows the extensionless `bun` is never one: Bun's program file is `bun.exe`, and a
+ * file with no extension is at best a script for another shell, not something started as a program.
+ */
 const BUN_EXECUTABLE_NAMES: readonly string[] =
-  process.platform === "win32" ? ["bun.exe", "bun"] : ["bun"];
+  process.platform === "win32" ? ["bun.exe"] : ["bun"];
 
 /**
  * The Bun runtime this machine can run a helper with, or `null`.

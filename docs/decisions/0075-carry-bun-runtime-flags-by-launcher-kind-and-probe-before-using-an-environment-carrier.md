@@ -41,6 +41,10 @@ The resolver already admits only a recognised bun shim or a file that carries OM
 
 [ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md) reads the same `OmpBinary.launcher` to choose the runtime of a Chat's broker, and changes nothing here. Only a `bun-shim` launch can have its broker on that `bun.exe`; a `program` or unknown launch (the ones that use the `BUN_OPTIONS` carrier above) always has a `Code.exe` broker, so Desk's `BUN_OPTIONS` is never in the environment of a broker that runs on Bun, and a `bun-shim` Chat's flags stay on the command line a Bun broker passes to the OMP child. The probe answer above (kept per OMP executable) and ADR-0074's proof, trust read and hold (per `bun.exe` file, with the keys that ADR states) are independent. This note was reviewed independently with ADR-0074's amendment (one pass, text corrections applied); the review of this ADR itself is recorded below and is not changed by the note.
 
+## Amendment note (2026-10-27, forwarding `bun.exe`)
+
+The resolver gap named above (the Bun runtime of a bun shim taken by name, so a forwarding `bun.exe` stayed a gap; review finding R2) is closed by [ADR-0083](0083-take-the-bun-runtime-of-a-bun-shim-launch-only-when-its-content-is-bun.md): the runtime must carry Bun's JavaScript engine, by content, and a forwarding launcher is skipped or refused with its reason. Nothing else of this decision changes; sentences above that call the gap known describe the state when this ADR was accepted.
+
 ## Related Documents
 
 - [Architecture: Launch](../architecture.md)

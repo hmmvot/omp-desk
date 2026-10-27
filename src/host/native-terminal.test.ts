@@ -12,7 +12,7 @@
  * Runner: `node --test src/host/native-terminal.test.ts`.
  */
 import assert from "node:assert/strict";
-import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -59,6 +59,16 @@ before(async () => {
 after(async () => {
 	await rm(temp, { recursive: true, force: true });
 });
+
+/**
+ * A stand-in for Bun's own runtime: a copy of the test runner with the strings a real Bun carries (its JavaScript engine) appended,
+ * which is what the resolver judges a runtime by. It starts and answers like the runner, so the entry scripts below decide the output.
+ */
+async function fakeBun(file: string): Promise<void> {
+	await copyFile(process.execPath, file);
+	await chmod(file, 0o755);
+	await appendFile(file, "\nJavaScriptCore oven-sh/bun\n");
+}
 
 
 /**
@@ -171,8 +181,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		tools = path.join(temp, "tools");
 		await mkdir(tools, { recursive: true });
 		const bun = path.join(tools, isWindows ? "bun.exe" : "bun");
-		await copyFile(process.execPath, bun);
-		await chmod(bun, 0o755);
+		await fakeBun(bun);
 	});
 
 	/** A bun shim in its own `bin` directory whose entry script is `entrySource`. */
@@ -561,7 +570,7 @@ describe("an npm global install of OMP", { skip: process.platform !== "win32" &&
 	before(async () => {
 		tools = path.join(temp, "npm-tools");
 		await mkdir(tools, { recursive: true });
-		await copyFile(process.execPath, path.join(tools, "bun.exe"));
+		await fakeBun(path.join(tools, "bun.exe"));
 	});
 
 	/** An npm prefix: `omp.cmd`, `omp`, and the package with the manifest, entry, storage module and nested dependencies. */
@@ -607,7 +616,7 @@ describe("an npm global install of OMP", { skip: process.platform !== "win32" &&
 
 	it("prefers the bun.exe the launcher finds beside itself", async () => {
 		const install = await npmPrefix();
-		await copyFile(process.execPath, path.join(install.prefix, "bun.exe"));
+		await fakeBun(path.join(install.prefix, "bun.exe"));
 
 		const resolved = await withPath([install.prefix, tools], () => native.resolveOmpBinary());
 
@@ -660,7 +669,7 @@ describe("a pnpm, Yarn or Volta global install of OMP", { skip: process.platform
 	before(async () => {
 		tools = path.join(temp, "pm-tools");
 		await mkdir(tools, { recursive: true });
-		await copyFile(process.execPath, path.join(tools, "bun.exe"));
+		await fakeBun(path.join(tools, "bun.exe"));
 	});
 
 	async function withPath<T>(dirs: readonly string[], action: () => Promise<T>): Promise<T> {
@@ -910,6 +919,182 @@ describe("a mise install of OMP", { skip: process.platform !== "win32" && "mise'
 
 		await withPath([other], async () => {
 			await assert.rejects(native.resolveOmpBinary(), /is a package-manager shim, which never runs as a single process/);
+		});
+	});
+});
+
+/**
+ * The Bun a bun shim's launch runs on must be Bun itself (ADR-0083). A `bun.exe` in a package manager's shim folder (Scoop, Chocolatey)
+ * hands its command line to the real Bun as a second process, so the launched process is not the one OMP runs in and host control fails
+ * its pid check on every launch. What tells the two apart is the file's content: Bun carries its JavaScript engine, a launcher a path.
+ * These files are small stand-ins that carry (or lack) that content; resolving a bun shim whose release the package manifest gives starts
+ * no process, so nothing here needs a runnable Bun.
+ */
+describe("the bun.exe a bun shim runs on", () => {
+	const isWindows = process.platform === "win32";
+	const BUN_NAME = isWindows ? "bun.exe" : "bun";
+	const ENGINE = "JavaScriptCore oven-sh/bun";
+	let installs = 0;
+
+	/** A PATH entry holding a bun shim of OMP with its entry and manifest, so resolving it starts nothing. */
+	async function installOmp(): Promise<{ readonly bin: string; readonly entry: string }> {
+		const root = path.join(temp, `bun-runtime-${installs++}`);
+		const bin = path.join(root, "bin");
+		await mkdir(bin, { recursive: true });
+		const shim = path.join(bin, isWindows ? "omp.exe" : "omp");
+		await writeFile(shim, "bun_shim_impl");
+		await chmod(shim, 0o755);
+		await writeFile(path.join(bin, "omp.bunx"), Buffer.from('"entry.js"', "utf16le"));
+		const entry = path.join(root, "entry.js");
+		await writeFile(entry, "console.log('omp/18.8.5');");
+		await writeFile(path.join(root, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "18.8.5" }));
+		return { bin, entry };
+	}
+
+	/** A folder holding a file named like Bun with `content`: the real runtime's engine, or a launcher's path. */
+	async function bunFolder(content: string, name = BUN_NAME): Promise<{ readonly dir: string; readonly file: string }> {
+		const dir = path.join(temp, `bun-folder-${installs++}`);
+		await mkdir(dir, { recursive: true });
+		const file = path.join(dir, name);
+		await writeFile(file, content);
+		await chmod(file, 0o755);
+		return { dir, file };
+	}
+
+	const FORWARDER = "a package manager's launcher: path = C:\\packages\\bun\\current\\bun.exe";
+
+	async function withPath<T>(dirs: readonly string[], action: () => Promise<T>): Promise<T> {
+		const saved = { PATH: process.env.PATH, LOCALAPPDATA: process.env.LOCALAPPDATA };
+		process.env.PATH = dirs.join(path.delimiter);
+		process.env.LOCALAPPDATA = path.join(temp, "no-local-app-data");
+		try {
+			return await action();
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	it("is the real Bun beside the shim", async () => {
+		const install = await installOmp();
+		await writeFile(path.join(install.bin, BUN_NAME), ENGINE);
+		await chmod(path.join(install.bin, BUN_NAME), 0o755);
+
+		const resolved = await withPath([install.bin], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.command, path.join(install.bin, BUN_NAME));
+		assert.deepEqual(resolved.prefixArgs, [install.entry]);
+		assert.equal(resolved.launcher, "bun-shim");
+	});
+
+	it("is the real Bun on PATH when none sits beside the shim", async () => {
+		const install = await installOmp();
+		const real = await bunFolder(ENGINE);
+
+		const resolved = await withPath([install.bin, real.dir], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.command, real.file);
+		assert.deepEqual(resolved.prefixArgs, [install.entry]);
+		assert.equal(resolved.launcher, "bun-shim");
+	});
+
+	it("passes over a forwarding bun.exe that sits first on PATH and takes the real Bun behind it, saying so once", async () => {
+		const install = await installOmp();
+		const forwarding = await bunFolder(FORWARDER);
+		const real = await bunFolder(ENGINE);
+		const lines: LoggedLine[] = [];
+		native.setOmpResolutionLog(recordingLogger(lines));
+		try {
+			const first = await withPath([install.bin, forwarding.dir, real.dir], () => native.resolveOmpBinary());
+			const second = await withPath([install.bin, forwarding.dir, real.dir], () => native.resolveOmpBinary());
+
+			assert.equal(first.command, real.file, "the launched program is the real Bun, not the launcher that forwards to it");
+			assert.equal(second.command, real.file);
+		} finally {
+			native.setOmpResolutionLog(null);
+		}
+
+		const passedOver = lines.filter(line => line.message.includes(forwarding.file));
+		assert.equal(passedOver.length, 1, JSON.stringify(lines));
+		assert.equal(passedOver[0]?.level, "info");
+		assert.match(passedOver[0]?.message ?? "", /not Bun's own runtime .*starts the real Bun as a second process/);
+		assert.ok((passedOver[0]?.message ?? "").includes(real.file), "the line names the Bun that is used instead");
+	});
+
+	it("passes over a forwarding bun.exe that sits beside the shim, for the real Bun on PATH", async () => {
+		const install = await installOmp();
+		await writeFile(path.join(install.bin, BUN_NAME), FORWARDER);
+		await chmod(path.join(install.bin, BUN_NAME), 0o755);
+		const real = await bunFolder(ENGINE);
+
+		const resolved = await withPath([install.bin, real.dir], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.command, real.file);
+	});
+
+	it("says nothing about a passed-over launcher when the launch is refused for another reason", async () => {
+		const install = await installOmp();
+		await rm(path.join(install.bin, "omp.bunx"));
+		const forwarding = await bunFolder(FORWARDER);
+		const real = await bunFolder(ENGINE);
+		const lines: LoggedLine[] = [];
+		native.setOmpResolutionLog(recordingLogger(lines));
+		try {
+			await withPath([install.bin, forwarding.dir, real.dir], async () => {
+				await assert.rejects(native.resolveOmpBinary(), /its target entry could not be resolved/);
+			});
+		} finally {
+			native.setOmpResolutionLog(null);
+		}
+
+		assert.deepEqual(lines.filter(line => line.message.includes(forwarding.file)), [], "no Bun was used, so none is said to be");
+	});
+
+	it("refuses with the reason, naming the launcher, when the only bun.exe on the machine is a forwarding one", async () => {
+		const install = await installOmp();
+		const forwarding = await bunFolder(FORWARDER);
+
+		await withPath([install.bin, forwarding.dir], async () => {
+			await assert.rejects(native.resolveOmpBinary(), (error: Error) => {
+				assert.match(error.message, /No usable OMP launcher was found\./);
+				assert.ok(error.message.includes(forwarding.file), error.message);
+				assert.match(error.message, /no bun runtime was found beside it/);
+				assert.match(error.message, /is not Bun's own runtime \(no JavaScript engine found in the file\)/);
+				assert.match(error.message, /Put Bun's own bun\.exe .* on PATH/);
+				assert.ok(!/pid-mismatch/.test(error.message), "the refusal is the diagnostic, not the symptom");
+				return true;
+			});
+		});
+	});
+
+	it("reads a file once per identity: a replaced file is read again, an untouched one is not", async () => {
+		const install = await installOmp();
+		const size = 256;
+		const bun = await bunFolder(ENGINE.padEnd(size, " "));
+		// A whole-millisecond time, so that setting it again reproduces the identity exactly.
+		const stamp = new Date(1_700_000_000_000);
+		await utimes(bun.file, stamp, stamp);
+
+		assert.equal((await withPath([install.bin, bun.dir], () => native.resolveOmpBinary())).command, bun.file);
+
+		// Other bytes of the same size and modification time are the same file as far as identity goes: the earlier answer stands.
+		await writeFile(bun.file, "x".repeat(size));
+		await utimes(bun.file, stamp, stamp);
+		assert.equal((await withPath([install.bin, bun.dir], () => native.resolveOmpBinary())).command, bun.file, "answered from memory");
+
+		// A file the user replaced differs in size or in modification time and is read again.
+		await utimes(bun.file, new Date(1_700_000_100_000), new Date(1_700_000_100_000));
+		await assert.rejects(withPath([install.bin, bun.dir], () => native.resolveOmpBinary()), /is not Bun's own runtime/);
+	});
+
+	it("does not take an extensionless bun on Windows, where Bun's program file is bun.exe", { skip: !isWindows && "a Windows naming rule" }, async () => {
+		const install = await installOmp();
+		const script = await bunFolder(ENGINE, "bun");
+
+		await withPath([install.bin, script.dir], async () => {
+			await assert.rejects(native.resolveOmpBinary(), /no bun runtime was found beside it/);
 		});
 	});
 });
