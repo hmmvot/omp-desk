@@ -95,7 +95,7 @@ test("a failed open surfaces a short warning with the cause", async () => {
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-test("a Chat link opens a file, only reveals it or its folder in the Explorer on Ctrl+Click, and shows it in File Explorer on Ctrl+Shift+Click", async () => {
+test("a Chat link opens a file, shows it in File Explorer on Ctrl+Click, and only reveals it or its folder in the Explorer on Ctrl+Shift+Click", async () => {
 	const cwd = await mkdtemp(join(tmpdir(), "omp-links-"));
 	try {
 		await writeFile(join(cwd, "a.ts"), "x");
@@ -124,8 +124,8 @@ test("a Chat link opens a file, only reveals it or its folder in the Explorer on
 		assert.deepEqual(warnings, []);
 		inWorkspace = false;
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 8, target: "a.ts", folders: true, action: "reveal" }, host);
-		assert.deepEqual(calls.slice(-1), [`explorer ${file}`], "Ctrl+Click opens nothing, even when the Explorer cannot show the file");
-		assert.match(warnings[0]!, /not in a folder open in this window.*Ctrl\+Shift\+Click/);
+		assert.deepEqual(calls.slice(-1), [`explorer ${file}`], "Ctrl+Shift+Click opens nothing, even when the Explorer cannot show the file");
+		assert.match(warnings[0]!, /not in a folder open in this window.*Ctrl\+Click shows it in File Explorer/);
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });
 

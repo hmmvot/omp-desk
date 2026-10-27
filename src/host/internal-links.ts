@@ -91,7 +91,7 @@ function missing(link: InternalLink): string {
 
 /**
  * Answer a validation or activation request whose target is an internal link. Both re-resolve on the host; a click opens an
- * existing view, Ctrl+Shift+Click shows the file behind the link in the system file manager where there is one (a detail tab
+ * existing view, Ctrl+Click shows the file behind the link in the system file manager where there is one (a detail tab
  * has none), and every other modifier is a plain open.
  */
 export async function handleInternalLink(request: TerminalLinkRequest, link: InternalLink, host: InternalLinkHost): Promise<void> {

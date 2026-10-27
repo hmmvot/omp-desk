@@ -24,7 +24,7 @@ export interface TerminalLinkValidation {
 export type WebLinkMode = "editor" | "external";
 /** The tooltip line that states what each gesture on a web link does, in the Chat and the Terminal alike. */
 export const WEB_LINK_HINT = "Open in editor · Ctrl+Click to open in browser";
-/** Ctrl+Click on a Chat file link reveals it in VS Code's Explorer instead of opening it; Ctrl+Shift+Click shows it in the system file manager. */
+/** Ctrl+Click on a Chat file link shows it in the system file manager instead of opening it; Ctrl+Shift+Click reveals it in VS Code's Explorer. */
 export type FileLinkAction = "reveal" | "os";
 /**
  * The context menus of Chat file and web links (`webview/context` in package.json). VS Code reads the

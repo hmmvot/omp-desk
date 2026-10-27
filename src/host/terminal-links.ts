@@ -277,7 +277,7 @@ export async function handleTerminalLink(request: TerminalLinkRequest, host: Ter
 			return;
 		}
 		if (!await host.revealInExplorer(location.path)) {
-			host.warn(`${location.path} is not in a folder open in this window, so the Explorer cannot show it. Ctrl+Shift+Click shows it in File Explorer.`);
+			host.warn(`${location.path} is not in a folder open in this window, so the Explorer cannot show it. Ctrl+Click shows it in File Explorer.`);
 		}
 	} catch (error) { host.warn(`cannot open ${location.path}: ${error instanceof Error ? error.message : String(error)}`); }
 }

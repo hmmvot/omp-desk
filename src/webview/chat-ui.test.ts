@@ -6315,7 +6315,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('[data-internal-target=\"agent://DocsReview\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))");
 			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "agent://DocsReview" }, "Enter activates a focused link");
 			await ui.evaluate("document.querySelector('[data-internal-target=\"agent://Parent.Child\"]').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true,shiftKey:true}))");
-			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "agent://Parent.Child", action: "os" }, "Ctrl+Shift+Click asks to show the file behind the link");
+			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "agent://Parent.Child" }, "Ctrl+Shift+Click is a plain open: an internal link has no folder of the window to reveal it in");
+			await ui.evaluate("document.querySelector('[data-internal-target=\"agent://Parent.Child\"]').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true}))");
+			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "agent://Parent.Child", action: "os" }, "Ctrl+Click asks to show the file behind the link");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});

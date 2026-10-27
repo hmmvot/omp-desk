@@ -160,14 +160,14 @@ describe("agent:// in a reply", () => {
 		assert.deepEqual(await validate(unsaved, "agent://FinishedReview"), valid(false));
 	});
 
-	it("Ctrl+Shift+Click shows the output file in the file manager; a detail tab has no file, so it opens", async () => {
+	it("Ctrl+Click shows the output file in the file manager; a detail tab has no file, so it opens", async () => {
 		const world = fake({ known: { Live: "roster" } });
 		await click(world, "agent://FinishedReview", "os");
 		assert.deepEqual(world.calls, [`os ${path.join("2026-10-17T10-00-00_S-1", "FinishedReview.md")}`]);
 		await click(world, "agent://Live", "os");
 		assert.deepEqual(world.calls, ["tab Live"]);
 		await click(world, "agent://FinishedReview", "reveal");
-		assert.deepEqual(world.calls, ["document FinishedReview of 2026-10-17T10-00-00_S-1.jsonl"], "Ctrl+Click is a plain open: there is no folder of the window to reveal it in");
+		assert.deepEqual(world.calls, ["document FinishedReview of 2026-10-17T10-00-00_S-1.jsonl"], "a reveal is a plain open: there is no folder of the window to reveal it in");
 	});
 });
 

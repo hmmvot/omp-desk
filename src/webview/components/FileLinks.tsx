@@ -84,9 +84,9 @@ export function claimLinkActivation(event: MouseEvent | KeyboardEvent): boolean 
 	return true;
 }
 
-/** Ctrl+Click (or Ctrl+Enter) reveals the target in VS Code's Explorer instead of opening it; with Shift it shows the target in the system file manager. */
+/** Ctrl+Click (or Ctrl+Enter) shows the target in the system file manager instead of opening it; with Shift it reveals the target in VS Code's Explorer. */
 export function fileLinkAction(event: { ctrlKey: boolean; shiftKey: boolean }): FileLinkAction | undefined {
-	return !event.ctrlKey ? undefined : event.shiftKey ? "os" : "reveal";
+	return !event.ctrlKey ? undefined : event.shiftKey ? "reveal" : "os";
 }
 
 function Anchor({ links, target, children }: { links: ChatFileLinks; target: string; children: ReactNode }): ReactNode {
@@ -96,7 +96,7 @@ function Anchor({ links, target, children }: { links: ChatFileLinks; target: str
 		tabIndex={0}
 		data-file-target={target}
 		data-vscode-context={fileLinkMenuContext(target)}
-		title={`${target}\nOpen · Ctrl+Click to reveal in Explorer · Ctrl+Shift+Click to show in File Explorer`}
+		title={`${target}\nOpen · Ctrl+Click to show in File Explorer · Ctrl+Shift+Click to reveal in Explorer`}
 		// Shift+mousedown would extend the text selection, and the click then reads as a selection, not an activation.
 		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
 		onClick={event => { if (claimLinkActivation(event)) links.open(target, fileLinkAction(event)); }}
@@ -104,15 +104,15 @@ function Anchor({ links, target, children }: { links: ChatFileLinks; target: str
 	>{children}</span>;
 }
 
-/** The anchor of an internal OMP URL: the look of a link, no file menu (there is no path), and Ctrl+Shift+Click shows the file behind it in the system file manager where it has one. */
+/** The anchor of an internal OMP URL: the look of a link, no file menu (there is no path), and Ctrl+Click shows the file behind it in the system file manager where it has one. */
 function InternalAnchor({ links, target, children }: { links: ChatFileLinks; target: string; children: ReactNode }): ReactNode {
-	const action = (event: { ctrlKey: boolean; shiftKey: boolean }): FileLinkAction | undefined => event.ctrlKey && event.shiftKey ? "os" : undefined;
+	const action = (event: { ctrlKey: boolean; shiftKey: boolean }): FileLinkAction | undefined => event.ctrlKey && !event.shiftKey ? "os" : undefined;
 	return <span
 		className="omp-file-link omp-internal-link"
 		role="link"
 		tabIndex={0}
 		data-internal-target={target}
-		title={`${target}\nOpen · Ctrl+Shift+Click to show the file in File Explorer`}
+		title={`${target}\nOpen · Ctrl+Click to show the file in File Explorer`}
 		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
 		onClick={event => { if (claimLinkActivation(event)) links.open(target, action(event)); }}
 		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.open(target, action(event)); }}
