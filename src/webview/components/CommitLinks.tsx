@@ -1,8 +1,7 @@
 /**
  * Commit hashes in an assistant reply (`docs/designs/2026-10-17-commit-hash-links.md`). A 7 to 40 digit hash stays ordinary text
- * until the host proves that it is the commit HEAD points at in the repository of the session's folder (the Chat file-link validation
- * exchange, target `commit://<hex>`); then the very same characters are wrapped in a link whose click selects the commit in the Source Control Graph.
- * When HEAD moves the host says so and every commit span asks again: a link for the old HEAD turns back into text, a span for the new HEAD becomes a link.
+ * until the host proves that a commit with that hash exists in the repository of the session's folder (the Chat file-link validation
+ * exchange, target `commit://<hex>`); then the very same characters are wrapped in a link whose click opens that commit's changes in a diff editor.
  * Only the assistant's own reply text asks: user text, tool output, notices and thinking never do, and neither does a page without link context.
  */
 import type { ReactNode } from "react";
@@ -22,8 +21,6 @@ function useCommitVerdict(links: ChatFileLinks | null, target: string): boolean 
 	const [, refresh] = useReducer((count: number) => count + 1, 0);
 	const remembered = useRef<{ links: ChatFileLinks | null; target: string; verdict: boolean | undefined }>({ links, target, verdict: undefined });
 	if (remembered.current.links !== links || remembered.current.target !== target) remembered.current = { links, target, verdict: undefined };
-	// The host says HEAD moved: the answers are forgotten, so the next render asks again (the previous verdict stays until the new one arrives).
-	useEffect(() => links?.onCommitsChanged(refresh), [links]);
 	const fresh = links?.peek(target);
 	if (fresh !== undefined) remembered.current.verdict = fresh;
 	// No dependency list: an expired answer is asked again on the next render; a known one does nothing, so an answer
@@ -50,7 +47,7 @@ function CommitAnchor({ links, target, children }: { links: ChatFileLinks; targe
 		role="link"
 		tabIndex={0}
 		data-commit-target={target}
-		title={`Commit ${hex}\nShow in the Source Control Graph`}
+		title={`Commit ${hex}\nOpen the commit's changes`}
 		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
 		onClick={event => { if (claimLinkActivation(event)) links.open(target); }}
 		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.open(target); }}

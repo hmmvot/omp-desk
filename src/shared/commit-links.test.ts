@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { commitLinkTarget, commitTargetOfSpan, detectCommitHashes, parseCommitLinksChanged, parseCommitLinkTarget } from "./commit-links.ts";
+import { commitLinkTarget, commitTargetOfSpan, detectCommitHashes, parseCommitLinkTarget } from "./commit-links.ts";
 
 test("a code span that is one 7 to 40 digit hex hash is a commit candidate, whatever mix of digits and letters, and its target is lower case", () => {
 	assert.equal(commitTargetOfSpan("c7398070"), "commit://c7398070");
@@ -51,10 +51,4 @@ test("prose: ordinary numbers, words, constants, versions, paths, URLs, colours 
 test("prose: one text is bounded", () => {
 	const text = Array.from({ length: 100 }, (_, index) => `a1b2c3${String(index).padStart(2, "0")}`).join(" ");
 	assert.equal(detectCommitHashes(text).length, 32);
-});
-
-test("the HEAD-moved signal is exact", () => {
-	assert.deepEqual(parseCommitLinksChanged({ type: "omp:terminal-link-commits-changed" }), { type: "omp:terminal-link-commits-changed" });
-	assert.equal(parseCommitLinksChanged({ type: "omp:terminal-link-commits-changed", hash: "c7398070" }), null);
-	assert.equal(parseCommitLinksChanged({ type: "omp:terminal-link-symbols-retry" }), null);
 });

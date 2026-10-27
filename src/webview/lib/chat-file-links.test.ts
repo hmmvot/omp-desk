@@ -111,39 +111,21 @@ test("no more than eight validations wait on the host at once; the rest follow a
 	links.dispose();
 });
 
-test("the host's HEAD-moved signal forgets every commit answer and only those, tells the listeners, and ignores a late answer to the question it dropped", async () => {
-	const { sent, transport, answer, deliver, listeners } = fixture(["commit://c7398070", "src/a.ts:3"]);
+test("a commit target is validated by the same pair, and a click posts a plain open request that names no folder and no action", async () => {
+	const { sent, transport, answer, listeners } = fixture(["commit://c7398070"]);
 	const links = new ChatFileLinks(transport);
-	let told = 0;
-	links.onCommitsChanged(() => { told++; });
 	const known = links.resolve("commit://c7398070");
-	const file = links.resolve("src/a.ts:3");
-	answer(sent[0]);
-	answer(sent[1]);
-	assert.deepEqual([await known, await file], [true, true]);
-	assert.equal(links.peek("commit://c7398070"), true);
-
-	deliver({ type: "omp:terminal-link-commits-changed" });
-	assert.equal(told, 1);
-	assert.equal(links.peek("commit://c7398070"), undefined, "the commit answer is out of date");
-	assert.equal(links.peek("src/a.ts:3"), true, "a file answer is not: only commit spans are asked again");
-	const again = links.resolve("commit://c7398070");
-	assert.equal(sent.length, 3, "the commit is asked afresh");
 	const sameAgain = links.resolve("commit://c7398070");
-	assert.equal(sent.length, 3, "one question per target however many spans ask");
-
-	// HEAD moves while a question is under way: its answer belongs to the old HEAD and fills nothing.
-	deliver({ type: "omp:terminal-link-commits-changed" });
-	assert.equal(told, 2);
-	const asked = links.resolve("commit://c7398070");
-	assert.equal(sent.length, 4, "the dropped question is not shared with the new one");
-	answer(sent[3]);
-	assert.equal(await asked, true);
-	answer(sent[2]);
-	await Promise.all([again, sameAgain]);
-	assert.equal(links.peek("commit://c7398070"), true, "the late answer left the newer one in place");
-
+	assert.equal(sent.length, 1, "one question per target however many spans ask");
+	answer(sent[0]);
+	assert.deepEqual([await known, await sameAgain], [true, true]);
+	assert.equal(links.peek("commit://c7398070"), true);
+	const missing = links.resolve("commit://1111111");
+	answer(sent[1]);
+	assert.equal(await missing, false, "a commit the host does not find is no link");
+	links.open("commit://c7398070", "os");
+	const opens = sent.filter(message => message.type === "omp:terminal-link-open") as unknown as Record<string, unknown>[];
+	assert.deepEqual(opens.map(({ requestId: _id, ...rest }) => rest), [{ type: "omp:terminal-link-open", target: "commit://c7398070" }]);
 	links.dispose();
 	assert.equal(listeners.size, 0, "disposing unsubscribes");
-	assert.equal(told, 2);
 });

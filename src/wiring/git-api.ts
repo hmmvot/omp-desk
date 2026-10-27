@@ -6,15 +6,12 @@ import * as vscode from "vscode";
 
 export interface GitRepository {
 	readonly rootUri: vscode.Uri;
-	readonly state: { readonly HEAD?: { readonly commit?: string; readonly name?: string; /** The API's `RefType`: 0 branch, 1 remote branch, 2 tag. */ readonly type?: number }; readonly indexChanges?: readonly { readonly uri: vscode.Uri }[]; readonly onDidChange: vscode.Event<void> };
+	readonly state: { readonly indexChanges?: readonly { readonly uri: vscode.Uri }[] };
 	getCommit(ref: string): Promise<{ readonly hash: string }>;
-	status(): Promise<void>;
 }
 
 export interface GitExtensionApi {
 	readonly repositories: readonly GitRepository[];
-	onDidOpenRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
-	onDidCloseRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
 }
 
 /** The Git extension's API, activating the extension if needed; `undefined` when it is missing or disabled. */

@@ -34,22 +34,14 @@ export class ValidationCache {
 		if (known !== undefined) return Promise.resolve(known);
 		let pending = this.#pending.get(target);
 		if (pending === undefined) {
-			const asked: Promise<boolean> = this.#validate(target).catch(() => false).then(valid => {
-				// An answer to a question that was dropped meanwhile (`forget`) is out of date: it neither fills the cache nor is shared.
-				if (this.#pending.get(target) !== asked) return valid;
+			pending = this.#validate(target).catch(() => false).then(valid => {
 				this.#pending.delete(target);
 				if (this.#entries.size >= MAX_CACHED_TARGETS) this.#entries.clear();
 				this.#entries.set(target, { valid, expires: this.#now() + (valid ? VALID_TTL_MS : INVALID_TTL_MS) });
 				return valid;
 			});
-			pending = asked;
 			this.#pending.set(target, pending);
 		}
 		return pending;
-	}
-	/** Drop every answer, and every question under way, for a target that `matches`: the next `peek` is `undefined` and the next `resolve` asks the host again. */
-	forget(matches: (target: string) => boolean): void {
-		for (const target of [...this.#entries.keys()]) if (matches(target)) this.#entries.delete(target);
-		for (const target of [...this.#pending.keys()]) if (matches(target)) this.#pending.delete(target);
 	}
 }

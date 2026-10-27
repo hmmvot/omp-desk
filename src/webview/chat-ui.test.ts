@@ -6320,7 +6320,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});
 
-		await t.test("a commit hash in an assistant reply, in code and in prose, is a link only once the host proves it is the commit HEAD points at, and a HEAD move re-asks only the commit spans; a click posts a plain open request, and a symbol lookup is made only for a span that is no commit", async () => {
+		await t.test("a commit hash in an assistant reply, in code and in prose, is a link once the host proves a commit with that hash exists, HEAD or not; a click posts a plain open request, and a symbol lookup is made only for a span that is no commit", async () => {
 			await reset("chat-commit-links");
 			const prose = "Fixed in `c7398070` and a1b2c3d4e5 and `BadFace1`, not `FaceBead1`, `1234567` or deadbeef-rc.";
 			await ui.evaluate(`(()=>{
@@ -6329,7 +6329,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			  row('user',{role:'user',timestamp:1,content:'Is c7398070 in the log?'}),
 			  row('assistant',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:${JSON.stringify(`${prose}\n\n\`\`\`\nc7398070 in a fence\n\`\`\``)}}]}),
 			 ],durableCount:2,working:false,settled:true});
-			 // The host's answers: these three commits are the HEAD of the session's repository in turn (a stand-in for the host's proof) and nothing else is one; no symbol is known.
+			 // The host's answers: these three commits exist in the session's repository (a stand-in for the host's proof; none needs to be HEAD) and nothing else is one; no symbol is known.
 			 window.proven=['commit://c7398070','commit://a1b2c3d4e5','commit://badface1'];
 			 window.answered=new Set();
 			 window.symbolsAsked=[];
@@ -6374,16 +6374,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await opens(), [{ type: "omp:terminal-link-open", target: "commit://c7398070" }], "a plain click posts the open request for the canonical target, naming no folder");
 			await ui.evaluate("document.querySelector('[data-commit-target=\"commit://a1b2c3d4e5\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))");
 			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "commit://a1b2c3d4e5" }, "Enter activates a focused link");
-			// HEAD moves: the host says so, and only the commit spans ask again. The link of the old HEAD turns back into text and the span of the new HEAD becomes a link.
-			const linked = () => ui.evaluate<string>("[...document.querySelectorAll('.omp-commit-link')].map(link=>link.dataset.commitTarget).join()");
-			const sentBefore = await ui.evaluate<number>("window.sent.length");
-			await ui.evaluate("window.proven=['commit://a1b2c3d4e5'];window.ui.receive({type:'omp:terminal-link-commits-changed'})");
-			await ui.wait("[...document.querySelectorAll('.omp-commit-link')].map(link=>link.dataset.commitTarget).join()==='commit://a1b2c3d4e5'");
-			assert.equal(await linked(), "commit://a1b2c3d4e5", "the old HEAD's link is text again");
-			const reasked = await ui.evaluate<string[]>(`window.sent.slice(${sentBefore}).map(message=>message.type+' '+(message.target??''))`);
-			assert.ok(reasked.length > 0 && reasked.every(entry => entry.startsWith("omp:terminal-link-validate commit://") || entry.startsWith("omp:terminal-link-symbols ")), `a HEAD move asks only commit spans, never a file (${reasked.join(", ")})`);
-			await ui.evaluate("window.proven=['commit://c7398070'];window.ui.receive({type:'omp:terminal-link-commits-changed'})");
-			await ui.wait("[...document.querySelectorAll('.omp-commit-link')].map(link=>link.dataset.commitTarget).join()==='commit://c7398070'");
+			assert.equal(await ui.evaluate("document.querySelector('[data-commit-target=\"commit://c7398070\"]').title"), "Commit c7398070\nOpen the commit's changes");
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-commit-link')].map(link=>link.dataset.commitTarget).join()"), "commit://c7398070,commit://a1b2c3d4e5,commit://badface1", "the links stay: nothing about HEAD takes one back");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});

@@ -43,8 +43,12 @@ export class TerminalLinkClient {
 	openInternal(target: string, action?: FileLinkAction): void {
 		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, ...(action === undefined ? {} : { action }) });
 	}
-	/** Show a commit of this conversation's repository in Source Control (`commit://<hex>`); the host looks the hash up again before it shows anything. */
+	/** Open the changes of a commit of this conversation's repository (`commit://<hex>`); the host looks the hash up again before it shows anything. */
 	openCommit(target: string): void {
+		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target });
+	}
+	/** Open a user link rule's URL in the external browser (`link-rule://<rule>/<matched text>`, `linkRuleTarget`); the host finds the rule itself and builds the URL, the page names none. */
+	openLinkRule(target: string): void {
 		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target });
 	}
 	/**

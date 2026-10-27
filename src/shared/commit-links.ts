@@ -1,10 +1,9 @@
 /**
  * Git commit hashes in a Chat reply. The page decides which text is worth asking about and the host proves it against
  * the repositories of THIS session's folder (`host/commit-links.ts`); both parse the same grammar, so the page is never
- * trusted to have normalized. A hash is a link only when a commit with that hash exists, and a click shows that commit in
- * Source Control. The exchange is the Chat file-link validate/open pair, with a target of the form `commit://<hex>`: it
- * names no path and no repository, the host derives both from the session. A hash is a link only while it is the commit HEAD
- * points at; the host tells the pages when HEAD moves ({@link CommitLinksChanged}) and they ask about their commit spans again.
+ * trusted to have normalized. A hash is a link only when a commit with that hash exists in the session's repository (HEAD or
+ * not), and a click opens that commit's changes in a diff editor. The exchange is the Chat file-link validate/open pair, with a
+ * target of the form `commit://<hex>`: it names no path and no repository, the host derives both from the session.
  *
  * See `docs/designs/2026-10-17-commit-hash-links.md`.
  */
@@ -29,16 +28,6 @@ const IN_PROSE = /(?<![\w.\-/\\:#@$%+~])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f
 /** The canonical text of a commit link: what the page asks the host about and what a click sends back. `hash` is already lower-case hex of an allowed length. */
 export function commitLinkTarget(hash: string): string {
 	return `${SCHEME}${hash}`;
-}
-
-/** Host to page: the commit HEAD points at changed (or a click found a link stale), so every answer about a `commit://` target is out of date. */
-export interface CommitLinksChanged {
-	type: "omp:terminal-link-commits-changed";
-}
-
-export function parseCommitLinksChanged(value: Record<string, unknown>): CommitLinksChanged | null {
-	if (value.type !== "omp:terminal-link-commits-changed" || Object.keys(value).length !== 1) return null;
-	return { type: value.type };
 }
 
 /** The lower-case hex a commit link target carries, or `null` when `target` is not one (any other scheme, upper case, an unusable length). */

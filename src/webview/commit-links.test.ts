@@ -62,7 +62,7 @@ test("a hash in an assistant reply, in a code span and in prose, is a link once 
 	const linked = await renderCommits(REPLY, { commits: proven, missing: ["commit://1234567"] });
 	assert.equal(linked.replace(/<[^>]*>/g, ""), plain.replace(/<[^>]*>/g, ""), "linking never changes the characters on screen");
 	assert.deepEqual([...linked.matchAll(/data-commit-target="([^"]*)"/g)].map(match => match[1]), ["commit://c7398070", "commit://a1b2c3d4e5", "commit://5f3a9b2e1d"]);
-	assert.match(linked, /<code><span class="omp-file-link omp-commit-link" role="link" tabindex="0" data-commit-target="commit:\/\/c7398070" title="Commit c7398070\nShow in the Source Control Graph">c7398070<\/span><\/code>/, "a code span is one link inside the code element");
+	assert.match(linked, /<code><span class="omp-file-link omp-commit-link" role="link" tabindex="0" data-commit-target="commit:\/\/c7398070" title="Commit c7398070\nOpen the commit&#x27;s changes">c7398070<\/span><\/code>/, "a code span is one link inside the code element");
 	assert.match(linked, /<strong><span[^>]*data-commit-target="commit:\/\/5f3a9b2e1d"[^>]*>5f3a9b2e1d<\/span><\/strong>/);
 	assert.match(linked, /<code>1234567<\/code>/, "a span the host says is no commit is the code it was");
 	assert.doesNotMatch(linked, /<pre><code[^>]*><span/, "fenced code stays text");

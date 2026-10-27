@@ -2,23 +2,12 @@
  * Commit hashes of a Chat reply, proved and shown on the host (`docs/designs/2026-10-17-commit-hash-links.md`). The page names a
  * hash only (`commit://<hex>`, `shared/commit-links.ts`); the host parses it again, looks it up in the repositories that
  * VS Code's Git extension has open and that contain THIS session's folder (the deepest first), and only then answers that the hash is a link.
- * A hash is a link only while it is the commit HEAD points at (read after the Git extension refreshed its state) and this VS Code
- * has the Source Control Graph's commands: the built-in Graph can select no other commit, and a link that cannot show its
- * commit in the Graph is not drawn. A click looks the hash up again, checks that it is still HEAD and shows it with VS Code's own
- * Source Control, no extension involved:
- *
- * 1. the Source Control Graph view is shown (`workbench.scm.history.focus`);
- * 2. the Graph selects the commit (`workbench.scm.action.graph.revealCurrentHistoryItem`, which selects the current HEAD item).
- *
- * That action does nothing, silently, while the Graph's reference filter hides the current branch, so the click reads the filter
- * first (`graph-filter.ts`) and, when it hides the checked-out reference, shows a notice that says how to put it back instead.
- * A click on a link whose commit has stopped being HEAD shows a notice, opens nothing and tells the page to ask again. When HEAD moves
- * the wiring tells every page the same way (`CommitLinksChanged`).
+ * Any commit that exists in the session's repository is a link, HEAD or not. A click opens the commit's changes as a multi-file diff
+ * with the Git extension's own command (`git.viewCommit`, run by the wiring on the repository the lookup found, with the full hash it found).
+ * A click on a link whose commit no longer exists shows a notice and opens nothing.
  *
  * Nothing here takes a path or a repository from the page, runs a `git` process of its own or executes a command the page names.
  */
-import { describeGraphRef } from "./graph-filter.ts";
-import type { GraphFilter } from "./graph-filter.ts";
 import { isInside } from "./link-scope.ts";
 import { MAX_COMMIT_HASH_LENGTH, parseCommitLinkTarget } from "../shared/commit-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation } from "../shared/terminal-links.ts";
@@ -29,12 +18,8 @@ export interface CommitRepository {
 	readonly root: string;
 	/** `git show` of `ref`: rejects when `ref` names nothing, is ambiguous or is not a commit. */
 	getCommit(ref: string): Promise<{ readonly hash: string }>;
-	/** The commit HEAD points at (a detached HEAD included), read after the Git extension refreshed its state; `undefined` for a branch with no commit yet or a refresh that failed. */
-	headCommit(): Promise<string | undefined>;
-	/** The id the Graph gives the checked-out reference (`refs/heads/main`; the commit when HEAD is detached); `undefined` when there is none. */
-	headRef(): string | undefined;
-	/** What the Graph's reference filter is set to for this repository now. */
-	graphFilter(): GraphFilter;
+	/** Open the changes of the commit with this full hash in a multi-file diff editor (the Git extension's `git.viewCommit`); rejects when this window cannot show it. */
+	viewCommit(hash: string): Promise<void>;
 }
 
 /** A commit that exists: `hash` is its full lower-case hash. */
@@ -108,11 +93,6 @@ export class CommitLinkResolver {
 		return pending;
 	}
 
-	/** Forget every answer (a repository was opened or closed). */
-	invalidate(): void {
-		this.#entries.clear();
-	}
-
 	/** The whole lookup, the wait for a free slot included, is bounded: the page gives up on a validation after four seconds and would cache the late answer as a miss. */
 	async #search(cwd: string, hex: string): Promise<{ value: CommitHit | null; settled: boolean }> {
 		if (hex.length > MAX_COMMIT_HASH_LENGTH) return { value: null, settled: true };
@@ -161,114 +141,44 @@ export class CommitLinkResolver {
 	}
 }
 
-/** What showing a commit uses of VS Code. */
-export interface CommitOpenEnv {
-	run(command: string, ...args: unknown[]): Promise<unknown>;
-	/** Whether this VS Code has the Graph view's focus command and its reveal action (they exist in the workbench, not in an extension). */
-	graphAvailable(): Promise<boolean>;
-	/** One line per click: the steps and their outcome, so a click that did not show what the user expected is diagnosable. */
-	log(message: string): void;
-}
-
-export const GRAPH_FOCUS = "workbench.scm.history.focus";
-export const GRAPH_REVEAL_HEAD = "workbench.scm.action.graph.revealCurrentHistoryItem";
-
-/** Why a commit is not shown: it is not what HEAD points at (`head` is what does), or this VS Code has no Graph to show it in. */
-export type CommitUnshowable = { readonly reason: "not-head"; readonly head: string | undefined } | { readonly reason: "no-graph" };
-
-/** A click found that the Graph's filter hides the checked-out reference `ref` (a Graph reference id such as `refs/heads/main`): its selection action would do nothing. */
-export interface CommitFiltered {
-	readonly reason: "filtered";
-	readonly ref: string;
-}
-
-/** `null` when `hit` is the HEAD commit and the Graph is there: the one case in which it is a link. */
-export async function whyNotShowable(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | null> {
-	const head = (await hit.repo.headCommit().catch(() => undefined))?.toLowerCase();
-	if (head !== hit.hash) return { reason: "not-head", head };
-	return await env.graphAvailable().catch(() => false) ? null : { reason: "no-graph" };
-}
-
-/**
- * Select the commit in the Graph. `null` when it was shown, otherwise the reason it was not (and nothing was opened); rejects when the
- * Graph refused the selection. Writes one log line.
- */
-export async function openCommit(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | CommitFiltered | null> {
-	const short = hit.hash.slice(0, 12);
-	const refused = await whyNotShowable(hit, env);
-	if (refused !== null) {
-		env.log(`commit link ${short}: nothing shown, ${refused.reason === "no-graph" ? "this VS Code has no Source Control Graph" : `not HEAD (HEAD is ${refused.head?.slice(0, 12) ?? "none"})`}`);
-		return refused;
-	}
-	const steps = ["HEAD"];
-	try {
-		// A view that will not take the focus does not stop the selection: the action selects the item in the view wherever it is.
-		await env.run(GRAPH_FOCUS).then(() => steps.push("graph"), error => steps.push(`graph failed: ${error instanceof Error ? error.message : String(error)}`));
-		// The action selects nothing, and says nothing, while the Graph's filter hides the current branch: look at the filter first, so the click can say so.
-		const filter = hit.repo.graphFilter();
-		const ref = hit.repo.headRef();
-		if (filter.kind === "refs" && ref !== undefined && !filter.refs.includes(ref)) {
-			steps.push(`graph filter hides ${ref} (filter: ${filter.refs.join(", ") || "no reference"})`);
-			return { reason: "filtered", ref };
-		}
-		steps.push(filter.kind === "unreadable" ? `graph filter unreadable: ${filter.why}` : `graph filter ${filter.kind === "refs" ? "includes HEAD" : "unlimited"}`);
-		try {
-			await env.run(GRAPH_REVEAL_HEAD);
-			steps.push("select in graph");
-		} catch (error) {
-			steps.push(`select in graph failed: ${error instanceof Error ? error.message : String(error)}`);
-			throw error;
-		}
-		return null;
-	} finally {
-		env.log(`commit link ${short}: ${steps.join(", ")}`);
-	}
-}
-
 export interface CommitLinkHost {
 	/** Whether the document and session that sent the request are still current; checked after the lookup. */
 	isCurrent(): boolean;
 	reply(message: TerminalLinkValidation): void;
 	/** Short user-visible notice, so an activation that cannot complete is never silent. */
 	warn(message: string): void;
-	/** Tell this page that every answer about a commit target is out of date (a click found a link stale). */
-	revalidate(): void;
+	/** One line per click, so a click that showed nothing is diagnosable. */
+	log(message: string): void;
 	/** The session's folder; never the page's word. */
 	readonly cwd: string;
 }
 
 /**
  * Answer a validation or activation request whose target is `commit://<hex>` (`parseCommitLinkTarget` has already accepted `request.target`).
- * Valid means: the commit exists in the session's repository, it is the commit HEAD points at, and the Graph is there.
+ * Valid means: the commit exists in the session's repository. A click opens the commit's changes there, by the full hash the lookup found
+ * (never the page's text), and shows a notice when the commit is gone or the repository cannot show it.
  */
-export async function handleCommitLink(request: TerminalLinkRequest, resolver: CommitLinkResolver, env: CommitOpenEnv, host: CommitLinkHost): Promise<void> {
+export async function handleCommitLink(request: TerminalLinkRequest, resolver: CommitLinkResolver, host: CommitLinkHost): Promise<void> {
 	const hex = parseCommitLinkTarget(request.target);
 	if (hex === null) return;
 	const hit = await resolver.lookup(host.cwd, hex);
 	if (!host.isCurrent()) return;
 	if (request.type === "omp:terminal-link-validate") {
-		const valid = hit !== null && await whyNotShowable(hit, env) === null;
-		if (host.isCurrent()) host.reply({ type: "omp:terminal-link-validation", requestId: request.requestId, valid });
+		host.reply({ type: "omp:terminal-link-validation", requestId: request.requestId, valid: hit !== null });
 		return;
 	}
 	if (hit === null) {
+		host.log(`commit link ${hex}: nothing shown, no such commit in this session's repository`);
 		host.warn(`cannot show commit ${hex}: this session's repository has no commit with that hash.`);
-		host.revalidate();
 		return;
 	}
+	const short = hit.hash.slice(0, 12);
 	try {
-		const refused = await openCommit(hit, env);
-		if (refused === null) return;
-		if (refused.reason === "filtered") {
-			const { noun, name } = describeGraphRef(refused.ref);
-			host.warn(`commit ${hex} is not selected: the Source Control Graph's filter hides the current ${noun} (${name}). In the Graph, choose "Auto" or include ${noun === "commit" ? "it" : name} in its filter.`);
-			return;
-		}
-		host.warn(refused.reason === "no-graph"
-			? `cannot show commit ${hex}: this VS Code has no Source Control Graph.`
-			: `commit ${hex} is no longer the current commit, so the Graph cannot select it.`);
-		host.revalidate();
+		await hit.repo.viewCommit(hit.hash);
+		host.log(`commit link ${short}: view commit`);
 	} catch (error) {
-		host.warn(`cannot show commit ${hex}: ${error instanceof Error ? error.message : String(error)}.`);
+		const reason = error instanceof Error ? error.message : String(error);
+		host.log(`commit link ${short}: view commit failed: ${reason}`);
+		host.warn(`cannot show commit ${hex}: ${reason}.`);
 	}
 }
