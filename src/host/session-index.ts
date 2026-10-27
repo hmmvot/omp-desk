@@ -770,6 +770,8 @@ export class SessionIndex {
 	readonly #live = new Map<string, LiveSession>();
 	/** Durable editor-slot→conversation bindings (ADR-0025), keyed by immutable editor slot id. */
 	readonly #bindings = new Map<string, EditorSlotBinding>();
+	/** The tail of each editor slot's queue of elections ({@link bindEditorSlot}); a slot with nothing pending has none. */
+	readonly #slotElections = new Map<string, Promise<void>>();
 	readonly #restoring = new Set<string>();
 	/** This window is recording/executing a launch, not recovering an abandoned attempt. */
 	readonly #launching = new Set<string>();
@@ -3149,7 +3151,22 @@ export class SessionIndex {
 	 * would have demoted) are restored and the caller is told the role was not published.
 	 * Nothing is left in memory that a restart could not see.
 	 */
-	async bindEditorSlot(slotId: string, tabId: string, role: EditorSlotRole): Promise<EditorSlotBinding> {
+	bindEditorSlot(slotId: string, tabId: string, role: EditorSlotRole): Promise<EditorSlotBinding> {
+		// Elections of one slot run one after another, in the order they were asked. An election judges its rival from a claim it
+		// reads first, and reading it can take long (the start time of a foreign holder waits for the native module, a file call
+		// waits behind the host's pool): a later election that finished meanwhile (the window took the session over) would
+		// otherwise be overwritten by the earlier one's refusal, and the editor would stay read-only for good.
+		const previous = this.#slotElections.get(slotId) ?? Promise.resolve();
+		const run = previous.then(() => this.#bindEditorSlotNow(slotId, tabId, role));
+		const tail = run.then(() => undefined, () => undefined);
+		this.#slotElections.set(slotId, tail);
+		void tail.then(() => {
+			if (this.#slotElections.get(slotId) === tail) this.#slotElections.delete(slotId);
+		});
+		return run;
+	}
+
+	async #bindEditorSlotNow(slotId: string, tabId: string, role: EditorSlotRole): Promise<EditorSlotBinding> {
 		if (slotId.trim().length === 0) throw new SessionIndexError("invalid-input", "bindEditorSlot requires a slot id");
 		const entry = this.#entries.get(tabId);
 		if (entry === undefined) throw new SessionIndexError("unknown-tab", `No indexed tab ${tabId}.`);

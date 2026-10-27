@@ -6939,6 +6939,37 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a /shake leaves no progress line above the composer: typed (OMP runs it itself and the host answers it explained) or driven by the host's own pass, whichever frame arrives first", async () => {
+			const settle = "new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))";
+			const frame = (value: Record<string, unknown>) => `window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`;
+			const output = frame({ type: "command_output", text: "Shook 12 tool results (~7941 tokens freed)." });
+			const progress = "document.querySelector('.omp-turn-progress')!==null||document.querySelector('.omp-working-status-text').textContent!==''";
+			for (const [name, outputFirst] of [["shake-typed-output-first", true], ["shake-typed-ack-first", false]] as const) {
+				await reset(name);
+				await ui.evaluate("window.ui.admission(false);window.composer.focus()");
+				await ui.call("Input.insertText", { text: "/shake" });
+				await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+				await ui.wait("window.ui.sends().length===1");
+				await ui.evaluate(outputFirst ? output : "window.ui.sendReply(undefined,'explained')");
+				await ui.evaluate(settle);
+				await ui.evaluate(outputFirst ? "window.ui.sendReply(undefined,'explained')" : output);
+				await ui.wait("document.querySelector('.omp-command-output')");
+				await ui.evaluate(settle);
+				assert.equal(await ui.evaluate(progress), false, `${name}: a progress line stays although no turn runs`);
+			}
+			// The host's own pass (Context view, Command Palette): its start and end frames bracket OMP's report.
+			await reset("shake-host-pass");
+			await ui.evaluate(frame({ type: "auto_compaction_start", action: "shake", reason: "manual" }));
+			await ui.wait("document.querySelector('.omp-turn-progress')");
+			await ui.evaluate(output);
+			await ui.evaluate(frame({ type: "auto_compaction_end", action: "shake", aborted: false, willRetry: false }));
+			await ui.wait("document.querySelector('.omp-command-output')");
+			await ui.evaluate(settle);
+			assert.equal(await ui.evaluate(progress), false, "shake-host-pass: a progress line stays after the pass ended");
+			await ui.evaluate("window.ui.admission(true)");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the host's thinking and tool defaults open or close every block once, and a block changed afterwards keeps its own state", async () => {
 			await reset("quick-transcript-defaults");
 			const prefs = (thinkingExpanded: boolean, toolsExpanded: boolean) => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:${thinkingExpanded},toolsMode:'${toolsExpanded ? "all" : "collapsed"}'})`);

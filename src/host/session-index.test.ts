@@ -14,10 +14,12 @@
  */
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, describe, it } from "node:test";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { claimPathFor, createOwnerGeneration, acquireClaim, createClaimHolder, readClaim } from "./session-claim.ts";
@@ -32,6 +34,8 @@ import {
 import { CatalogError } from "./profile-catalog.ts";
 import type { CatalogStore } from "./profile-catalog.ts";
 import { isAbsoluteWorkspaceDirectory, normalizeWorkspaceDirectory } from "./session-files.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
+import { setWin32NativeForTest, startWin32Native, type NativeModuleAsset } from "./win32-native.ts";
 import { isRpcHost, resolveSessionOrigin } from "./session-model.ts";
 import {
 	createNativeDeletionEvidenceStore,
@@ -3696,6 +3700,36 @@ describe("editor slots", () => {
 		// generation 1 must not be honoured by the demoted slot.
 		assert.equal(demoted?.generation, 2);
 		assert.equal(index.slotBinding("slot:new")?.generation, 1);
+	});
+
+	it("lets the later election of one slot have the last word, however long an earlier one took to judge its rival", { skip: process.platform !== "win32" }, async () => {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = indexFor(new TestStore(), claimDir);
+		const file = await makeSessionFile(sessionDir, "S-ELECT-ORDER", cwd);
+		const entry = await managedSession(index, file, cwd);
+		// Judging a foreign holder reads its start time through the process's native module, which at window activation is still loading.
+		const loading = Promise.withResolvers<NativeModuleAsset | null>();
+		setWin32NativeForTest(undefined);
+		void startWin32Native(() => loading.promise);
+		const rivalProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+		try {
+			const rival = await acquireClaim(claimDir, file, createOwnerGeneration(), createClaimHolder(rivalProcess.pid!));
+			// A restored editor is bound while the window that was just killed still seems to hold the session: its claim is read and its holder is being judged.
+			const early = index.bindEditorSlot("slot:restored", entry.tabId, "controlling");
+			// The early election has read the claim file (a synchronous or pool-thread read) and waits for the native module; the module, not a clock, is what holds it.
+			await delay(50);
+			// The holder lets go and this window takes the session over: the election that follows reads no claim.
+			await rival.release();
+			const late = index.bindEditorSlot("slot:restored", entry.tabId, "controlling");
+			loading.resolve(await installedAddonAsset());
+			assert.equal((await early).role, "passive", "the early election reported what it read");
+			assert.equal((await late).role, "controlling");
+			assert.equal(index.slotBinding("slot:restored")?.role, "controlling", "the stale refusal does not replace the later grant");
+		} finally {
+			loading.resolve(null);
+			rivalProcess.kill();
+			setWin32NativeForTest(undefined);
+		}
 	});
 
 	it("reads a binding witness and held transfers an earlier build wrote, and drops them on the next write", async () => {
