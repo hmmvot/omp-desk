@@ -23,12 +23,14 @@ import {
 import type { NativeControlBootstrap, OmpBinary, OmpCommand } from "./native-terminal";
 import type { RuntimeFlagPlan } from "./runtime-flags";
 import { isPtyProcessAlive } from "./pty-identity";
-import type { PtyBrokerClient } from "./pty-client";
+import type { PtyBrokerClient, RpcAttachOutcome as BrokerRpcAttachOutcome } from "./pty-client";
 import type { PtyBrokerRuntime } from "./pty-protocol";
 import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
 import { HOST_STOP_TIMEOUT_MS, concurrentPinProof, decideStop, lazyNativeGenerationReader } from "./rpc-reconcile";
 import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
+import type { ParkedRpcConnections } from "./rpc-parked";
+import { stepRecorder } from "./session-restore-trace";
 import { readSessionFileHeader } from "./session-files";
 import type { RecordedRpcIdentity } from "./session-model";
 
@@ -331,6 +333,10 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 export interface AttachTimings {
 	/** Record read, handshake, status and the broker-identity decision, in ms. */
 	readonly connectMs: number;
+	/** `kept`: the attach took the connection the pass's reconcile kept; `new`: it dialled its own (no connection was kept, or the kept one was refused). Absent for a Terminal attach. */
+	readonly connection?: "kept" | "new";
+	/** Where the attach's own pieces spent their time (the dial and its socket, hello and loop-lag figures, status, child identity, broker confirm), summed per name. Absent for a Terminal attach. */
+	readonly parts?: Readonly<Record<string, number>>;
 	readonly brokerIdentity: "trusted" | "probe";
 	readonly brokerIdentityMs: number;
 	readonly childIdentity: "trusted" | "probe";
@@ -358,18 +364,35 @@ export async function attachRpcHost(input: {
 	readonly client: PtyBrokerClient;
 	/** Test seam: the kernel reader; defaults to the client's own readings. */
 	readonly readNativeGeneration?: NativeGenerationReader;
+	/** Where the restore pass's reconcile parked the connection that proved this pin, if the pass keeps one (see {@link ParkedRpcConnections}). */
+	readonly parking?: ParkedRpcConnections;
 }): Promise<RpcAttachOutcome> {
 	const proof = concurrentPinProof({
 		pin: input.pin,
 		readNativeGeneration: input.readNativeGeneration ?? lazyNativeGenerationReader(input.client),
 	});
+	// The restore pass's reconcile may have kept the connection that proved this pin: the attach tries it before it dials. It
+	// asks it a new status and proves everything again; whatever is wrong with it, the attach opens its own connection.
+	const parked = input.parking?.take(input.pin) ?? null;
+	const link = stepRecorder();
 	const connectStarted = Date.now();
 	// The child's proof starts once the broker's status is known, together with the broker's own identity
 	// confirmation: independent readings of one proof, one spawn latency instead of two (ADR-0035).
-	const attached = await input.client.attachRpc(input.pin.slot, { whileConfirming: proof.start });
+	let attached: BrokerRpcAttachOutcome;
+	try {
+		attached = await input.client.attachRpc(input.pin.slot, {
+			whileConfirming: proof.start,
+			steps: link.sink,
+			...(parked === null ? {} : { reuse: parked }),
+		});
+	} catch (error) {
+		parked?.disconnect();
+		throw error;
+	}
 	const connectMs = Date.now() - connectStarted;
 	if (attached.handle === null) return { state: "unavailable", reason: attached.reason, runtime: null };
 	const handle = attached.handle;
+	const kept = parked !== null && handle === parked;
 	const refuse = (reason: string): RpcAttachOutcome => {
 		handle.disconnect();
 		return { state: "unavailable", reason, runtime: null };
@@ -394,6 +417,8 @@ export async function attachRpcHost(input: {
 		},
 		timings: {
 			connectMs,
+			connection: kept ? "kept" : "new",
+			parts: link.parts,
 			brokerIdentity: attached.identity?.mode ?? "probe",
 			brokerIdentityMs: attached.identity?.ms ?? 0,
 			childIdentity: child.childReads === 0 ? "trusted" : "probe",

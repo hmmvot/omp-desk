@@ -26,6 +26,7 @@ import { isManagedHost, isUnreadLaunchAttempt } from "./session-model";
 import type { RecordedRpcIdentity } from "./session-model";
 import { timedStep } from "./session-restore-trace";
 import type { StepSink } from "./session-restore-trace";
+import { sameAttachPin } from "./session-availability";
 import type {
 	AttachPin,
 	OwnerAbsenceEvidence,
@@ -33,6 +34,7 @@ import type {
 	OwnerReconciler,
 	OwnerVerdict,
 } from "./session-availability";
+import type { ParkedRpcConnections } from "./rpc-parked";
 
 /** Bounded wait for the process to disappear after a stop. */
 export const HOST_STOP_TIMEOUT_MS = 15_000;
@@ -68,6 +70,8 @@ export interface AttachedBrokerHandle {
 
 /** An attached handle a probe or a stop must be able to close. */
 export interface ProbeHandle extends AttachedBrokerHandle {
+	/** Whether the connection already ended; absent on a test handle. */
+	readonly closed?: boolean;
 	disconnect(): void;
 	stop(options: { readonly mode?: "graceful" | "force"; readonly timeoutMs?: number }): Promise<PtyStopResult>;
 	shutdown(options?: { readonly requireStopped?: boolean }): Promise<PtyShutdownResult>;
@@ -103,6 +107,8 @@ export type RpcProbeResult =
 interface RpcProbeFlight {
 	readonly expected: RecordedRpcIdentity;
 	readonly reader: NativeGenerationReader | undefined;
+	/** The store this flight's `attachable` connection is parked in, if any. */
+	readonly parking: ParkedRpcConnections | undefined;
 	readonly promise: Promise<RpcProbeResult>;
 }
 
@@ -140,7 +146,14 @@ export interface OwnerReconcilePorts {
 	 */
 	brokerProvenance(request: OwnerReconcileRequest): BrokerSlotProvenance;
 	/** Prove one `managed-rpc` row's recorded child from a read-only broker attachment. */
-	probeRpc(slot: string, expected: RecordedRpcIdentity, kind?: "managed-rpc" | "managed-omp", steps?: StepSink): Promise<RpcProbeResult>;
+	probeRpc(
+		slot: string,
+		expected: RecordedRpcIdentity,
+		kind?: "managed-rpc" | "managed-omp",
+		steps?: StepSink,
+		/** The restore pass will attach to what this proves; keep the proof's connection for it when a place to keep it exists. */
+		keepConnection?: boolean,
+	): Promise<RpcProbeResult>;
 	/**
 	 * Whether one slot's broker record still owns a *running* child, read-only.
 	 *
@@ -264,15 +277,7 @@ export async function verifyPinnedBrokerAttachment(input: {
 	if (!proved.ok) return proved;
 	const { pin } = proved;
 	const expected = input.pin;
-	const same =
-		pin.slot === expected.slot &&
-		pin.brokerId === expected.brokerId &&
-		pin.brokerGeneration === expected.brokerGeneration &&
-		pin.brokerPid === expected.brokerPid &&
-		pin.brokerCreationTime === expected.brokerCreationTime &&
-		pin.nativePid === expected.nativePid &&
-		pin.nativeCreationTime === expected.nativeCreationTime;
-	if (!same) return { ok: false, reason: "the broker target changed since ownership was verified" };
+	if (!sameAttachPin(pin, expected)) return { ok: false, reason: "the broker target changed since ownership was verified" };
 	return { ok: true };
 }
 
@@ -307,9 +312,13 @@ export function concurrentPinProof(input: {
 	readonly start: (handle: AttachedBrokerHandle) => void;
 	readonly settle: (handle: AttachedBrokerHandle) => Promise<ConcurrentPinProofResult>;
 } {
+	// The proof is of one handle: an attach that gave up on a kept connection and opened its own must not be settled by
+	// the proof that was started on the abandoned one.
 	let started: Promise<ConcurrentPinProofResult> | null = null;
+	let startedFor: AttachedBrokerHandle | null = null;
 	const start = (handle: AttachedBrokerHandle): Promise<ConcurrentPinProofResult> => {
-		if (started !== null) return started;
+		if (started !== null && startedFor === handle) return started;
+		startedFor = handle;
 		const startedAt = Date.now();
 		let childReads = 0;
 		started = (async (): Promise<ConcurrentPinProofResult> => {
@@ -444,6 +453,11 @@ export async function probeRpcHost(input: {
 	readonly readNativeGeneration?: NativeGenerationReader;
 	/** Where the pieces of this proof are timed for the restore line; diagnostic only. */
 	readonly steps?: StepSink;
+	/**
+	 * Where an `attachable` verdict's connection is kept for the attach that follows, instead of being closed. Only the startup
+	 * restore pass passes one; every other caller (Open, Resume and Delete admission, the ownership checks) closes its connection.
+	 */
+	readonly parking?: ParkedRpcConnections;
 }): Promise<RpcProbeResult> {
 	// Concurrent equivalent reads share one in-flight RPC proof so they cannot exhaust the
 	// broker's bounded client slots while each waits for the kernel identity.
@@ -461,8 +475,11 @@ export async function probeRpcHost(input: {
 	const expected = input.expected;
 	for (const flight of flights) {
 		const recorded = flight.expected;
+		// A probe that wants its connection kept joins only a flight that parks into the same store; one that does not
+		// may share any flight's verdict.
 		if (
 			flight.reader === input.readNativeGeneration &&
+			(input.parking === undefined || flight.parking === input.parking) &&
 			recorded.slot === expected.slot &&
 			recorded.brokerId === expected.brokerId &&
 			recorded.brokerGeneration === expected.brokerGeneration &&
@@ -473,7 +490,7 @@ export async function probeRpcHost(input: {
 		) return await timedStep(input.steps, "probe (shared)", () => flight.promise);
 	}
 	const promise = probeRpcHostOnce(input);
-	const flight: RpcProbeFlight = { expected, reader: input.readNativeGeneration, promise };
+	const flight: RpcProbeFlight = { expected, reader: input.readNativeGeneration, parking: input.parking, promise };
 	flights.push(flight);
 	try {
 		return await promise;
@@ -508,6 +525,7 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 	if (attached.kind === "none") return { kind: "no-record" };
 	if (attached.kind === "failed") return { kind: "unreachable", reason: attached.reason };
 	const handle = attached.handle;
+	let parked = false;
 	try {
 		const expected = input.expected;
 		if (handle.kind !== (input.kind ?? "managed-rpc")) {
@@ -533,9 +551,13 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 				reason: `the broker's child (pid ${proved.pin.nativePid}) is not the process this session recorded (pid ${expected.childPid})`,
 			};
 		}
-		return { kind: "attachable", pin: proved.pin };
+		const pin = proved.pin;
+		// The restore pass attaches this host next: the connection that proved it is kept for that attach, which asks it a new
+		// status and runs every proof again (`ParkedRpcConnections`). A legacy terminal slot is never kept, nor is a pass that has ended.
+		if (input.parking !== undefined && kind === "managed-rpc" && input.parking.park(pin, handle)) parked = true;
+		return { kind: "attachable", pin };
 	} finally {
-		handle.disconnect();
+		if (!parked) handle.disconnect();
 	}
 }
 
@@ -777,7 +799,7 @@ async function reconcileOwner(request: OwnerReconcileRequest, ports: OwnerReconc
 	if (recorded === null) return { kind: "free", evidence: [{ kind: "no-recorded-host" }] };
 	const rpc = isManagedHost(recorded) ? recorded.rpc ?? null : null;
 	if (rpc !== null && rpc.childPid !== null && rpc.childCreationTime !== null) {
-		const probe = await ports.probeRpc(rpc.slot, rpc, recorded.transport === "native" ? "managed-omp" : "managed-rpc", request.steps);
+		const probe = await ports.probeRpc(rpc.slot, rpc, recorded.transport === "native" ? "managed-omp" : "managed-rpc", request.steps, request.keepConnection === true);
 		if (probe.kind === "attachable") {
 			return {
 				kind: "attachable",

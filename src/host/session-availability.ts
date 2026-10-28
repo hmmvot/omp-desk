@@ -95,6 +95,19 @@ export interface AttachPin {
 	readonly nativeCreationTime: string;
 }
 
+/** Whether two pins name the same broker generation and the same child, field by field. */
+export function sameAttachPin(a: AttachPin, b: AttachPin): boolean {
+	return (
+		a.slot === b.slot &&
+		a.brokerId === b.brokerId &&
+		a.brokerGeneration === b.brokerGeneration &&
+		a.brokerPid === b.brokerPid &&
+		a.brokerCreationTime === b.brokerCreationTime &&
+		a.nativePid === b.nativePid &&
+		a.nativeCreationTime === b.nativeCreationTime
+	);
+}
+
 /** Caller's verdict on who owns a session right now. */
 export type OwnerVerdict =
 	/**
@@ -137,6 +150,12 @@ export interface OwnerReconcileRequest {
 	readonly host: RecordedHost | null;
 	/** Where the restore pass wants the pieces of this reconcile timed; diagnostic only, never read by a verdict. */
 	readonly steps?: StepSink;
+	/**
+	 * The caller will attach to the host this reconcile proves, in the same pass, and wants the proof's connection to the broker
+	 * kept for that attach instead of closed (the startup restore pass only; Open, Resume and Delete admission never set it).
+	 * Advisory: a reconciler without a place to keep a connection ignores it, and the attach then opens its own.
+	 */
+	readonly keepConnection?: boolean;
 }
 
 /** Read-only positive ownership witnesses. Absence evidence gates automatic relaunch only. */

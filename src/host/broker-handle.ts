@@ -139,9 +139,9 @@ export class BrokerHandle<Event = BrokerHandleEvent> {
 		return this.lastStatus;
 	}
 
-	/** Ask the broker for its current state and remember it. */
-	async refreshStatus(): Promise<PtyStatusPayload> {
-		const frame = await this.request({ v: PTY_PROTOCOL_VERSION, t: "status", id: 0 });
+	/** Ask the broker for its current state and remember it; `timeoutMs` bounds the wait for the answer (default: the handle's own request bound). */
+	async refreshStatus(timeoutMs?: number): Promise<PtyStatusPayload> {
+		const frame = await this.request({ v: PTY_PROTOCOL_VERSION, t: "status", id: 0 }, timeoutMs);
 		if (frame.t !== "status") throw new Error("the broker did not answer with a status");
 		this.lastStatus = frame.status;
 		return frame.status;

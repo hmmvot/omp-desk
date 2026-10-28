@@ -39,6 +39,36 @@ export type OmpHostStepTimings = Readonly<Record<string, number>>;
  */
 export interface StepSink {
 	measure<T>(name: string, work: () => Promise<T>): Promise<T>;
+	/**
+	 * Add a figure the caller measured itself (how long a socket callback waited, how late the event loop ran a timer) to the
+	 * step's sub-steps under `name`, summed over every call of the row. Optional: a sink that only times does not need it.
+	 */
+	note?(name: string, ms: number): void;
+}
+
+/**
+ * A sink that keeps what it is given, for a step whose own function reports where its time went (an attach hands its pieces
+ * back in its result): `parts` is summed per name, in the order first seen. Diagnostic only.
+ */
+export function stepRecorder(now: () => number = Date.now): { readonly sink: StepSink; readonly parts: Record<string, number> } {
+	const parts: Record<string, number> = {};
+	const add = (name: string, ms: number): void => {
+		parts[name] = (parts[name] ?? 0) + Math.max(0, ms);
+	};
+	return {
+		parts,
+		sink: {
+			measure: async (name, work) => {
+				const begin = now();
+				try {
+					return await work();
+				} finally {
+					add(name, now() - begin);
+				}
+			},
+			note: add,
+		},
+	};
 }
 
 /** Run `work` under `name` when a sink is given, and as plain `work` otherwise. */
@@ -102,17 +132,21 @@ export class RestoreStepTimer {
 	 * run one after another, and the part they do not cover is the row's own bookkeeping.
 	 */
 	sink(step: "admission" | "reconcile"): StepSink {
+		const add = (name: string, ms: number): void => {
+			const sub = this.#sub.get(step) ?? {};
+			sub[name] = (sub[name] ?? 0) + Math.max(0, ms);
+			this.#sub.set(step, sub);
+		};
 		return {
 			measure: async (name, work) => {
 				const begin = this.#now();
 				try {
 					return await work();
 				} finally {
-					const sub = this.#sub.get(step) ?? {};
-					sub[name] = (sub[name] ?? 0) + Math.max(0, this.#now() - begin);
-					this.#sub.set(step, sub);
+					add(name, this.#now() - begin);
 				}
 			},
+			note: add,
 		};
 	}
 
@@ -175,4 +209,39 @@ export interface IdentityTurn {
 	wait(): Promise<void>;
 	/** Idempotent: the check is done (taken or refused), or the row ended without reaching it. */
 	release(): void;
+}
+
+/**
+ * Where the activation pass's own time went around its rows, in milliseconds; a field the pass never reached is absent.
+ * Diagnostic only: it ends up in the one info line that closes the pass, so a pass that finishes later than its last row
+ * says which stretch it waited in.
+ */
+export interface RestorePassPhases {
+	/** From the pass's start until the rows' restore began: the saved-history view-only loop. */
+	beforeMs?: number;
+	/** `restoreAll` from its start until it returned. */
+	restoreAllMs?: number;
+	/** `restoreAll` from its start until its last row ended. */
+	rowsMs?: number;
+	/** The controller elections of the cohort, one after another. */
+	electionsMs?: number;
+	/** Projecting the report into the editors, the launcher refresh and the report's log lines. */
+	publishMs?: number;
+	/** When the pass's function returned (epoch milliseconds). */
+	returnedAt?: number;
+}
+
+/** The phases as one compact text, without identifiers; `finishedAt` is when the pass's completion callback ran. */
+export function describeRestorePhases(phases: RestorePassPhases, finishedAt: number): string {
+	const parts: string[] = [];
+	const add = (name: string, ms: number | undefined): void => {
+		if (ms !== undefined) parts.push(`${name} ${Math.max(0, Math.round(ms))}`);
+	};
+	add("before rows", phases.beforeMs);
+	add("rows", phases.rowsMs);
+	add("after rows", phases.restoreAllMs === undefined || phases.rowsMs === undefined ? undefined : phases.restoreAllMs - phases.rowsMs);
+	add("elections", phases.electionsMs);
+	add("publish", phases.publishMs);
+	add("until finish", phases.returnedAt === undefined ? undefined : finishedAt - phases.returnedAt);
+	return parts.join(" · ");
 }

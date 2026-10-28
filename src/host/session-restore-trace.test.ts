@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { IdentityTurns, RestoreStepTimer, mapBounded, timedStep } from "./session-restore-trace.ts";
+import { IdentityTurns, RestoreStepTimer, describeRestorePhases, mapBounded, timedStep } from "./session-restore-trace.ts";
 
 describe("mapBounded", () => {
 	it("returns results by input position and never runs more than the limit at once", async () => {
@@ -109,6 +109,23 @@ describe("RestoreStepTimer", () => {
 		assert.match(timer.finish("failed"), /reconcile 7 \(connect 7\)/);
 		assert.equal(await timedStep(undefined, "connect", async () => 42), 42);
 	});
+
+	it("adds a figure the caller measured itself to the step's pieces, summed over calls", async () => {
+		let clock = 0;
+		const timer = new RestoreStepTimer(() => clock);
+		await timer.measure("reconcile", async () => {
+			const sink = timer.sink("reconcile");
+			await sink.measure("connect", async () => { clock += 560; });
+			sink.note?.("connect socket", 3);
+			sink.note?.("connect hello", 540.4);
+			sink.note?.("connect loop late", 0);
+		});
+		await timer.measure("reconcile", async () => { timer.sink("reconcile").note?.("connect hello", 10); });
+		assert.equal(
+			timer.finish("attached"),
+			"attached in 560 ms · admission 0 · reconcile 560 (connect 560, connect socket 3, connect hello 550, connect loop late 0) · persist 0",
+		);
+	});
 });
 
 describe("IdentityTurns", () => {
@@ -135,5 +152,19 @@ describe("IdentityTurns", () => {
 		const turns = new IdentityTurns();
 		await turns.next(null).wait();
 		await turns.next(null).wait();
+	});
+});
+
+describe("describeRestorePhases", () => {
+	it("says where a pass that finished after its last row waited, in the order it ran", () => {
+		assert.equal(
+			describeRestorePhases({ beforeMs: 4, rowsMs: 2_000, restoreAllMs: 2_012, electionsMs: 700, publishMs: 9, returnedAt: 10_000 }, 10_030),
+			"before rows 4 · rows 2000 · after rows 12 · elections 700 · publish 9 · until finish 30",
+		);
+	});
+
+	it("leaves out a stretch the pass never reached", () => {
+		assert.equal(describeRestorePhases({ beforeMs: 1, restoreAllMs: 5 }, 100), "before rows 1");
+		assert.equal(describeRestorePhases({}, 100), "");
 	});
 });

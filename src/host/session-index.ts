@@ -431,6 +431,8 @@ export interface RestoreReport {
 	 * reports a failed save reports it from here; the saves are queued in order behind and ahead of all other writes either way.
 	 */
 	readonly saved: Promise<string | null>;
+	/** Milliseconds from the start of the pass until its last row ended; the pass's own total minus this is what it did after the rows. */
+	readonly rowsMs: number;
 }
 
 /** Result of promoting a reserved draft to its materialized session file. */
@@ -1358,6 +1360,7 @@ export class SessionIndex {
 		});
 		const turns = new IdentityTurns();
 		const saves: Array<Promise<string | null>> = [];
+		const passStartedAt = Date.now();
 		const outcomes = await mapBounded(rows, options.concurrency ?? RESTORE_CONCURRENCY, async (entry): Promise<RestoreOutcome> => {
 			const tabId = entry.tabId;
 			if (options.signal?.aborted === true) {
@@ -1378,7 +1381,9 @@ export class SessionIndex {
 			this.#log?.info(`window timing: restore tab ${tabId} ${timer.finish(`${outcome.status}${kind}`)}`);
 			return outcome;
 		});
-		// The report is folded in cohort order, never in completion order.
+		// The pass's rows are done: `rowsMs` ends here, so the report below (folded in cohort order, never in completion order)
+		// is the only thing the pass still does.
+		const rowsMs = Date.now() - passStartedAt;
 		for (const [position, outcome] of outcomes.entries()) {
 			const entry = rows[position] as MutableEntry;
 			const tabId = entry.tabId;
@@ -1419,6 +1424,7 @@ export class SessionIndex {
 			activeTabId: this.activeTabId,
 			persistError: this.#persistError,
 			saved: Promise.all(saves).then(() => this.#persistError),
+			rowsMs,
 		};
 	}
 
@@ -1968,7 +1974,9 @@ export class SessionIndex {
 				// Reconcile external ownership while the claim is held: only `free`
 				// may start a process, only `attachable` may reconnect to the host
 				// this index recorded, and everything else stays a conflict.
-				const verdict = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, claimBefore, options.reconciler, steps));
+				// Only the startup pass (`automatic`, a row of a restore trace) keeps the proof's connection for the attach that follows;
+				// Open and Resume admission, and the re-check after a failed attach, close theirs.
+				const verdict = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, claimBefore, options.reconciler, steps, trace !== undefined && options.automatic === true));
 				const classification = classifySessionAvailability({
 					entry: toEntry(entry),
 					fileExists: entry.sessionFile !== null,
@@ -2250,7 +2258,7 @@ export class SessionIndex {
 			return { status: "failed", tabId, kind: "ambiguous-cwd", detail: cwdRefusal };
 		}
 		const observed = await this.#readClaim(identity);
-		const verdict = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, observed.ok ? observed.claim : null, options.reconciler, steps));
+		const verdict = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, observed.ok ? observed.claim : null, options.reconciler, steps, trace !== undefined && options.automatic === true));
 		const classification = classifySessionAvailability({
 			entry: toEntry(entry),
 			fileExists: false,
@@ -3447,6 +3455,8 @@ export class SessionIndex {
 		claim: ObservedClaim | null,
 		reconciler: OwnerReconciler,
 		steps?: StepSink,
+		/** The startup restore pass attaches what this proves right after it: the reconciler may keep the proof's connection for that attach. */
+		keepConnection = false,
 	): Promise<OwnerVerdict> {
 		if (claim !== null && claim.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claim)) {
 			return { kind: "live", detail: "Another live window of this extension holds this session." };
@@ -3460,6 +3470,7 @@ export class SessionIndex {
 				claim,
 				host: entry.host === null ? null : { ...entry.host },
 				...(steps === undefined ? {} : { steps }),
+				...(keepConnection ? { keepConnection: true } : {}),
 			});
 		} catch (error) {
 			return { kind: "unknown", detail: `Ownership reconciliation failed: ${describeError(error)}` };

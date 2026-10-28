@@ -30,6 +30,7 @@ import type {
 	AttachedBrokerHandle,
 	BrokerPin,
 	BrokerSlotProbeResult,
+	concurrentPinProof as concurrentPinProofType,
 	createOwnerReconciler as createOwnerReconcilerType,
 	decideStop as decideStopType,
 	NativeGenerationReader,
@@ -48,6 +49,7 @@ import type { PtyBrokerRecord, PtyStatusPayload, PtyStopResult } from "./pty-pro
 
 /** The part of the compiled module these tests drive. */
 interface RpcReconcileModule {
+	readonly concurrentPinProof: typeof concurrentPinProofType;
 	readonly createOwnerReconciler: typeof createOwnerReconcilerType;
 	readonly decideStop: typeof decideStopType;
 	readonly probeBrokerSlotForRunningChild: typeof probeBrokerSlotForRunningChildType;
@@ -791,6 +793,19 @@ describe("reconciliation of a recorded rpc row", () => {
 		assert.equal(terminalLookups, 0, "an rpc child is never resolved as a terminal");
 	});
 
+	it("tells the probe to keep its connection only when the request asked for it", async () => {
+		const asked: Array<boolean | undefined> = [];
+		const ports = reconcilePorts({
+			probeRpc: async (_slot, _expected, _kind, _steps, keepConnection) => {
+				asked.push(keepConnection);
+				return { kind: "attachable", pin: brokerPin() };
+			},
+		});
+		await verdictOf(ports, { ...reconcileRequest(), keepConnection: true });
+		await verdictOf(ports);
+		assert.deepEqual(asked, [true, false], "a request that did not ask (Open, Resume, Delete admission) never has its connection kept");
+	});
+
 	it("frees the row only on the broker's own report that the recorded child exited", async () => {
 		const verdict = await verdictOf(
 			reconcilePorts({
@@ -1323,5 +1338,35 @@ describe("stop of a recorded broker-owned child", () => {
 		assert.match(unauthenticated.ok ? "" : unauthenticated.reason, /could not be authenticated/);
 
 		assert.equal(stops, 0);
+	});
+});
+
+describe("the concurrent pin proof of an attachment", () => {
+	const reader: NativeGenerationReader = async () => ({ kind: "found", creationTime: CHILD_CREATION });
+
+	it("is the proof of the handle it was started on, and is settled once for that handle", async () => {
+		let reads = 0;
+		const proof = reconcile.concurrentPinProof({ pin: brokerPin(), readNativeGeneration: async pid => { reads += 1; return await reader(pid); } });
+		const handle = attachedHandle();
+		proof.start(handle);
+		const settled = await proof.settle(handle);
+		assert.equal(settled.proof.ok, true);
+		assert.equal(reads, 1);
+		assert.equal(await proof.settle(handle), settled, "the same handle is not proved twice");
+		assert.equal(reads, 1);
+	});
+
+	it("starts a new proof for a handle the attach switched to, instead of settling it on the abandoned handle's", async () => {
+		const proof = reconcile.concurrentPinProof({ pin: brokerPin(), readNativeGeneration: reader });
+		// The kept connection answered a status naming another child before the attach gave up on it and dialled its own.
+		const abandoned = attachedHandle({ nativePid: CHILD_PID + 1 });
+		proof.start(abandoned);
+		const own = attachedHandle();
+		const settled = await proof.settle(own);
+		assert.equal(settled.proof.ok, true, "the verdict is about the handle that is adopted");
+		const refused = reconcile.concurrentPinProof({ pin: brokerPin(), readNativeGeneration: reader });
+		refused.start(attachedHandle());
+		const other = await refused.settle(attachedHandle({ nativePid: CHILD_PID + 1 }));
+		assert.equal(other.proof.ok, false, "and a handle that does not match the pin is refused whatever started the proof before it");
 	});
 });

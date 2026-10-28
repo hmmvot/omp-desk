@@ -51,6 +51,7 @@ import {
 	type PtyRequestFrame,
 } from "./pty-protocol.ts";
 import type { RpcChannelTraffic } from "../protocol/rpc.ts";
+import { startLoopLagGauge } from "./loop-gauge.ts";
 
 /** Host the broker binds and the client dials. Nothing else is reachable. */
 export const PTY_LOOPBACK_HOST = "127.0.0.1";
@@ -99,6 +100,8 @@ export interface PtyConnection<Received extends PtyFrame = PtyFrame, Sent extend
 	close(reason?: string): void;
 	/** The read-side measurement of this connection; absent on a test double. */
 	traffic?(): RpcChannelTraffic;
+	/** Where the client's dial spent its time; set on a connection {@link connectPtyBroker} made, absent on the broker's side and on a test double. */
+	readonly connectTimings?: PtyConnectTimings;
 }
 
 /** What the broker's side of one connection speaks. */
@@ -277,7 +280,7 @@ function closeConnection(state: ConnectionState, reason: string): void {
 	for (const listener of state.closeListeners) listener(reason);
 }
 
-function makeConnection<Received extends PtyFrame>(state: ConnectionState): PtyConnection<Received> {
+function makeConnection<Received extends PtyFrame>(state: ConnectionState, connectTimings?: PtyConnectTimings): PtyConnection<Received> {
 	const frameListeners: Array<(frame: Received) => void> = [];
 	state.deliver = frame => {
 		// The parser validated the body against `state.direction`, which is the same
@@ -290,6 +293,7 @@ function makeConnection<Received extends PtyFrame>(state: ConnectionState): PtyC
 		sessionId: state.sessionId,
 		sessionKey: state.key,
 		hello: state.hello,
+		...(connectTimings === undefined ? {} : { connectTimings }),
 		get closed() {
 			return state.closed;
 		},
@@ -598,6 +602,22 @@ export interface PtyConnectOptions {
 }
 
 /**
+ * Where one client dial spent its time, in monotonic milliseconds. Diagnostic only: the restore timing line shows it so a
+ * slow `connect` can be attributed to this thread's event loop or to the broker (`loopLateMs` stays near zero when the
+ * wait was the broker's).
+ */
+export interface PtyConnectTimings {
+	/** The dial until the socket's `connect` callback ran. */
+	readonly socketMs: number;
+	/** The hello written until the broker's answer was handled: the broker's own turnaround plus any loop wait before the callback. */
+	readonly helloMs: number;
+	/** The answer handled until the connection was ready: the two MAC checks, the session key, and any loop wait after the callback. */
+	readonly finishMs: number;
+	/** The longest a 10 ms timer ran late while the dial was in progress: how long this thread's loop could not run a due callback. */
+	readonly loopLateMs: number;
+}
+
+/**
  * Dial a broker and complete the handshake.
  *
  * Fails closed on every unexpected answer: a socket that opens but says nothing,
@@ -613,12 +633,22 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 		throw new PtyProtocolError("the PTY broker record does not carry a usable port");
 	}
 	const clientNonce = createPtyNonce();
+	// Timestamps are taken inside the socket callbacks themselves, so a loop that was busy when a callback was due shows in
+	// the gap before it ran (see `PtyConnectTimings`).
+	const startedAt = performance.now();
+	let connectedAt = startedAt;
+	let helloSentAt = startedAt;
+	let answeredAt = startedAt;
+	const lag = startLoopLagGauge();
 	const socket = connect({ host, port: options.port });
 	socket.setNoDelay(true);
 	socket.setEncoding("utf8");
 	const ready = Promise.withResolvers<void>();
 	const failure = Promise.withResolvers<never>();
-	socket.once("connect", () => ready.resolve());
+	socket.once("connect", () => {
+		connectedAt = performance.now();
+		ready.resolve();
+	});
 	socket.once("error", error => failure.reject(new PtyProtocolError(`the broker socket failed: ${error.message}`)));
 	socket.once("close", () => failure.reject(new PtyProtocolError("the broker closed the connection before the handshake")));
 	const timeoutMs = options.timeoutMs ?? PTY_HANDSHAKE_TIMEOUT_MS;
@@ -642,6 +672,7 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 			}),
 		};
 		socket.write(`${JSON.stringify(hello)}\n`);
+		helloSentAt = performance.now();
 		const reader = createLineReader();
 		const answer = Promise.withResolvers<PtyHelloOk>();
 		const onAnswer = (chunk: string): void => {
@@ -653,6 +684,7 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 			}
 			const line = reader.take();
 			if (line === null) return;
+			answeredAt = performance.now();
 			socket.off("data", onAnswer);
 			let parsed: unknown;
 			try {
@@ -728,7 +760,16 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 		if (leftover !== null && leftover.length > 0) state.reader.unshift(leftover);
 		socket.on("drain", () => handleDrain(state));
 		pumpFrames(state);
-		return makeConnection<PtyBrokerFrame>(state);
+		const timings: PtyConnectTimings = {
+			socketMs: connectedAt - startedAt,
+			helloMs: answeredAt - helloSentAt,
+			finishMs: performance.now() - answeredAt,
+			loopLateMs: lag.stop(),
+		};
+		return makeConnection<PtyBrokerFrame>(state, timings);
+	} catch (error) {
+		lag.stop();
+		throw error;
 	} finally {
 		clearTimeout(timer);
 	}

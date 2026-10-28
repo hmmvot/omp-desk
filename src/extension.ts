@@ -86,7 +86,8 @@ import type { KillWindow } from "./runtime/local-kill";
 import type { NativeWatchWindow } from "./runtime/local-native-watch";
 import type { RuntimeRecord } from "./runtime/runtime-record";
 import { createRuntimeStaging } from "./runtime/runtime-entries";
-import { timedStep } from "./host/session-restore-trace";
+import { describeRestorePhases, timedStep } from "./host/session-restore-trace";
+import type { RestorePassPhases } from "./host/session-restore-trace";
 import { runNativeStage } from "./runtime/native-stage-client";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
@@ -225,6 +226,7 @@ import { ChatRuntime } from "./host/chat-runtime";
 import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, stopRpcHost } from "./host/rpc-launch";
+import { ParkedRpcConnections } from "./host/rpc-parked";
 import { PendingForks } from "./host/pending-forks";
 import { FORK_REFUSAL_SENTENCES } from "./chat/fork";
 import { attachNativeHost, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "./host/native-session";
@@ -955,6 +957,8 @@ interface WindowState {
    * click only has to read the panels it left behind.
    */
   startupRestore: { readonly settled: Promise<void>; readonly cohort: ReadonlySet<string> } | null;
+  /** The startup pass's kept broker connections while it runs (see `ParkedRpcConnections`); `null` outside the pass. */
+  restoreParking: ParkedRpcConnections | null;
   /**
    * `true` from activation until the startup pass has captured its cohort. The catalog is adopted
    * (and the launcher first built) before the pass starts, and a row this window is going to
@@ -1439,6 +1443,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     pendingDisplay: new PendingDisplay(pending, pendingDisplayShell({ provider: () => windowState().launcherProvider, sessionsViewId: SESSIONS_VIEW_ID })),
     persistFailures: new PersistFailureReporter({ warn: message => log.warn(message) }, message => showWarning(message)),
     startupRestore: null,
+    restoreParking: null,
     startupRestorePending: true,
     startupRestoreOver: Promise.withResolvers<void>(),
     legacySettingsMoved: Promise.resolve(),
@@ -1899,10 +1904,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Unreadable provenance proves no ownership; the user's actions remain available.
     brokerProvenance: request => windowState().sessionRuntime.brokerProvenance(request.entry.tabId),
     // Proves one rpc row's recorded child from a read-only broker attachment.
-    probeRpc: async (slot, expected, kind, steps) => {
+    probeRpc: async (slot, expected, kind, steps, keepConnection) => {
       const client = await timedStep(steps, "broker client", () => attachBrokerClient());
       if (client === null) return { kind: "unreachable", reason: "the PTY broker is not available in this window" };
-      return await probeRpcHost({ client, slot, expected, ...(kind === undefined ? {} : { kind }), ...(steps === undefined ? {} : { steps }) });
+      // The startup pass's rows keep the connection that proved their host for the attach that follows; every other caller closes it.
+      const parking = keepConnection === true ? windowState().restoreParking : null;
+      return await probeRpcHost({ client, slot, expected, ...(kind === undefined ? {} : { kind }), ...(steps === undefined ? {} : { steps }), ...(parking === null ? {} : { parking }) });
     },
     // A slot's running child is the only writer an unidentified attempt can still be caught
     // by, because it recorded no process id to compare.
@@ -4291,7 +4298,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     diagnostics: s.diagnostics,
     entries: () => windowState().staging.entries(),
     launchRefusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),
-    hosts: { launchRpc: launchRpcHost, launchNative: launchNativeHost, attachRpc: attachRpcHost, attachNative: attachNativeHost },
+    hosts: { launchRpc: launchRpcHost, launchNative: launchNativeHost, attachRpc: attachRpcWithRestoreParking, attachNative: attachNativeHost },
     brokerSlots: s.brokerSlots,
     brokerClient,
     chatBrokerClient,
@@ -4821,11 +4828,18 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
   const cohort = localRecoveryCohort(index);
   s.startupRestorePending = false;
   const restoreStartedAt = Date.now();
+  const phases: RestorePassPhases = {};
+  // Connections the pass's reconciles keep for its attaches (`ParkedRpcConnections`); closed when the pass ends whatever happened.
+  const parking = new ParkedRpcConnections();
+  s.restoreParking = parking;
   const settled = (async () => {
     try {
-      await restoreTabs(context, index, cohort);
+      await restoreTabs(context, index, cohort, phases);
     } catch (error) {
       log.error(`restore: the startup pass failed: ${messageOf(error)}`);
+    } finally {
+      parking.release();
+      if (s.restoreParking === parking) s.restoreParking = null;
     }
   })();
   s.startupRestore = { settled, cohort };
@@ -4835,9 +4849,11 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
   refreshLauncher();
   void settled.then(() => {
     const since = (at: number): string => `+${at - s.activatedAt} ms`;
+    const finishedAt = Date.now();
+    const phasesText = describeRestorePhases(phases, finishedAt);
     windowTiming(
       "startup restore timeline",
-      `activation → catalog adopted ${s.catalogAdoptedAt === null ? "unknown" : since(s.catalogAdoptedAt)} → restore started ${since(restoreStartedAt)} → restore finished ${since(Date.now())} (${cohort.size} rows)`,
+      `activation → catalog adopted ${s.catalogAdoptedAt === null ? "unknown" : since(s.catalogAdoptedAt)} → restore started ${since(restoreStartedAt)} → restore finished ${since(finishedAt)} (${cohort.size} rows${phasesText === "" ? "" : `; ${phasesText}`})`,
       "info",
     );
     // The pass can no longer publish anything, so a later click only has to read
@@ -4933,6 +4949,16 @@ const GONE_RECORD_SWEEP_DELAY_MS = 20_000;
 function startupRestoreOver(): Promise<void> | null {
   const s = windowState();
   return s.startupRestorePending || s.startupRestore !== null ? s.startupRestoreOver.promise : null;
+}
+
+/**
+ * `attachRpcHost` with the startup pass's kept broker connections, while the pass runs: a row whose reconcile kept the connection
+ * that proved its host attaches over it (after a new status and every proof); any other attach, and any attach after the pass,
+ * dials its own.
+ */
+function attachRpcWithRestoreParking(input: Parameters<typeof attachRpcHost>[0]) {
+  const parking = windowState().restoreParking;
+  return attachRpcHost(parking === null ? input : { ...input, parking });
 }
 
 /**
@@ -5147,8 +5173,11 @@ async function restoreTabs(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   cohort: ReadonlySet<string>,
+  /** Filled as the pass goes, for the timeline line that closes it; a caller that does not report it passes none. */
+  phases: RestorePassPhases = {},
 ): Promise<void> {
   const s = windowState();
+  const tabsStartedAt = Date.now();
   if (cohort.size === 0) {
     refreshLauncher();
     return;
@@ -5173,7 +5202,13 @@ async function restoreTabs(
     // another workspace put in the shared index. Nothing waits on any other process or
     // service: each row is reconciled against its own broker slot.
     const passStartedAt = Date.now();
+    phases.beforeMs = passStartedAt - tabsStartedAt;
     report = await s.sessionRuntime.restore({ cohort });
+    // Every row has attached or been refused: a connection a reconcile kept and no attach claimed is closed now, not at the pass's end.
+    const unclaimed = s.restoreParking?.release() ?? 0;
+    if (unclaimed > 0) windowTiming("restore pass", `closed ${unclaimed} kept broker connection(s) no attach claimed`);
+    phases.restoreAllMs = Date.now() - passStartedAt;
+    phases.rowsMs = report.rowsMs;
     windowTiming("restore pass", `restoreAll ${Date.now() - passStartedAt} ms for ${cohort.size} rows`);
   } catch (error) {
     showError(`Stored OMP sessions could not be restored: ${messageOf(error)}`);
@@ -5197,6 +5232,8 @@ async function restoreTabs(
   const electionsAt = Date.now();
   for (const tabId of cohort) await electLocalController(index, tabId);
   windowTiming("restore pass", `controller elections ${Date.now() - electionsAt} ms for ${cohort.size} rows`);
+  phases.electionsMs = Date.now() - electionsAt;
+  const publishAt = Date.now();
   projectRestoreReport(index, report);
   refreshLauncher();
   void revealActiveSession(index);
@@ -5213,6 +5250,8 @@ async function restoreTabs(
     log.error(`restore failure (${failure.kind}) on tab ${failure.tabId}: ${failure.detail}`);
   }
   windowState().persistFailures.report({ persistError: report.persistError, persistBusy: index.persistBusy }, "The OMP session index could not be saved: ");
+  phases.publishMs = Date.now() - publishAt;
+  phases.returnedAt = Date.now();
   // The saves the rows queued are not waited for (the pass's end must not wait for catalog transactions across windows); a failure
   // they end with is reported when they have run, unless the pass already reported that very failure.
   void report.saved.then(failure => {

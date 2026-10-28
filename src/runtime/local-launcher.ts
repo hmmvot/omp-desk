@@ -301,7 +301,10 @@ export class LocalLauncher implements OmpHostLauncher {
 		// how each identity was established ("trusted": the broker's statement was believed; "probe": a kernel reading).
 		if (outcome.state === "attached" && outcome.timings !== undefined) {
 			const t = outcome.timings;
-			timings.connect = t.connectMs;
+			// `connect (kept)`: the attach took the connection the restore pass's reconcile kept, so no dial is in it.
+			if (t.connection === "kept") delete timings.connect;
+			timings[t.connection === "kept" ? "connect (kept)" : "connect"] = t.connectMs;
+			for (const [name, ms] of Object.entries(t.parts ?? {})) timings[`link ${name}`] = ms;
 			timings[`broker ${t.brokerIdentity}`] = t.brokerIdentityMs;
 			timings[`child ${t.childIdentity}`] = t.childIdentityMs;
 		}

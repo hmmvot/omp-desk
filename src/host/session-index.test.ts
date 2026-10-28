@@ -973,7 +973,8 @@ describe("restoreAll runs rows together", () => {
 			},
 		};
 
-		await index.restoreAll({ reconciler: reconcilerFor(handles), launcher });
+		const report = await index.restoreAll({ reconciler: reconcilerFor(handles), launcher });
+		assert.ok(Number.isInteger(report.rowsMs) && report.rowsMs >= 0, "the report says when the pass's last row ended, so a late finish can be told from slow rows");
 
 		const rows = lines.filter(line => line.message.startsWith("window timing: restore tab "));
 		assert.equal(rows.length, 2);
@@ -1014,6 +1015,42 @@ describe("restoreAll runs rows together", () => {
 		const line = lines.find(candidate => candidate.message.startsWith(`window timing: restore tab ${tabIds[0]} `));
 		assert.equal(line?.level, "info");
 		assert.match(line?.message ?? "", / · reconcile \d+ \(record \d+, state access \(shared\) \d+\) · attach \d+/);
+	});
+
+	it("asks its reconciler to keep the proof's connection for the rows of the startup pass only", async () => {
+		const startup = await restartedRows(1);
+		const asked: Array<boolean | undefined> = [];
+		const recording = (handles: ReadonlyMap<string, OmpHostHandle>): OwnerReconciler => {
+			const base = reconcilerFor(handles);
+			return {
+				async reconcile(request) {
+					asked.push(request.keepConnection);
+					return await base.reconcile(request);
+				},
+			};
+		};
+		const launcherOver = (handles: ReadonlyMap<string, OmpHostHandle>): OmpHostLauncher => ({
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				return { state: "attached", host: handles.get(request.sessionFile ?? "") as OmpHostHandle };
+			},
+		});
+
+		await new SessionIndex({ store: startup.store, claimStorageDir: startup.claimDir }).restoreAll({
+			reconciler: recording(startup.handles),
+			launcher: launcherOver(startup.handles),
+		});
+		assert.deepEqual(asked, [true], "the startup pass attaches what its reconcile proves, so it asks for the connection to be kept");
+
+		asked.length = 0;
+		const explicit = await restartedRows(1);
+		await new SessionIndex({ store: explicit.store, claimStorageDir: explicit.claimDir }).restore(explicit.tabIds[0] as string, {
+			reconciler: recording(explicit.handles),
+			launcher: launcherOver(explicit.handles),
+		});
+		assert.deepEqual(asked, [undefined], "an Open or Resume admission closes its connection");
 	});
 
 	/** A restored row whose host is attachable again, one row, over a store the test can hold up or fail. */

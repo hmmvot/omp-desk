@@ -33,6 +33,8 @@ import type { PtyBrokerClient as PtyBrokerClientType } from "./pty-client.ts";
 import type { attachNativeHost as attachNativeHostType } from "./native-session.ts";
 import type { attachRpcHost as attachRpcHostType } from "./rpc-launch.ts";
 import type { probeRpcHost as probeRpcHostType } from "./rpc-reconcile.ts";
+import type { ParkedRpcConnections as ParkedRpcConnectionsType } from "./rpc-parked.ts";
+import type { RpcHandle } from "./rpc-handle.ts";
 import type { BrokerPin } from "./rpc-reconcile.ts";
 
 const VSCODE_STUB = `
@@ -46,6 +48,7 @@ interface Modules {
 	readonly attachRpcHost: typeof attachRpcHostType;
 	readonly attachNativeHost: typeof attachNativeHostType;
 	readonly probeRpcHost: typeof probeRpcHostType;
+	readonly ParkedRpcConnections: typeof ParkedRpcConnectionsType;
 	readonly ptyPackagedTreeDigest: (extensionRoot: string) => Promise<string>;
 }
 
@@ -77,6 +80,7 @@ before(async () => {
 				'export { attachRpcHost } from "./rpc-launch.ts";',
 				'export { attachNativeHost } from "./native-session.ts";',
 				'export { probeRpcHost } from "./rpc-reconcile.ts";',
+				'export { ParkedRpcConnections } from "./rpc-parked.ts";',
 				'export { ptyPackagedTreeDigest } from "./pty-runtime.ts";',
 			].join("\n"),
 			resolveDir: here,
@@ -139,6 +143,10 @@ interface BrokerState {
 	state: "running" | "exited";
 	nativeCreationTime: string | null;
 	attestation: PtyIdentityAttestation | undefined;
+	/** Close the connection that asks the next `status` instead of answering it. */
+	dropNextStatus: boolean;
+	/** How many `status` requests the broker has answered or dropped. */
+	statusAsked: number;
 }
 
 interface Fixture {
@@ -151,6 +159,8 @@ interface Fixture {
 	/** What the kernel says about each pid. */
 	readonly kernel: Map<number, PtyIdentityReading>;
 	readonly storage: string;
+	/** Every authenticated connection the broker accepted, in order: its length is how many times a window dialled. */
+	readonly accepted: Array<{ close(reason?: string): void }>;
 	pin(overrides?: Partial<BrokerPin>): BrokerPin;
 }
 
@@ -179,6 +189,8 @@ async function fixture(options: {
 		state: "running",
 		nativeCreationTime: CHILD_CREATION,
 		attestation: options.attestation,
+		dropNextStatus: false,
+		statusAsked: 0,
 	};
 	const server = await startPtyBrokerServer({
 		token,
@@ -193,9 +205,17 @@ async function fixture(options: {
 		brokerCreationTime: options.brokerSays ?? BROKER_CREATION,
 	});
 	servers.push(server);
+	const accepted: Array<{ close(reason?: string): void }> = [];
 	server.onConnection(connection => {
+		accepted.push(connection);
 		connection.onFrame(frame => {
 			if (frame.t !== "status") return;
+			broker.statusAsked += 1;
+			if (broker.dropNextStatus) {
+				broker.dropNextStatus = false;
+				connection.close("the test broker dropped this connection instead of answering");
+				return;
+			}
 			const status: PtyStatusPayload = {
 				state: broker.state,
 				exitCode: null,
@@ -267,6 +287,7 @@ async function fixture(options: {
 		readings,
 		kernel,
 		storage,
+		accepted,
 		pin: (overrides = {}) => ({
 			kind: "broker",
 			slot,
@@ -332,6 +353,21 @@ describe("re-adopting a broker that attests its own identity", { skip: WINDOWS_O
 		assert.deepEqual(first, ["record", "tree digest", "state access", "connect", "status", "child identity", "broker confirm", "pin proof"]);
 		const second = await timed();
 		assert.deepEqual(second, ["record", "tree digest (shared)", "state access (shared)", "connect", "status", "child identity", "broker confirm", "pin proof"]);
+	});
+
+	it("notes where the dial and the status round trip spent their time, when the sink takes notes", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const expected = { slot: f.slot, brokerId: f.record.brokerId, brokerGeneration: f.record.generation, brokerPid: BROKER_PID, brokerCreationTime: BROKER_CREATION, childPid: CHILD_PID, childCreationTime: CHILD_CREATION };
+		const notes: string[] = [];
+		const steps = {
+			measure: async <T>(_name: string, work: () => Promise<T>): Promise<T> => await work(),
+			note: (name: string, ms: number): void => {
+				assert.ok(Number.isFinite(ms) && ms >= 0, `${name} is a non-negative figure, got ${ms}`);
+				notes.push(name);
+			},
+		};
+		assert.equal((await modules.probeRpcHost({ client: f.client, slot: f.slot, expected, steps })).kind, "attachable");
+		assert.deepEqual(notes, ["connect socket", "connect hello", "connect finish", "connect loop late", "status loop late"]);
 	});
 
 	it("refuses a child the broker reports as exited, without a reading to excuse it", async () => {
@@ -422,6 +458,198 @@ describe("re-adopting a broker that attests its own identity", { skip: WINDOWS_O
 				await closeServer(impostor);
 			}
 		});
+	});
+});
+
+describe("a connection the restore pass keeps from a reconcile for the attach that follows", { skip: WINDOWS_ONLY }, () => {
+	const identityOf = (f: Fixture) => ({
+		slot: f.slot,
+		brokerId: f.record.brokerId,
+		brokerGeneration: f.record.generation,
+		brokerPid: BROKER_PID,
+		brokerCreationTime: BROKER_CREATION,
+		childPid: CHILD_PID,
+		childCreationTime: CHILD_CREATION,
+	});
+
+	/** Attach a handle of its own to the fixture's broker and park it under the fixture's pin: a connection whose end the test can watch. */
+	async function parkOwnHandle(f: Fixture, parking: ParkedRpcConnectionsType): Promise<RpcHandle> {
+		const attached = await f.client.attachRpcRecord(f.record, { adopted: true });
+		assert.ok(attached.handle !== null, attached.reason);
+		assert.equal(parking.park(f.pin(), attached.handle), true);
+		return attached.handle;
+	}
+
+	/** Settles when the handle's connection has ended, whichever side ended it. */
+	function ended(handle: RpcHandle): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		if (handle.closed) resolve();
+		else handle.subscribe(event => { if (event.type === "closed") resolve(); });
+		return promise;
+	}
+
+	it("attaches over the reconcile's connection: one dial for the row, a new status asked, and nothing proved earlier is reused", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const probe = await modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking });
+		assert.equal(probe.kind, "attachable");
+		assert.equal(parking.size, 1, "the reconcile kept its connection instead of closing it");
+		assert.equal(f.accepted.length, 1);
+		const askedByTheReconcile = f.broker.statusAsked;
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.equal(f.accepted.length, 1, "the attach dialled nothing");
+		assert.equal(f.broker.statusAsked, askedByTheReconcile + 1, "the attach asked the broker for a status of its own");
+		assert.equal(outcome.timings?.connection, "kept");
+		assert.equal(parking.size, 0, "the attach claimed it");
+		assert.equal((await outcome.runtime?.handle.refreshStatus())?.state, "running", "the adopted handle is a live connection");
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("reads the kernel again for a broker that attests nothing, exactly as an attach over a new connection does", async () => {
+		const f = await fixture({});
+		const parking = new modules.ParkedRpcConnections();
+		assert.equal((await modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking })).kind, "attachable");
+		assert.deepEqual(pids(f.readings), pids([BROKER_PID, CHILD_PID]));
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.equal(outcome.timings?.connection, "kept");
+		assert.deepEqual(pids(f.readings), pids([BROKER_PID, CHILD_PID, BROKER_PID, CHILD_PID]), "the attach took its own readings of the pair");
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("dials its own connection when the kept one closed, and attaches over that", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const kept = await parkOwnHandle(f, parking);
+		const closing = ended(kept);
+		f.accepted[0]?.close("the broker closed the kept connection");
+		await closing;
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.equal(outcome.timings?.connection, "new");
+		assert.equal(f.accepted.length, 2, "the attach opened its own connection");
+		assert.equal(parking.size, 0);
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("dials its own connection when the kept one fails at the new status, and attaches over that", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		assert.equal((await modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking })).kind, "attachable");
+		f.broker.dropNextStatus = true;
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.equal(outcome.timings?.connection, "new");
+		assert.equal(f.accepted.length, 2);
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("dials its own connection when the record it was opened from changed, and closes the kept one", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const kept = await parkOwnHandle(f, parking);
+		assert.equal(parking.take(f.pin()), kept);
+		const changed = { ...f.record, startedAt: new Date(1).toISOString() };
+		const outcome = await f.client.attachRpcRecord(changed, { adopted: true, reuse: kept });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.notEqual(outcome.handle, kept, "the attach did not adopt a connection opened from another record");
+		assert.equal(kept.closed, true, "the kept connection was closed");
+		assert.equal(f.accepted.length, 2);
+		outcome.handle?.disconnect();
+	});
+
+	it("refuses a pin that differs from the one the connection was kept under, and closes the connection", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const kept = await parkOwnHandle(f, parking);
+		const outcome = await modules.attachRpcHost({ pin: f.pin({ nativeCreationTime: OTHER_CREATION }), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "unavailable");
+		assert.match(outcome.reason, /changed since ownership was verified/, "the fresh attach decided on the pin, as it always did");
+		assert.equal(kept.closed, true);
+		assert.equal(f.accepted.length, 2, "nothing was adopted over the kept connection");
+		assert.equal(parking.size, 0);
+	});
+
+	it("closes a kept connection that no attach claimed once its time is up", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		// The store's own time limit is a real timer by design; a short limit keeps the test short without guessing a wait:
+		// the handle's `closed` event is what is awaited.
+		const parking = new modules.ParkedRpcConnections({ ttlMs: 20 });
+		const kept = await parkOwnHandle(f, parking);
+		await ended(kept);
+		assert.equal(parking.size, 0);
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.equal(outcome.timings?.connection, "new");
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("closes every unclaimed connection when the pass ends, and keeps none a late reconcile offers", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const kept = await parkOwnHandle(f, parking);
+		assert.equal(parking.release(), 1);
+		assert.equal(kept.closed, true);
+		const late = await modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking });
+		assert.equal(late.kind, "attachable", "the verdict stands");
+		assert.equal(parking.size, 0, "a pass that ended keeps nothing");
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client, parking });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.equal(outcome.timings?.connection, "new");
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("keeps nothing for a reconcile that was not given a store, and for one whose verdict is not attachable", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		assert.equal((await modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f) })).kind, "attachable");
+		assert.equal(parking.size, 0);
+		const changed = { ...identityOf(f), childCreationTime: OTHER_CREATION };
+		assert.equal((await modules.probeRpcHost({ client: f.client, slot: f.slot, expected: changed, parking })).kind, "mismatch");
+		assert.equal(parking.size, 0, "a verdict that does not lead to an attach keeps no connection");
+	});
+
+	it("shares one proof and one kept connection between concurrent reconciles of a slot", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const [a, b] = await Promise.all([
+			modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking }),
+			modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking }),
+		]);
+		assert.equal(a.kind, "attachable");
+		assert.equal(b.kind, "attachable");
+		assert.equal(f.accepted.length, 1, "the second reconcile joined the first one's flight");
+		assert.equal(parking.size, 1);
+		parking.release();
+	});
+
+	it("serves a reconcile that wants its connection kept from a flight that keeps it, never from one that closes its own", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const [plain, keeping] = await Promise.all([
+			modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f) }),
+			modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking }),
+		]);
+		assert.equal(plain.kind, "attachable");
+		assert.equal(keeping.kind, "attachable");
+		assert.equal(f.accepted.length, 2, "the reconcile that asked for its connection to be kept did not join the one that closes its own");
+		assert.equal(parking.size, 1, "and got its connection kept");
+		parking.release();
+	});
+
+	it("lets a reconcile without a store join a flight that keeps its connection", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const parking = new modules.ParkedRpcConnections();
+		const [keeping, plain] = await Promise.all([
+			modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f), parking }),
+			modules.probeRpcHost({ client: f.client, slot: f.slot, expected: identityOf(f) }),
+		]);
+		assert.equal(keeping.kind, "attachable");
+		assert.equal(plain.kind, "attachable");
+		assert.equal(f.accepted.length, 1, "one proof served both");
+		assert.equal(parking.size, 1);
+		parking.release();
 	});
 });
 

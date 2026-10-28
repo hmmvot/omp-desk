@@ -296,6 +296,28 @@ describe("handshake", () => {
 		}
 	});
 
+	it("reports where the dial spent its time: the socket callback, the broker's answer, the rest, and how late the loop ran a timer", async () => {
+		const harness = await start();
+		const connection = await connectPtyBroker({
+			token: harness.token,
+			brokerId: IDENTITY.brokerId,
+			generation: harness.generation,
+			port: harness.server.port,
+		});
+		try {
+			const timings = connection.connectTimings;
+			assert.ok(timings !== undefined, "a connection the client dialled carries its timings");
+			for (const [name, value] of Object.entries(timings)) {
+				assert.ok(Number.isFinite(value) && value >= 0, `${name} is a non-negative number of milliseconds, got ${value}`);
+			}
+			assert.deepEqual(Object.keys(timings).sort(), ["finishMs", "helloMs", "loopLateMs", "socketMs"]);
+			const accepted = await harness.nextConnection();
+			assert.equal("connectTimings" in accepted, false, "the broker's side measures nothing");
+		} finally {
+			connection.close();
+		}
+	});
+
 	it("refuses a peer that does not hold the token, and one that names another generation", async () => {
 		const harness = await start();
 		const wrongToken = createPtyToken();

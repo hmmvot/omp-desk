@@ -63,7 +63,7 @@ import {
 import { BrokerHandle, type BrokerHandleEvent, type SnapshotCollector } from "./broker-handle.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, type PtyIdentityReading } from "./pty-identity.ts";
 import { proveBunRuntime } from "./pty-bun-proof.ts";
-import { connectPtyBroker, type PtyClientSideConnection } from "./pty-ipc.ts";
+import { connectPtyBroker, type PtyClientSideConnection, type PtyConnectTimings } from "./pty-ipc.ts";
 import {
 	acquirePtySlotLock,
 	ensurePtyStateAccess,
@@ -107,6 +107,7 @@ import {
 import { verifyExecutableTrust, type ExecutableTrustProbe } from "./executable-trust.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import { timedStep, type StepSink } from "./session-restore-trace.ts";
+import { startLoopLagGauge } from "./loop-gauge.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
 
@@ -169,6 +170,29 @@ const DEFAULT_START_TIMEOUT_MS = 30_000;
 
 /** How long an rpc attach waits for the broker to report the child's kernel creation time. */
 const CHILD_IDENTITY_WAIT_MS = 5_000;
+
+/**
+ * How long the first `status` over a kept connection may take before the attach gives up on it and dials its own. It answers
+ * in milliseconds on a healthy broker; the bound only keeps a silent one from costing the whole request bound twice.
+ */
+const KEPT_CONNECTION_STATUS_TIMEOUT_MS = 5_000;
+
+/** Add where one dial spent its time to the restore line: the socket callback, the broker's answer, the rest, and how late this thread's loop ran a timer meanwhile. */
+function noteConnectTimings(steps: StepSink | undefined, timings: PtyConnectTimings | undefined): void {
+	if (steps?.note === undefined || timings === undefined) return;
+	steps.note("connect socket", timings.socketMs);
+	steps.note("connect hello", timings.helloMs);
+	steps.note("connect finish", timings.finishMs);
+	steps.note("connect loop late", timings.loopLateMs);
+}
+
+/** {@link timedStep} for one request/answer round trip, with how late this thread's loop ran a timer meanwhile when the sink takes notes. */
+function timedRoundTrip<T>(steps: StepSink | undefined, name: string, work: () => Promise<T>): Promise<T> {
+	if (steps?.note === undefined) return timedStep(steps, name, work);
+	const gauge = startLoopLagGauge();
+	const note = steps.note.bind(steps);
+	return steps.measure(name, work).finally(() => note(`${name} loop late`, gauge.stop()));
+}
 
 /** Bounded retries while a just-started broker finishes reading its own child's identity. */
 const ATTACH_ATTEMPTS = 12;
@@ -275,6 +299,17 @@ export interface AttachConcurrency<Handle> {
 	readonly whileConfirming?: (handle: Handle) => void;
 	/** Where the pieces of this attach are timed for the restore line; diagnostic only. */
 	readonly steps?: StepSink;
+}
+
+/** A connection an earlier step kept open; the attach that takes it closes it unless it attaches over it. */
+export interface ReusableConnection {
+	disconnect(): void;
+}
+
+/** What a `managed-rpc` attach takes besides the concurrency hook: a kept connection to try before dialling. */
+export interface RpcAttachOptions extends AttachConcurrency<RpcHandle> {
+	/** The connection the startup restore pass kept from this slot's reconcile; see {@link PtyBrokerClient.attachRpcRecord}. */
+	readonly reuse?: ReusableConnection;
 }
 
 export interface PtyAttachResult {
@@ -572,13 +607,22 @@ export class PtyBrokerClient {
 	 * kernel identity, the handshake), then an {@link RpcHandle}. A record of another kind is
 	 * `unavailable`: its frames are not the ones an rpc child is spoken to with.
 	 */
-	async attachRpc(slot: string, options: AttachConcurrency<RpcHandle> = {}): Promise<RpcAttachOutcome> {
+	async attachRpc(slot: string, options: RpcAttachOptions = {}): Promise<RpcAttachOutcome> {
 		const lookup = await readPtyRecord(this.options.storageDir, slot);
-		if (lookup.kind === "none") return { state: "unavailable", reason: "no broker is recorded for this slot", handle: null };
+		if (lookup.kind === "none") {
+			options.reuse?.disconnect();
+			return { state: "unavailable", reason: "no broker is recorded for this slot", handle: null };
+		}
 		if (lookup.kind === "invalid") {
+			options.reuse?.disconnect();
 			return { state: "unavailable", reason: `the broker record could not be read: ${lookup.detail}`, handle: null };
 		}
-		return await this.attachRpcRecord(lookup.record, { adopted: true, whileConfirming: options.whileConfirming });
+		return await this.attachRpcRecord(lookup.record, {
+			adopted: true,
+			whileConfirming: options.whileConfirming,
+			...(options.steps === undefined ? {} : { steps: options.steps }),
+			...(options.reuse === undefined ? {} : { reuse: options.reuse }),
+		});
 	}
 
 	/** Attach to one known terminal record. See {@link attach} for the rules. */
@@ -594,7 +638,7 @@ export class PtyBrokerClient {
 		const handle = new PtyHandle(opened.connection, record, options.adopted === true, opened.buildMatches);
 		let identity: BrokerIdentityProof;
 		try {
-			await timedStep(options.steps, "status", () => handle.refreshStatus());
+			await timedRoundTrip(options.steps, "status", () => handle.refreshStatus());
 			options.whileConfirming?.(handle);
 			const confirmed = await timedStep(options.steps, "broker confirm", () => this.confirmBrokerIdentity(record, handle.statusValue));
 			if (!confirmed.ok) {
@@ -631,13 +675,38 @@ export class PtyBrokerClient {
 		};
 	}
 
-	/** Attach to one known `managed-rpc` record. See {@link attachRpc}. */
-	async attachRpcRecord(record: PtyBrokerRecord, options: { readonly adopted?: boolean } & AttachConcurrency<RpcHandle> = {}): Promise<RpcAttachOutcome> {
+	/**
+	 * Attach to one known `managed-rpc` record. See {@link attachRpc}.
+	 *
+	 * With `reuse` (the startup restore pass only) the attach first tries the authenticated connection a reconcile of this very
+	 * record kept, instead of dialling again. It is taken only while it is still open and the record read now is, field by
+	 * field, the record it was opened from; it then runs everything a fresh attach runs after its handshake (a new `status`,
+	 * the child identity wait, the broker's identity confirmation, and the caller's own hook). Anything else, whether the socket
+	 * closed, the record changed or any step failed, closes it and falls through to the attach below that opens its own
+	 * connection and alone decides the outcome.
+	 */
+	async attachRpcRecord(record: PtyBrokerRecord, options: { readonly adopted?: boolean } & RpcAttachOptions = {}): Promise<RpcAttachOutcome> {
 		if (record.kind !== "managed-rpc") {
+			options.reuse?.disconnect();
 			return { state: "unavailable", reason: "the record is not a managed-rpc slot", handle: null };
+		}
+		if (options.reuse !== undefined) {
+			const kept = await this.attachKeptRpc(options.reuse, record, options);
+			if (kept !== null) return kept;
 		}
 		const opened = await this.connectRecord(record, options.steps);
 		if (!opened.ok) return { state: "unavailable", reason: opened.reason, handle: null };
+		const handle = this.newRpcHandle(opened.connection, record, options, opened.buildMatches);
+		return await this.completeRpcAttach(handle, record, options);
+	}
+
+	/** The handle of one `managed-rpc` record over `connection`, with the reconnect that re-proves the same broker. */
+	private newRpcHandle(
+		connection: PtyClientSideConnection,
+		record: PtyBrokerRecord,
+		options: { readonly adopted?: boolean },
+		buildMatches: boolean,
+	): RpcHandle {
 		const reconnect = async (): Promise<PtyClientSideConnection> => {
 			const again = await this.connectRecord(record);
 			if (!again.ok) throw new Error(again.reason);
@@ -652,10 +721,23 @@ export class PtyBrokerClient {
 			}
 			return again.connection;
 		};
-		const handle = new RpcHandle(opened.connection, record, options.adopted === true, opened.buildMatches, reconnect);
+		const handle = new RpcHandle(connection, record, options.adopted === true, buildMatches, reconnect);
+		return handle;
+	}
+
+	/**
+	 * What an attach asks of an authenticated connection before it hands out the handle: a status answered now, the child's
+	 * identity, the caller's hook and the broker's identity confirmation. A failure closes the handle.
+	 */
+	private async completeRpcAttach(
+		handle: RpcHandle,
+		record: PtyBrokerRecord,
+		options: AttachConcurrency<RpcHandle>,
+		statusTimeoutMs?: number,
+	): Promise<RpcAttachOutcome> {
 		let identity: BrokerIdentityProof;
 		try {
-			await timedStep(options.steps, "status", () => handle.refreshStatus());
+			await timedRoundTrip(options.steps, "status", () => handle.refreshStatus(statusTimeoutMs));
 			await timedStep(options.steps, "child identity", () => handle.awaitChildIdentity(CHILD_IDENTITY_WAIT_MS));
 			options.whileConfirming?.(handle);
 			const confirmed = await timedStep(options.steps, "broker confirm", () => this.confirmBrokerIdentity(record, handle.statusValue));
@@ -670,10 +752,29 @@ export class PtyBrokerClient {
 		}
 		return {
 			state: "attached",
-			reason: opened.buildMatches ? "attached" : "attached to a broker running another build's runtime",
+			reason: handle.buildMatches ? "attached" : "attached to a broker running another build's runtime",
 			handle,
 			identity,
 		};
+	}
+
+	/** The attach over a connection a reconcile kept, or `null` (the connection is closed) when the caller must dial its own. */
+	private async attachKeptRpc(kept: ReusableConnection, record: PtyBrokerRecord, options: AttachConcurrency<RpcHandle>): Promise<RpcAttachOutcome | null> {
+		// The record is written once and parsed into one fixed key order, so equal text is an equal record, token and port included.
+		if (!(kept instanceof RpcHandle) || kept.closed || JSON.stringify(kept.record) !== JSON.stringify(record)) {
+			kept.disconnect();
+			return null;
+		}
+		// The gates every attach of this client passes before it dials are shared and settled; they are asked again so a
+		// withdrawn one refuses a kept connection exactly as it refuses a new one.
+		const identity = await this.attachIdentity();
+		const access = await this.stateAccess();
+		if (!identity.ready || identity.treeDigest === null || record.runtimeVersion !== identity.runtimeVersion || !access.ok) {
+			kept.disconnect();
+			return null;
+		}
+		const outcome = await this.completeRpcAttach(kept, record, options, KEPT_CONNECTION_STATUS_TIMEOUT_MS);
+		return outcome.state === "attached" ? outcome : null;
 	}
 
 	/**
@@ -742,6 +843,7 @@ export class PtyBrokerClient {
 		} catch (error) {
 			return { ok: false, reason: messageOf(error) };
 		}
+		noteConnectTimings(steps, connection.connectTimings);
 		if (
 			connection.hello.slot !== record.slot ||
 			connection.hello.brokerPid !== record.brokerPid ||
