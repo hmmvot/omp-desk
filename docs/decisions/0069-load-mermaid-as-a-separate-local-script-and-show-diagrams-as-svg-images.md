@@ -49,6 +49,10 @@ Constraints: the guest document allows scripts only from its nonce and the exten
 - [ADR-0028](0028-stamp-document-nonce-on-renderer-created-styles.md), [ADR-0041](0041-allow-terminal-style-attributes-under-nonce-stylesheets.md): the nonce-stamped style and style-attribute rules this relies on.
 - [ADR-0067](0067-highlight-chat-code-with-highlightjs-and-host-resolved-theme-rules.md): the code block used for the source view and the fallback.
 
+## Amendment 2026-10-28: the loader is shared by the terminal renderer
+
+The loading rules of this ADR (script URL from the folder of the page's own script, the document's nonce, no change to the document policy or `localResourceRoots`, a failed element removed so a later call retries) now live in `src/webview/lib/sibling-script.ts` and also load `media/terminal.js` (xterm.js) on the first terminal of a page, see [ADR-0085](0085-load-the-terminal-renderer-and-rarely-used-host-code-from-files-of-their-own.md). Nothing in this ADR changes for diagrams.
+
 ## Architecture Review
 
 - Reviewer: architect

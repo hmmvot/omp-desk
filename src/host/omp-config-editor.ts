@@ -1,9 +1,8 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "./runtime-assets";
 import type { StagedRuntimeAsset } from "./runtime-assets";
-import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
+import type { OmpRuntimeServices } from "./omp-runtime-services";
 import { checkSettingsRuntime } from "./settings-runtime";
 import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
@@ -13,11 +12,11 @@ import { chooseSetting } from "./settings-pickers";
 import { onDiskFolder, scopePickerFolders } from "./folder-display.ts";
 import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { SettingsRefusal } from "./omp-settings-core";
-import { OmpUnavailableError } from "../shared/omp-unavailable";
 import { isRecord as record } from "../shared/guards";
 import type { ConfigMessage } from "../protocol/omp-config-model";
 import type { ConfigRecord } from "../protocol/settings-model";
 import type { PickEntry } from "../protocol/settings-pick-items";
+import { OMP_CONFIG_EDITOR_VIEW_TYPE } from "./settings-editor-ids";
 
 /** The profile and folder an editor shows; `folder` is null for the global scope (no project layer). */
 export interface OmpConfigBinding { readonly folder: string | null; readonly profile: string; readonly executable?: OmpCommand }
@@ -35,7 +34,7 @@ interface Editor {
   runtime?: { bun: string; packageRoot: string; asset: StagedRuntimeAsset };
   readonly abort: AbortController; disposed: boolean; readonly pending: Set<Promise<void>>;
 }
-const VIEW_TYPE = "ompDesk.ompSettings";
+const VIEW_TYPE = OMP_CONFIG_EDITOR_VIEW_TYPE;
 const STORED_CONTEXTS = "ompDesk.ompSettings.contexts";
 /** The key compares a folder by its identity (case-folded on Windows); `binding.folder` is the display spelling. */
 const editorKey = (binding: OmpConfigBinding): string =>
@@ -48,24 +47,20 @@ const editorKey = (binding: OmpConfigBinding): string =>
  */
 export class OmpConfigEditors implements vscode.Disposable {
   readonly #editors = new Map<string, Editor>();
-  readonly #disposables: vscode.Disposable[] = [];
-  constructor(readonly context: vscode.ExtensionContext, readonly host: OmpConfigEditorHost) {
-    this.#disposables.push(
-      vscode.commands.registerCommand("ompDesk.openOmpSettings", async () => {
-        try { await this.open({ folder: await host.defaultFolder(), profile: host.defaultProfile() }); }
-        catch (error) {
-          if (!(error instanceof SettingsRefusal)) throw error;
-          void vscode.window.showErrorMessage(error.message);
-        }
-      }),
-      vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
-        deserializeWebviewPanel: async (panel, raw: unknown) => {
-          const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
-          if (!stored) { panel.dispose(); return; }
-          this.#attach(panel, stored.key, { folder: stored.cwd, profile: stored.profile });
-        },
-      }),
-    );
+  constructor(readonly context: vscode.ExtensionContext, readonly host: OmpConfigEditorHost, readonly services: OmpRuntimeServices) {}
+  /** `ompDesk.openOmpSettings`: a refusal to open (no Bun, no source) is shown as the error it is, with its reason. */
+  async openFromCommand(): Promise<void> {
+    try { await this.open({ folder: await this.host.defaultFolder(), profile: this.host.defaultProfile() }); }
+    catch (error) {
+      if (!(error instanceof SettingsRefusal)) throw error;
+      void vscode.window.showErrorMessage(error.message);
+    }
+  }
+  /** Revive a panel VS Code restored after a reload from what `raw` names; a panel with no stored context is closed. */
+  deserialize(panel: vscode.WebviewPanel, raw: unknown): void {
+    const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
+    if (!stored) { panel.dispose(); return; }
+    this.#attach(panel, stored.key, { folder: stored.cwd, profile: stored.profile });
   }
   async open(requested: OmpConfigBinding): Promise<void> {
     const binding: OmpConfigBinding = requested.folder === null ? requested : { ...requested, folder: await onDiskFolder(requested.folder) };
@@ -125,8 +120,8 @@ export class OmpConfigEditors implements vscode.Disposable {
   /** Bun and the selected OMP's package source, or a refusal that says which of them is missing and why. */
   async #environment(binding: OmpConfigBinding): Promise<{ bun: string; root: string }> {
     // A configured path that cannot be used is a reason to tell, like a missing Bun, not an error to throw out of a command.
-    const executable = binding.executable ?? await resolveOmpBinary().catch((error: unknown) => { throw error instanceof OmpUnavailableError ? new SettingsRefusal(error.message) : error; });
-    const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
+    const executable = binding.executable ?? await this.services.resolveOmpBinary().catch((error: unknown) => { throw this.services.isOmpUnavailable(error) ? new SettingsRefusal(error.message) : error; });
+    const [bun, root] = await Promise.all([this.services.resolveBunRuntime(), this.services.resolveOmpPackageRoot(executable)]);
     const found = checkSettingsRuntime({ surface: "The OMP Settings editor", instead: "Run /settings in this session's Terminal view instead.", executable, bun, root });
     if (!found.ok) throw new SettingsRefusal(found.message);
     return { bun: found.bun, root: found.root.root };
@@ -134,7 +129,7 @@ export class OmpConfigEditors implements vscode.Disposable {
   async #runtime(editor: Editor): Promise<NonNullable<Editor["runtime"]>> {
     if (editor.runtime) return editor.runtime;
     const { bun, root } = await this.#environment(editor.binding);
-    const [asset] = await stageRuntimeAssets({ storageDir: this.context.globalStorageUri.fsPath, sourcePaths: [vscode.Uri.joinPath(this.context.extensionUri, "out", "config-settings-worker.mjs").fsPath] });
+    const [asset] = await this.services.stageRuntimeAssets({ storageDir: this.context.globalStorageUri.fsPath, sourcePaths: [vscode.Uri.joinPath(this.context.extensionUri, "out", "config-settings-worker.mjs").fsPath] });
     if (!asset) throw new SettingsRefusal("The settings worker is missing from this extension build.");
     const runtime = { bun, packageRoot: root, asset };
     editor.runtime = runtime;
@@ -142,7 +137,7 @@ export class OmpConfigEditors implements vscode.Disposable {
   }
   async #worker(editor: Editor, request: ConfigRecord): Promise<unknown> {
     const runtime = await this.#runtime(editor);
-    if (!await verifyStagedRuntimeAsset(runtime.asset)) throw new SettingsRefusal("The settings worker's staged bytes changed. Reopen the editor.");
+    if (!await this.services.verifyStagedRuntimeAsset(runtime.asset)) throw new SettingsRefusal("The settings worker's staged bytes changed. Reopen the editor.");
     return runSettingsWorker({
       bunPath: runtime.bun, helperPath: runtime.asset.path, packageRoot: runtime.packageRoot,
       cwd: this.#cwd(editor.binding), profile: editor.binding.profile, signal: editor.abort.signal, request,
@@ -183,5 +178,5 @@ export class OmpConfigEditors implements vscode.Disposable {
     this.#title(editor);
     return { folder };
   }
-  dispose(): void { for (const editor of this.#editors.values()) editor.panel.dispose(); for (const item of this.#disposables) item.dispose(); }
+  dispose(): void { for (const editor of this.#editors.values()) editor.panel.dispose(); }
 }

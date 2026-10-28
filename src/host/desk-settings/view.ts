@@ -2,16 +2,13 @@ import { isRecord } from "../../shared/guards.ts";
 import { randomBytes } from "node:crypto";
 import type { Logger } from "../../shared/logger.ts";
 import * as vscode from "vscode";
-import { resolveOmpBinary } from "../native-terminal";
+import type { OmpRuntimeServices } from "../omp-runtime-services";
 import { DeskSettingsController } from "./controller.ts";
 import { projectConfiguration } from "../../protocol/desk-settings.ts";
 import type { DeskSettingsPort } from "./controller.ts";
 import type { ConfigLayers, JsonValue, Target, WorkspaceFacts } from "../../protocol/desk-settings.ts";
 
-/** The side-bar view that lists this extension's settings. Declared in package.json `contributes.views`. */
-export const DESK_SETTINGS_VIEW_ID = "ompDesk.deskSettings";
-
-function bind(): DeskSettingsPort {
+function bind(resolveOmpBinary: OmpRuntimeServices["resolveOmpBinary"]): DeskSettingsPort {
 	const root = () => vscode.workspace.getConfiguration();
 	return {
 		inspect(key): ConfigLayers {
@@ -111,18 +108,20 @@ class DeskSettingsViewProvider implements vscode.WebviewViewProvider {
 }
 
 /**
- * Register the Settings view. The list of settings is `contributes.configuration` of this
- * extension's own manifest, read at runtime, so a setting added to package.json appears with no
- * other change. Values are read live from VS Code's configuration while the view shows.
+ * Build the Settings view's provider and the listeners that keep it current. The list of settings is `contributes.configuration` of
+ * this extension's own manifest, read at runtime, so a setting added to package.json appears with no other change. Values are read
+ * live from VS Code's configuration while the view shows.
+ *
+ * The caller registers the provider for the view (`../../wiring/desk-settings-view.ts`, which loads this module when VS Code first
+ * resolves the view): nothing here is needed before then, because a view that was never shown reads nothing.
  */
-export function registerDeskSettingsView(context: vscode.ExtensionContext, deps: { readonly log: Logger }): vscode.Disposable {
+export function createDeskSettingsView(context: vscode.ExtensionContext, deps: { readonly log: Logger; readonly resolveOmpBinary: OmpRuntimeServices["resolveOmpBinary"] }): vscode.WebviewViewProvider {
 	const manifest: unknown = context.extension.packageJSON;
 	const contributes = isRecord(manifest) ? manifest.contributes : undefined;
 	const descriptors = projectConfiguration(isRecord(contributes) ? contributes.configuration : undefined);
-	const controller = new DeskSettingsController(descriptors, bind(), deps.log);
+	const controller = new DeskSettingsController(descriptors, bind(deps.resolveOmpBinary), deps.log);
 	const provider = new DeskSettingsViewProvider(context.extensionUri, controller);
-	const disposable = vscode.Disposable.from(
-		vscode.window.registerWebviewViewProvider(DESK_SETTINGS_VIEW_ID, provider),
+	context.subscriptions.push(
 		// An edit of settings.json, the Settings editor, another window's write and this view's own writes all arrive here.
 		vscode.workspace.onDidChangeConfiguration(event => {
 			if (descriptors.some(descriptor => event.affectsConfiguration(descriptor.key))) provider.push();
@@ -130,6 +129,5 @@ export function registerDeskSettingsView(context: vscode.ExtensionContext, deps:
 		// Whether a workspace layer exists, and which folders hold values, depend on the open folders.
 		vscode.workspace.onDidChangeWorkspaceFolders(() => provider.push()),
 	);
-	context.subscriptions.push(disposable);
-	return disposable;
+	return provider;
 }

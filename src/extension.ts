@@ -30,10 +30,8 @@ import {
   terminalWriterForHandle,
 } from "./host/native-terminal";
 import { configuredChatBrokerRuntime, configuredOmpPath, findTerminalForPid, openProviderLoginTerminal } from "./host/omp-vscode";
-import { runProviderLogin, runProviderLogout } from "./host/provider-login-flow";
 import type { LoginFlowDeps } from "./host/provider-login-flow";
-import { startLoginSession } from "./host/provider-login-rpc";
-import { createLoginUi } from "./wiring/provider-login-ui";
+import { rareSubsystems, type RareSubsystems } from "./wiring/rare-subsystems-loader";
 import { runOmpCli, type OmpCliResult } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS, UsageFailureNotes } from "./host/provider-usage";
 import { HelperScheduler, isHelperCancelled } from "./host/helper-scheduler";
@@ -213,7 +211,7 @@ import { registerBridgeHost } from "./wiring/bridge-host";
 import type { BridgeHost, BridgeHostDeps } from "./wiring/bridge-host";
 import { EDITOR_TAB_ICON, UPDATED_ON_DISK_DETAIL, registerEditorPanels } from "./wiring/editor-panels";
 import type { EditorPanels, EditorPanelsDeps, PanelDocument } from "./wiring/editor-panels";
-import { registerDeskSettingsView } from "./host/desk-settings/view";
+import { registerDeskSettingsView } from "./wiring/desk-settings-view";
 import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
@@ -337,9 +335,8 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { announceUpdaterTerminations, updaterNoticeFiles } from "./wiring/updater-notice";
 import type { SessionProcesses } from "./wiring/process-wiring";
-import { SettingsEditors } from "./host/omp-settings-editor";
+import { registerSettingsEditors } from "./wiring/settings-editors";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
-import { OmpConfigEditors } from "./host/omp-config-editor";
 import { SETTINGS_APPLY_NOT_LIVE } from "./host/omp-settings-apply";
 // The folder-shell owner hint and the broker's own answer about it (ADR-0030): the
 // extension can only *discover* the candidate owning instance, and it may only report
@@ -1955,33 +1952,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const { folder, profile, executable } = await settingsBinding(tabId);
     return { folder, profile, ...(executable ? { executable } : {}) };
   };
-  // Settings open in the global scope; the editor's scope control reaches a project folder.
-  const settingsEditors = new SettingsEditors(context, {
-    defaultProfile: () => {
-      const active = index.activeTabId === null ? null : index.get(index.activeTabId);
-      return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
-    },
-    folders: () => folders.list().map(folder => folder.path),
-    signIn: request => signInProvider(index, request),
-  });
-  context.subscriptions.push(settingsEditors);
-  // The full OMP settings editor (ADR-0071): `/settings` in Chat, the palette command and the Sessions title menu. It opens on the
+  // The Models, Agents and OMP Settings editors register their commands and panel serializers now and load their code with the
+  // first use (ADR-0085). Models and Agents open in the global scope; the editor's scope control reaches a project folder. The full
+  // OMP settings editor (ADR-0071): `/settings` in Chat, the palette command and the Sessions title menu. It opens on the
   // active session's folder (else the first workspace folder), so the project layer is one click away from the global one.
-  const ompConfigEditors = new OmpConfigEditors(context, {
-    defaultProfile: () => {
-      const active = index.activeTabId === null ? null : index.get(index.activeTabId);
-      return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
+  const settingsEditors = registerSettingsEditors(context, {
+    log,
+    settings: {
+      defaultProfile: () => {
+        const active = index.activeTabId === null ? null : index.get(index.activeTabId);
+        return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
+      },
+      folders: () => folders.list().map(folder => folder.path),
+      signIn: request => signInProvider(index, request),
     },
-    defaultFolder: async () => {
-      // A session's own folder is the one it runs in; an opened workspace folder is resolved by the same rule as Sessions (ADR-0073).
-      const active = index.activeTabId === null ? null : index.get(index.activeTabId)?.cwd ?? null;
-      if (active !== null) return active;
-      const opened = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
-      return opened === null ? null : editorProjectFolder(opened);
+    config: {
+      defaultProfile: () => {
+        const active = index.activeTabId === null ? null : index.get(index.activeTabId);
+        return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
+      },
+      defaultFolder: async () => {
+        // A session's own folder is the one it runs in; an opened workspace folder is resolved by the same rule as Sessions (ADR-0073).
+        const active = index.activeTabId === null ? null : index.get(index.activeTabId)?.cwd ?? null;
+        if (active !== null) return active;
+        const opened = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+        return opened === null ? null : editorProjectFolder(opened);
+      },
+      folders: () => folders.list().map(folder => folder.path),
     },
-    folders: () => folders.list().map(folder => folder.path),
   });
-  context.subscriptions.push(ompConfigEditors);
   // Desk's host tools (ADR-0055): the debugger tools are registered for every Chat session while ompDesk.agentDebugger.enabled is on.
   const agentDebugger = activateAgentDebugger(context, { log });
   // The candidate colour themes of Chat's fenced code; registered with the context, re-sent to pages when they change.
@@ -2007,16 +2006,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case "new-session": return newSessionInPlace(context, index, tabId);
         case "delete-session": return deleteSessionInPlace(context, index, tabId);
         case "fork-session": return forkSession(context, index, tabId);
-        case "omp-settings": await ompConfigEditors.open(await ompConfigBinding(tabId)); return;
+        case "omp-settings": await settingsEditors.openConfig(await ompConfigBinding(tabId)); return;
         default: return runDeskSlashAction(action);
       }
     },
     // Models from a Chat shows that Chat's folder so its default can be applied to the session;
     // agent settings are global, so Agents opens in the global scope for the Chat's profile.
     openSettings: async (kind, tabId) => {
-      if (kind === "omp") { await ompConfigEditors.open(await ompConfigBinding(tabId)); return; }
+      if (kind === "omp") { await settingsEditors.openConfig(await ompConfigBinding(tabId)); return; }
       const binding = await settingsBinding(tabId);
-      await settingsEditors.open(kind, kind === "agents" ? { folder: null, profile: binding.profile, ...(binding.executable ? { executable: binding.executable } : {}) } : binding);
+      await settingsEditors.openSettings(kind, kind === "agents" ? { folder: null, profile: binding.profile, ...(binding.executable ? { executable: binding.executable } : {}) } : binding);
     },
     // The terminal UI clears a fully closed TODO list after OMP's `tasks.todoClearDelay`; Chat reads the same setting, as OMP's CLI reports it for this tab's profile and folder.
     readTodoClearDelay: async (tabId, cwd) => {
@@ -7874,6 +7873,22 @@ interface ProviderAuthScope {
   readonly cwd: string;
 }
 
+/** The modules of one provider login or logout flow, loaded together with the first flow. */
+interface ProviderLoginModules {
+  readonly flow: RareSubsystems["providerLoginFlow"];
+  readonly rpc: RareSubsystems["providerLoginRpc"];
+  readonly ui: RareSubsystems["providerLoginUi"];
+}
+
+/**
+ * Provider login and logout start from a command or a picker row and nowhere else, so their modules are read from
+ * `out/rare-subsystems.js` with the first flow and not at activation (ADR-0085).
+ */
+async function providerLoginModules(): Promise<ProviderLoginModules> {
+  const { providerLoginFlow, providerLoginRpc, providerLoginUi } = await rareSubsystems();
+  return { flow: providerLoginFlow, rpc: providerLoginRpc, ui: providerLoginUi };
+}
+
 
 /**
  * Run one provider login or logout flow (ADR-0070) in a short-lived OMP process of the scope; this window runs one at a
@@ -7883,7 +7898,7 @@ interface ProviderAuthScope {
 async function runProviderAuth<T extends string>(
   index: SessionIndex,
   resolveScope: () => Promise<ProviderAuthScope | null>,
-  flow: (deps: LoginFlowDeps) => Promise<T>,
+  flow: (deps: LoginFlowDeps, modules: ProviderLoginModules) => Promise<T>,
 ): Promise<T | "busy" | "cancelled" | "failed"> {
   const s = windowState();
   if (s.providerLoginTerminal !== null) {
@@ -7899,6 +7914,7 @@ async function runProviderAuth<T extends string>(
   const run = new AbortController();
   s.providerAuthRun = run;
   try {
+    const modules = await providerLoginModules();
     const scope = await resolveScope();
     if (scope === null) return "cancelled";
     let executable: OmpCommand;
@@ -7910,13 +7926,13 @@ async function runProviderAuth<T extends string>(
     }
     const env = ompCliScopeEnvironment(scope.profile);
     return await flow({
-      ui: createLoginUi(vscode),
-      start: signal => startLoginSession({ scope: { executable, env, cwd: scope.cwd }, signal, log }),
+      ui: modules.ui.createLoginUi(vscode),
+      start: signal => modules.rpc.startLoginSession({ scope: { executable, env, cwd: scope.cwd }, signal, log }),
       openTerminal: providerId => openProviderLoginTerminalFor(executable, env, scope.cwd, providerId),
       credentialsChanged: () => announceCredentialsChanged(index),
       log,
       signal: run.signal,
-    });
+    }, modules);
   } catch (error) {
     log.error(`provider login: the flow failed unexpectedly: ${messageOf(error)}`);
     showError("The provider login could not be completed.");
@@ -7948,12 +7964,12 @@ function openProviderLoginTerminalFor(executable: OmpCommand, env: Record<string
 
 /** A session-scoped entry (Chat's model picker, its footer): log in within that session's own profile and directory. */
 async function openProviderLogin(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogin);
+  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), (deps, { flow }) => flow.runProviderLogin(deps));
 }
 
 /** A session-scoped entry (the Commands list's /logout): log out within that session's own profile and directory, as {@link openProviderLogin} does for login. */
 async function openProviderLogout(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogout);
+  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), (deps, { flow }) => flow.runProviderLogout(deps));
 }
 
 /**
@@ -7995,7 +8011,7 @@ async function loginProviderFromPalette(index: SessionIndex, argument?: unknown)
   const scope = profile === undefined
     ? () => paletteProviderAuthScope(index, "Log In to Provider", "OMP profile to log in with")
     : async (): Promise<ProviderAuthScope> => ({ runtime: null, profile, cwd });
-  return await runProviderAuth(index, scope, deps => runProviderLogin(deps, providerId === undefined ? {} : { providerId }));
+  return await runProviderAuth(index, scope, (deps, { flow }) => flow.runProviderLogin(deps, providerId === undefined ? {} : { providerId }));
 }
 
 /**
@@ -8003,12 +8019,12 @@ async function loginProviderFromPalette(index: SessionIndex, argument?: unknown)
  * `ompDesk.loginProvider`, but in the exact profile and directory of the editor that asks, which the public command's restricted argument cannot name.
  */
 async function signInProvider(index: SessionIndex, request: { readonly providerId: string; readonly profile: string; readonly cwd: string }): Promise<string> {
-  return await runProviderAuth(index, async () => ({ runtime: null, profile: request.profile, cwd: request.cwd }), deps => runProviderLogin(deps, { providerId: request.providerId }));
+  return await runProviderAuth(index, async () => ({ runtime: null, profile: request.profile, cwd: request.cwd }), (deps, { flow }) => flow.runProviderLogin(deps, { providerId: request.providerId }));
 }
 
 /** `ompDesk.logoutProvider`. */
 async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
-  await runProviderAuth(index, () => paletteProviderAuthScope(index, "Log Out of Provider", "OMP profile to log out of"), runProviderLogout);
+  await runProviderAuth(index, () => paletteProviderAuthScope(index, "Log Out of Provider", "OMP profile to log out of"), (deps, { flow }) => flow.runProviderLogout(deps));
 }
 
 async function copyHostTools(index: SessionIndex): Promise<void> {

@@ -2,16 +2,14 @@ import * as vscode from "vscode";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "./runtime-assets";
 import type { StagedRuntimeAsset } from "./runtime-assets";
 import { openProviderLoginTerminal } from "./omp-vscode";
-import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
+import type { OmpRuntimeServices } from "./omp-runtime-services";
 import { checkSettingsRuntime } from "./settings-runtime";
 import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { parseAgentSpec, SettingsRefusal, valueAt } from "./omp-settings-core";
-import { OmpUnavailableError } from "../shared/omp-unavailable";
 import { isRecord as record } from "../shared/guards";
 import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope, SettingsSnapshot } from "../protocol/settings-model";
 import type { SettingsKind } from "../chat/settings-command";
@@ -23,6 +21,7 @@ import { thinkingUnsupported } from "./omp-settings-apply";
 import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests";
 import type { PickEntry } from "../protocol/settings-pick-items";
+import { SETTINGS_EDITOR_VIEW_TYPE } from "./settings-editor-ids";
 
 export interface SettingsEditorContext {
   /** The project folder whose layer and agents are shown, or null for the global scope. */
@@ -53,7 +52,7 @@ interface Editor {
   readonly requests: Map<string, Promise<void>>;
   readonly pending: Set<Promise<void>>;
 }
-const VIEW_TYPE = "omp.settings";
+const VIEW_TYPE = SETTINGS_EDITOR_VIEW_TYPE;
 const STORED_CONTEXTS = "omp.settings.contexts";
 const PICK_TITLES = { "fallback-entry": "Add to the fallback chain", "agent-override": "Add to the agent's model override", prewalk: "Prewalk model", advisor: "Advisor model" } as const;
 /** The key compares a folder by its identity (case-folded on Windows); `binding.folder` is the display spelling. */
@@ -68,27 +67,23 @@ const effortsOf = (value: unknown): readonly string[] | undefined => Array.isArr
  */
 export class SettingsEditors implements vscode.Disposable {
   readonly #editors = new Map<string, Editor>();
-  readonly #disposables: vscode.Disposable[] = [];
-  constructor(readonly context: vscode.ExtensionContext, readonly host: SettingsEditorHost) {
-    this.#disposables.push(
-      vscode.commands.registerCommand("ompDesk.openModels", () => this.#openFromCommand("models")),
-      vscode.commands.registerCommand("ompDesk.openAgents", () => this.#openFromCommand("agents")),
-      vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
-        deserializeWebviewPanel: async (panel, raw: unknown) => {
-          const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
-          if (!stored) { panel.dispose(); return; }
-          this.#attach(panel, stored.key, stored.kind, { folder: stored.cwd, profile: stored.profile });
-        },
-      }),
-    );
-  }
-  /** A palette command has no Chat to tell: a refusal to open (no Bun, no source) is shown as the error it is, with its reason. */
-  async #openFromCommand(kind: SettingsKind): Promise<void> {
+  constructor(readonly context: vscode.ExtensionContext, readonly host: SettingsEditorHost, readonly services: OmpRuntimeServices) {}
+  /**
+   * `ompDesk.openModels` and `ompDesk.openAgents`. A palette command has no Chat to tell: a refusal to open (no Bun, no source)
+   * is shown as the error it is, with its reason.
+   */
+  async openFromCommand(kind: SettingsKind): Promise<void> {
     try { await this.open(kind, { folder: null, profile: this.host.defaultProfile() }); }
     catch (error) {
       if (!(error instanceof SettingsRefusal)) throw error;
       void vscode.window.showErrorMessage(error.message);
     }
+  }
+  /** Revive a panel VS Code restored after a reload from what `raw` names; a panel with no stored context is closed. */
+  deserialize(panel: vscode.WebviewPanel, raw: unknown): void {
+    const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
+    if (!stored) { panel.dispose(); return; }
+    this.#attach(panel, stored.key, stored.kind, { folder: stored.cwd, profile: stored.profile });
   }
   async open(kind: SettingsKind, requested: SettingsEditorContext): Promise<void> {
     const binding: SettingsEditorContext = requested.folder === null ? requested : { ...requested, folder: await onDiskFolder(requested.folder) };
@@ -196,8 +191,8 @@ export class SettingsEditors implements vscode.Disposable {
   /** Bun and the selected OMP's package source, or a refusal that says which of them is missing and why. */
   async #environment(kind: SettingsKind, binding: SettingsEditorContext): Promise<{ bun: string; root: string; executable: OmpCommand }> {
     // A configured path that cannot be used is a reason to tell, like a missing Bun, not an error to throw out of a command.
-    const executable = binding.executable ?? await resolveOmpBinary().catch((error: unknown) => { throw error instanceof OmpUnavailableError ? new SettingsRefusal(error.message) : error; });
-    const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
+    const executable = binding.executable ?? await this.services.resolveOmpBinary().catch((error: unknown) => { throw this.services.isOmpUnavailable(error) ? new SettingsRefusal(error.message) : error; });
+    const [bun, root] = await Promise.all([this.services.resolveBunRuntime(), this.services.resolveOmpPackageRoot(executable)]);
     const found = checkSettingsRuntime({
       surface: kind === "agents" ? "The Agents editor" : "The Models editor",
       instead: kind === "agents" ? "Run /agents in this session's Terminal view instead." : "Run /model in this session's Terminal view instead.",
@@ -209,7 +204,7 @@ export class SettingsEditors implements vscode.Disposable {
   async #runtime(editor: Editor): Promise<NonNullable<Editor["runtime"]>> {
     if (editor.runtime) return editor.runtime;
     const { bun, root, executable } = await this.#environment(editor.kind, editor.binding);
-    const assets = await stageRuntimeAssets({ storageDir: this.context.globalStorageUri.fsPath, sourcePaths: [vscode.Uri.joinPath(this.context.extensionUri, "out", "settings-worker.mjs").fsPath] });
+    const assets = await this.services.stageRuntimeAssets({ storageDir: this.context.globalStorageUri.fsPath, sourcePaths: [vscode.Uri.joinPath(this.context.extensionUri, "out", "settings-worker.mjs").fsPath] });
     const asset = assets[0];
     if (!asset) throw new SettingsRefusal("The native settings worker is missing from this extension build.");
     // The verified runtime directory is private; temporary catalogue copies inherit its restrictions.
@@ -221,7 +216,7 @@ export class SettingsEditors implements vscode.Disposable {
   }
   async #worker(editor: Editor, request: ConfigRecord): Promise<unknown> {
     const runtime = await this.#runtime(editor);
-    if (!await verifyStagedRuntimeAsset(runtime.asset)) throw new SettingsRefusal("The settings worker's staged bytes changed. Reopen the editor.");
+    if (!await this.services.verifyStagedRuntimeAsset(runtime.asset)) throw new SettingsRefusal("The settings worker's staged bytes changed. Reopen the editor.");
     return runSettingsWorker({ bunPath: runtime.bun, helperPath: runtime.asset.path, packageRoot: runtime.packageRoot,
       cwd: this.#cwd(editor), profile: editor.binding.profile, signal: editor.abort.signal,
       request: { ...request, catalogueCache: path.join(runtime.cacheDirectory, "models.db") } });
@@ -454,5 +449,5 @@ export class SettingsEditors implements vscode.Disposable {
   async #cleanup(editor: Editor): Promise<void> {
     if (editor.runtime) await fs.rm(editor.runtime.cacheDirectory, { force: true, recursive: true }).catch(() => {});
   }
-  dispose(): void { for (const editor of this.#editors.values()) editor.panel.dispose(); for (const item of this.#disposables) item.dispose(); }
+  dispose(): void { for (const editor of this.#editors.values()) editor.panel.dispose(); }
 }

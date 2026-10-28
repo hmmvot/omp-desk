@@ -4,6 +4,7 @@
 //   src/webview/main.tsx  -> media/guest.js            (browser chat editor, IIFE loaded by the WebviewPanel)
 //   src/webview/mermaid-preview/main.ts -> media/mermaid-preview.js (page of the diagram tab; loads media/mermaid.js)
 //   src/webview/mermaid/entry.ts -> media/mermaid.js    (diagram renderer the chat page loads lazily, IIFE; options in scripts/mermaid-bundle.mjs)
+//   src/webview/terminal/entry.ts -> media/terminal.js  (xterm.js terminal renderer the chat and shell pages load lazily, IIFE; options in scripts/terminal-bundle.mjs)
 //   src/webview/shell/main.tsx -> media/shell.js       (browser folder-shell editor, IIFE)
 //   src/omp/host-control.ts -> out/omp-host-control.mjs (native OMP extension loaded with `omp -e`, ESM factory)
 //   src/broker/pty-broker.ts -> out/pty/pty-broker.js  (extension-owned PTY broker, detached Node process)
@@ -21,12 +22,25 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import process from "node:process";
 import { mermaidBuildOptions, mermaidPreviewBuildOptions } from "./scripts/mermaid-bundle.mjs";
+import { terminalBuildOptions } from "./scripts/terminal-bundle.mjs";
 import { ensureKoffiAddon, nativeTarget } from "./scripts/native-assets.mjs";
 import { recordPtyTreeDigestAfter, removePtyTreeDigest } from "./scripts/pty-tree-digest.mjs";
 
 const watch = process.argv.includes("--watch");
 /** Build only the broker tree: useful while working on the PTY surface alone. */
 const ptyOnly = process.argv.includes("--pty");
+
+/**
+ * Makes the one import of `src/wiring/rare-subsystems.ts` (from `rare-subsystems-loader.ts`) a `require("./rare-subsystems.js")` of
+ * the file the `rare-subsystems` target writes beside `out/extension.js`, instead of bundling the module in (ADR-0085).
+ * @type {import("esbuild").Plugin}
+ */
+const rareSubsystemsExternal = {
+  name: "rare-subsystems-external",
+  setup(build) {
+    build.onResolve({ filter: /(^|[\\/])rare-subsystems\.ts$/ }, () => ({ path: "./rare-subsystems.js", external: true }));
+  },
+};
 
 /** @type {Array<{ name: string, options: import("esbuild").BuildOptions }>} */
 const targets = [
@@ -41,9 +55,26 @@ const targets = [
       target: "node20",
       // Provided by the extension host at runtime; everything else is bundled.
       external: ["vscode"],
+      // The rarely used host code is the `rare-subsystems` target below, read by the first caller (ADR-0085).
+      plugins: [rareSubsystemsExternal],
       // The host-control module reads `import.meta.url` to locate its PowerShell
       // helper; in a CommonJS bundle that is expected to be empty and the
       // `__dirname` branch is the one that runs, so the esbuild warning is noise.
+      logOverride: { "empty-import-meta": "silent" },
+    },
+  },
+  {
+    // Provider login and logout, the Models / Agents / OMP Settings editors and the Desk Settings view: host code that most
+    // windows never run. It carries its own copy of the shared modules it uses; `out/extension.js` reads it on first use.
+    name: "rare-subsystems",
+    options: {
+      entryPoints: ["src/wiring/rare-subsystems.ts"],
+      outfile: "out/rare-subsystems.js",
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      target: "node20",
+      external: ["vscode"],
       logOverride: { "empty-import-meta": "silent" },
     },
   },
@@ -58,11 +89,8 @@ const targets = [
       target: "es2022",
       jsx: "automatic",
       jsxImportSource: "react",
-      // The guest document allows styles only through its nonced `<style>` element, so
-      // the terminal stylesheet is imported as text and injected by the guest itself
-      // rather than emitted as a file to link.
-      loader: { ".css": "text" },
-      // The Webview loads one script with no module resolution: bundle React and the wire.
+      // The Webview loads one script with no module resolution: bundle React and the wire. xterm.js is not part of it:
+      // `media/terminal.js` is (see the `terminal` target), and the build fails if it slips back in.
       define: { "process.env.NODE_ENV": '"production"' },
     },
   },
@@ -78,6 +106,12 @@ const targets = [
     options: mermaidPreviewBuildOptions,
   },
   {
+    // The chat page's and the shell page's terminal renderer: xterm.js, its addons and its stylesheet, loaded by `guest.js` and
+    // `shell.js` only when a pane first shows a terminal. A script of its own so the page that never shows one never parses it.
+    name: "terminal",
+    options: terminalBuildOptions,
+  },
+  {
     // The folder-shell editor's renderer: the same Webview rules as the chat guest, a
     // different entry, loaded by the host-generated page from `media/shell.js`.
     name: "shell",
@@ -90,7 +124,6 @@ const targets = [
       target: "es2022",
       jsx: "automatic",
       jsxImportSource: "react",
-      loader: { ".css": "text" },
       define: { "process.env.NODE_ENV": '"production"' },
     },
   },
@@ -325,17 +358,32 @@ async function copyCodicons() {
   await fs.copyFile(path.join(source, "..", "LICENSE-CODE"), path.join("media", "codicons", "LICENSE-CODE"));
 }
 
+/** Targets whose inputs are checked against {@link assertBundleBoundary}. */
+const boundaryChecked = new Set(["extension", "guest", "shell", "mermaid", "mermaid-preview", "terminal"]);
+
 /**
- * Keeps the 3.4 MB diagram renderer out of the page's own bundle and the two packages it stubs out of the renderer:
- * either slipping back in costs megabytes the design (docs/designs/2026-10-13-chat-mermaid-diagrams.md) says are not paid.
+ * Keeps what a page loads on demand out of the page's own bundle: the 3.4 MB diagram renderer (guest, diagram tab) and xterm.js
+ * (guest, shell) — either slipping back in costs the page the megabytes or the 390 KB the designs
+ * (docs/designs/2026-10-13-chat-mermaid-diagrams.md, docs/designs/2026-10-28-lazy-xterm-and-rarely-used-host-code.md) say it does
+ * not pay — the two packages mermaid stubs out of its renderer, and the rarely used host code (`out/rare-subsystems.js`) out of
+ * `out/extension.js`, which every window evaluates at start.
  * @param {string} name build target name
  * @param {string[]} inputs every file the target bundled
  */
 function assertBundleBoundary(name, inputs) {
   const bundled = inputs.map(input => input.replaceAll("\\", "/"));
-  const stray = name === "guest" || name === "mermaid-preview"
-    ? bundled.filter(input => input.includes("node_modules/mermaid/") || input.includes("node_modules/@mermaid-js/"))
-    : bundled.filter(input => input.includes("node_modules/elkjs/") || input.includes("node_modules/katex/"));
+  const mermaid = input => input.includes("node_modules/mermaid/") || input.includes("node_modules/@mermaid-js/");
+  const xterm = input => input.includes("node_modules/@xterm/");
+  const rareHostCode = input => /src\/(host\/(omp-settings-editor|omp-config-editor|provider-login-flow|provider-login-rpc|desk-settings\/view)|wiring\/(rare-subsystems|provider-login-ui))\.ts$/.test(input);
+  const forbidden = {
+    extension: rareHostCode,
+    guest: input => mermaid(input) || xterm(input),
+    shell: xterm,
+    "mermaid-preview": mermaid,
+    terminal: input => mermaid(input) || /src\/webview\/(main|shell\/main)\.tsx$/.test(input),
+    mermaid: input => input.includes("node_modules/elkjs/") || input.includes("node_modules/katex/"),
+  }[name];
+  const stray = forbidden === undefined ? [] : bundled.filter(forbidden);
   if (stray.length > 0) throw new Error(`${name} bundle pulled in files it must not contain (${stray.length}), first: ${stray[0]}`);
 }
 
@@ -356,7 +404,7 @@ async function main() {
   // record may exist only when the build that wrote it finished: it is removed before the first output and written last.
   const recorded = await recordPtyTreeDigestAfter(async () => {
     for (const { name, options } of selected) {
-      const result = await esbuild.build({ ...shared, ...options, metafile: name === "guest" || name === "mermaid" || name === "mermaid-preview" });
+      const result = await esbuild.build({ ...shared, ...options, metafile: boundaryChecked.has(name) });
       if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
       console.log(`built ${name} -> ${options.outfile}`);
     }

@@ -21,7 +21,7 @@ import { guestTransport } from "../bridge";
 import { encodeUtf8Chunks } from "../../shared/bytes-base64";
 import { initialTerminalPane, isTerminalFrame, reduceTerminalFrame, resizeTerminalPane, timeoutTerminalAttach } from "../lib/terminal-pane";
 import type { TerminalGrid, TerminalPaneState, TerminalFrame } from "../lib/terminal-pane";
-import { createTerminalRenderer } from "../lib/terminal-renderer";
+import { loadTerminal, TERMINAL_UNAVAILABLE } from "../lib/terminal-loader";
 import type { TerminalRenderer } from "../lib/terminal-renderer";
 import { reportTerminalPresence } from "../lib/terminal-presence";
 import { writeTerminalClipboard } from "../lib/terminal-clipboard";
@@ -100,6 +100,10 @@ export function TerminalPane({ active, title, focusSignal, passive, managedSessi
 	const hostConnectionLost = useSyncExternalStore(guestTransport.onRouteChange, guestTransport.hostConnectionLost);
 	const [focused, setFocused] = useState(false);
 	const [copyNote, setCopyNote] = useState<string | null>(null);
+	/** True once the renderer exists: the pane asks the host for a screen only from then on. */
+	const [rendererReady, setRendererReady] = useState(false);
+	/** Why there is no renderer, when it could not be loaded or started; shown in place of a terminal that will never come. */
+	const [rendererFailure, setRendererFailure] = useState<string | null>(null);
 	const [description, setDescription] = useState<string | undefined>();
 	/** The grid this pane last resized the host to, so a repeat is not sent. */
 	const reportedGridRef = useRef<TerminalGrid | null>(null);
@@ -230,46 +234,64 @@ export function TerminalPane({ active, title, focusSignal, passive, managedSessi
 
 	// The renderer is created once, the first time this pane is displayed: a renderer
 	// opened in a hidden element measures its font from a zero-sized box, and every
-	// later fit would be relative to that.
+	// later fit would be relative to that. Its code is a script of its own (xterm.js and its addons) that the
+	// first terminal of a page loads (`../lib/terminal-loader.ts`); the pane attaches to the host only once the
+	// renderer exists, so no screen the host sends is dropped for want of somewhere to draw it.
 	useEffect(() => {
 		const host = hostRef.current;
 		if (host === null || rendererRef.current !== null) return;
+		let current = true;
 		const linkClient = new TerminalLinkClient(guestTransport);
-		const renderer = createTerminalRenderer(host, {
-			newlineOnShiftEnter: managedSession,
-			// A native OMP session never sends Ctrl+C; a folder shell keeps the interrupt.
-			ctrlCInterrupts: !managedSession,
-			copyText: async text => {
-				const copied = await writeTerminalClipboard(text);
-				if (!copied) setCopyNote("the clipboard refused the copy — select the text and copy it");
-				return copied;
-			},
-			onData: text => {
-				const current = paneRef.current;
-				// Input is only ever sent by the pane the host authorized, and only for the
-				// generation it authorized: a keystroke must not reach a successor process.
-				if (!current.owner || current.generation === null) return;
-				const generation = current.generation;
-				for (const chunk of encodeUtf8Chunks(text, MAX_TERMINAL_INPUT_BYTES)) {
-					guestTransport.post({ type: "omp:terminal-input", generation, data: chunk });
+		void loadTerminal().then(
+			({ createTerminalRenderer }) => {
+				if (!current) return;
+				try {
+					const renderer = createTerminalRenderer(host, {
+						newlineOnShiftEnter: managedSession,
+						// A native OMP session never sends Ctrl+C; a folder shell keeps the interrupt.
+						ctrlCInterrupts: !managedSession,
+						copyText: async text => {
+							const copied = await writeTerminalClipboard(text);
+							if (!copied) setCopyNote("the clipboard refused the copy — select the text and copy it");
+							return copied;
+						},
+						onData: text => {
+							const held = paneRef.current;
+							// Input is only ever sent by the pane the host authorized, and only for the
+							// generation it authorized: a keystroke must not reach a successor process.
+							if (!held.owner || held.generation === null) return;
+							const generation = held.generation;
+							for (const chunk of encodeUtf8Chunks(text, MAX_TERMINAL_INPUT_BYTES)) {
+								guestTransport.post({ type: "omp:terminal-input", generation, data: chunk });
+							}
+						},
+						onFocus: publishFocus,
+						onLink: (target, mode) => linkClient.open(target, mode),
+						validateLink: target => linkClient.validate(target),
+					});
+					rendererRef.current = renderer;
+					renderer.setInputEnabled(false);
+					// Measure before the first attach: the grid travels with it, and a pane that asked for
+					// a size it did not mean would cost the PTY a resize round trip on every open.
+					const measured = renderer.fitToContainer();
+					if (measured !== null) adopt(resizeTerminalPane(paneRef.current, measured));
+					setRendererReady(true);
+				} catch (error) {
+					setRendererFailure(`The terminal could not start: ${error instanceof Error ? error.message : String(error)}`);
 				}
 			},
-			onFocus: publishFocus,
-			onLink: (target, mode) => linkClient.open(target, mode),
-			validateLink: target => linkClient.validate(target),
-		});
-		rendererRef.current = renderer;
-		renderer.setInputEnabled(false);
-		// Measure before the first attach: the grid travels with it, and a pane that asked for
-		// a size it did not mean would cost the PTY a resize round trip on every open.
-		const measured = renderer.fitToContainer();
-		if (measured !== null) adopt(resizeTerminalPane(paneRef.current, measured));
+			(error: unknown) => {
+				if (current) setRendererFailure(error instanceof Error ? error.message : TERMINAL_UNAVAILABLE);
+			},
+		);
 		return () => {
+			current = false;
 			// The pane is going away: the terminal is left exactly as it is, and only the
 			// renderer stops existing.
-			renderer.dispose();
+			rendererRef.current?.dispose();
 			linkClient.dispose();
 			rendererRef.current = null;
+			setRendererReady(false);
 		};
 	}, [adopt, managedSession, publishFocus]);
 
@@ -278,9 +300,12 @@ export function TerminalPane({ active, title, focusSignal, passive, managedSessi
 	// answer or while the first request's timeout is still pending.
 	useEffect(() => {
 		const unsubscribe = guestTransport.subscribe(message => {
-			if (message.type === "omp:terminal-font" && rendererRef.current?.setFont(message)) fitPane();
-			if (isTerminalFrame(message)) apply(message);
-			if (message.type === "omp:terminal-state") setDescription(message.description);
+			// Until the renderer exists nothing has asked the host for a screen, so no frame is expected and none is applied.
+			if (rendererReady) {
+				if (message.type === "omp:terminal-font" && rendererRef.current?.setFont(message)) fitPane();
+				if (isTerminalFrame(message)) apply(message);
+				if (message.type === "omp:terminal-state") setDescription(message.description);
+			}
 			if (message.type === "omp:terminal-copy-request" && managedSession) {
 				const renderer = rendererRef.current;
 				const reply: GuestTerminalCopyReplyMessage = {
@@ -291,13 +316,14 @@ export function TerminalPane({ active, title, focusSignal, passive, managedSessi
 				guestTransport.post(reply);
 			}
 		});
+		if (!rendererReady) return unsubscribe;
 		if (attachTimerRef.current !== null) {
 			clearTimeout(attachTimerRef.current);
 			attachTimerRef.current = null;
 		}
 		attach();
 		return unsubscribe;
-	}, [apply, attach, fitPane, hostAvailable, managedSession]);
+	}, [apply, attach, fitPane, hostAvailable, managedSession, rendererReady]);
 
 	// Quiet terminals verify liveness without resetting their screen or scrollback.
 	useEffect(() => {
@@ -390,7 +416,7 @@ export function TerminalPane({ active, title, focusSignal, passive, managedSessi
 			window.removeEventListener("blur", blur);
 			document.removeEventListener("visibilitychange", focus);
 		};
-	}, [active, focusSignal, publishFocus]);
+	}, [active, focusSignal, publishFocus, rendererReady]);
 
 	useEffect(() => {
 		return () => {
@@ -401,12 +427,13 @@ export function TerminalPane({ active, title, focusSignal, passive, managedSessi
 	}, []);
 
 	const status = paneStatus(pane, managedSession, hostConnectionLost);
-	const starting = hostStarting || (pane.phase === "unattached" && !hostConnectionLost && !pane.hostSilent);
+	const starting = rendererFailure === null && (hostStarting || (pane.phase === "unattached" && !hostConnectionLost && !pane.hostSilent));
 	const tooltip = `${title ?? "Terminal"}\n${pane.grid.cols}×${pane.grid.rows}\n${status.text || (pane.owner ? "Live — this editor is driving it" : "Live — read-only here")}${description ? `\n${description}` : ""}`;
 
 	return (
 		<div className="omp-terminal" title={tooltip}>
 			{starting && <div className="omp-terminal-note" role="status">Starting…</div>}
+			{rendererFailure !== null && <div className="omp-terminal-note omp-terminal-state--err" role="alert">{rendererFailure}</div>}
 			{status.level === "ok" || hostStarting ? null : <div className={`omp-terminal-note omp-terminal-state--${status.level}`} role="status">{status.text}</div>}
 			{/* The renderer measures this element, so it is the full remaining height. */}
 			<div className="omp-terminal-host" ref={hostRef} />

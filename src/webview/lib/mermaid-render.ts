@@ -13,6 +13,7 @@
  */
 import { MERMAID_CONTRACT, MERMAID_GLOBAL, mermaidSourceRefusal, type MermaidRenderResult, type MermaidTheme, type OmpMermaid } from "../mermaid/contract.ts";
 import { mermaidImage } from "./mermaid-image.ts";
+import { loadSiblingScript } from "./sibling-script.ts";
 import { readPageTheme, watchPageTheme, type PageTheme } from "./mermaid-theme-dom.ts";
 
 /** What the page shows for one source in one theme. */
@@ -20,16 +21,6 @@ export type MermaidOutcome =
 	| { readonly kind: "diagram"; readonly src: string; readonly width: number; readonly height: number }
 	/** `tab`: the diagram tab's wider limits may draw it (a refused or too large diagram). */
 	| { readonly kind: "failed"; readonly message: string; readonly tab: boolean };
-
-/**
- * The script this bundle runs from: the renderer is its sibling, and its nonce is the document's.
- * Read once, at start-up, while `document.currentScript` is still set; the fallback is the one `readCspNonce` uses.
- */
-const ownScript: HTMLScriptElement | null = (() => {
-	if (typeof document === "undefined") return null;
-	if (document.currentScript instanceof HTMLScriptElement) return document.currentScript;
-	return document.querySelector<HTMLScriptElement>("script[nonce][src]");
-})();
 
 /** Results kept: failures and diagrams, least recently used dropped first once the text they hold passes this. */
 const CACHE_BUDGET_CHARS = 8_000_000;
@@ -133,15 +124,11 @@ function published(): OmpMermaid {
 
 async function fetchRenderer(): Promise<OmpMermaid> {
 	if (Reflect.has(window, MERMAID_GLOBAL)) return published();
-	if (ownScript === null || ownScript.src === "") throw new Error(UNAVAILABLE);
-	const script = document.createElement("script");
-	script.src = new URL("mermaid.js", ownScript.src).href;
-	if (ownScript.nonce !== "") script.nonce = ownScript.nonce;
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	script.addEventListener("load", () => resolve(), { once: true });
-	script.addEventListener("error", () => reject(new Error(UNAVAILABLE)), { once: true });
-	document.head.append(script);
-	await promise;
+	try {
+		await loadSiblingScript("mermaid.js");
+	} catch {
+		throw new Error(UNAVAILABLE);
+	}
 	return published();
 }
 

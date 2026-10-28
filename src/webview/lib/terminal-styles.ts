@@ -1,21 +1,15 @@
 /**
- * The terminal surface's stylesheet, and the renderer's own rules.
+ * The terminal surface's stylesheet: the pane, its status notes and the element the renderer measures.
  *
  * Both a managed-session editor and a folder-shell editor reuse these rules with
  * their own CSP nonce. The session document also carries the Chat rules.
  *
- * The renderer's stylesheet is imported as *text* and injected into the nonce'd
- * element rather than linked as a file: the host serves `style-src 'nonce-…'
- * <cspSource>`, the bundle is a single asset, and a linked stylesheet would be a
- * second asset the host would have to know about. `@xterm/xterm/css/xterm.css` is
- * the library's own base rules (`.xterm`, its viewport and screen), and the rest of
- * its runtime rules — the row layout, theme colours and scrollbar — are created by
- * the renderer itself, which is why `./nonce-styles.ts` exists.
+ * xterm.js's own base stylesheet (`@xterm/xterm/css/xterm.css`) is not here: it belongs to the renderer, which is a script
+ * of its own that a page loads when it first shows a terminal (`./terminal-loader.ts`), and the renderer adds that
+ * stylesheet itself. Rules below that name `.xterm` elements refine it and need no stylesheet to be present until then. The
+ * rest of xterm's runtime rules — the row layout, theme colours and scrollbar — are created by the renderer, which is why
+ * `./nonce-styles.ts` exists.
  */
-// Explicit `.ts` specifier and the `.css` text import: the webview build maps
-// `.css` to a text loader (`esbuild.mjs`), so the stylesheet arrives as a string in
-// the single bundle, and the host serves it with the document's own nonce.
-import xtermStylesheet from "@xterm/xterm/css/xterm.css";
 import { BASE_CSS } from "./base-styles.ts";
 
 /** The shared terminal pane, status notes and renderer host. */
@@ -78,7 +72,7 @@ const TERMINAL_CSS = `
 `;
 
 /** Shared native renderer/pane rules, without the document reset. */
-export const TERMINAL_STYLES = `${xtermStylesheet}\n${TERMINAL_CSS}`;
+export const TERMINAL_STYLES = TERMINAL_CSS;
 
 /** The element id the sheet uses, so an injection can never happen twice. */
 export const SHELL_STYLE_ID = "omp-shell-styles";

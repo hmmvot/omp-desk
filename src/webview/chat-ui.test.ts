@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { test } from "node:test";
 import { build } from "esbuild";
+import { terminalBuildOptions } from "../../scripts/terminal-bundle.mjs";
 import type * as vscode from "vscode";
 import { createGuestHtml, createShellHtml } from "../host/guest-webview.ts";
 import { desktopToastXml } from "../host/desktop-notifications.ts";
@@ -183,7 +184,7 @@ createRoot(document.getElementById("root")).render(location.search.includes("fol
 // subtest; the timeout only guards a hang and must cover the whole set under suite load.
 test("compact chat's rendered behavioral boundaries", { skip: browserPath === undefined, timeout: 420_000 }, async t => {
 	const bundled = await build({ stdin: { contents: fixture, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") },
-		bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", loader: { ".css": "text" }, define: { "process.env.NODE_ENV": '"production"' },
+		bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' },
 		plugins: [{ name: "bridge-operation-test-access", setup(builder) {
 			builder.onLoad({ filter: /[/\\]webview[/\\]bridge\.ts$/ }, args => ({
 				contents: `${readFileSync(args.path, "utf8")}\nexport { bridgeOperation as fixtureBridgeOperation };`,
@@ -191,6 +192,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}));
 		} }] });
 	const script = bundled.outputFiles[0]!.text;
+	// The terminal renderer is a script of its own that the page loads beside its bundle, as the extension ships it.
+	const terminalScript = (await build({ ...terminalBuildOptions, write: false, minify: true, legalComments: "none", logLevel: "silent" })).outputFiles[0]!.text;
+	let terminalMode: "ok" | "missing" | "stale" = "ok";
+	let terminalHits = 0;
 	const server = createServer((request, response) => {
 		const fixtureUrl = new URL(request.url ?? "/", "http://fixture");
 		const pathname = fixtureUrl.pathname;
@@ -198,6 +203,13 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const file = pathname.endsWith(".css") ? "codicon.css" : "codicon.ttf";
 			response.setHeader("Content-Type", file.endsWith(".css") ? "text/css" : "font/ttf");
 			response.end(readFileSync(join(process.cwd(), "node_modules/@vscode/codicons/dist", file)));
+			return;
+		}
+		if (pathname === "/terminal.js") {
+			terminalHits++;
+			response.statusCode = terminalMode === "missing" ? 404 : 200;
+			response.setHeader("Content-Type", "text/javascript");
+			response.end(terminalMode === "missing" ? "missing" : terminalMode === "stale" ? "window.ompTerminal={contract:999,createTerminalRenderer(){throw new Error('not for this page')}}" : terminalScript);
 			return;
 		}
 		if (pathname === "/ui.js") {
@@ -2913,6 +2925,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("native-start-admission");
 			await ui.evaluate("window.ui.view({mode:'terminal',running:false,starting:true,canSwitch:false,reason:'Previous stopped state'})");
 			await ui.wait("document.querySelector('.omp-terminal-note[role=\"status\"]')?.textContent==='Starting…'");
+			// The pane asks the host for its screen once its renderer exists; a frame from a host that was never asked is not this test's subject.
+			await ui.wait("document.querySelector('.xterm') && window.sent.some(message=>message.type==='omp:terminal-attach')");
 			await ui.evaluate(`window.ui.receive({type:'omp:terminal-state',generation:'0123456789abcdef0123456789abcdef',seq:0,phase:'unavailable',input:false,cols:80,rows:24,snapshot:'none',reason:'Not attached yet'});
 			 window.fixtureClock.fire(4000)`);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-native-session-actions,.omp-notices')"), null);
@@ -2942,6 +2956,55 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(resized.height >= resized.viewport - 8 && resized.height < initial.height, JSON.stringify(resized));
 			await ui.call("Emulation.clearDeviceMetricsOverride");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the terminal renderer is a script of its own: a page that never shows a terminal does not fetch it, the first terminal loads it once and brings xterm's stylesheet", async () => {
+			terminalHits = 0;
+			await reset("terminal-lazy-chat");
+			assert.equal(terminalHits, 0, "a Chat page fetches no terminal renderer");
+			assert.equal(await ui.evaluate("typeof window.ompTerminal"), "undefined");
+			assert.equal(await ui.evaluate("document.getElementById('omp-xterm-styles')"), null, "xterm's rules are not in a page that shows no terminal");
+			await reset("terminal-lazy-first");
+			await ui.evaluate("window.ui.view({mode:'terminal'})");
+			await ui.wait("document.querySelector('.xterm') && window.sent.some(message=>message.type==='omp:terminal-attach')");
+			assert.equal(terminalHits, 1, "one request for the renderer");
+			assert.equal(await ui.evaluate("document.head.firstElementChild.id"), "omp-xterm-styles", "the base rules come before every rule of the page");
+			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.xterm')).position"), "relative", "xterm's own stylesheet applies under the document's policy");
+			await ui.evaluate("window.ui.view({mode:'chat'})");
+			await ui.wait("document.querySelector('.omp-composer') && !document.querySelector('.xterm')");
+			await ui.evaluate("window.ui.view({mode:'terminal'})");
+			await ui.wait("document.querySelector('.xterm')");
+			assert.equal(terminalHits, 1, "a second terminal of the same page reuses the loaded renderer");
+			assert.equal(await ui.evaluate("document.querySelectorAll('#omp-xterm-styles').length"), 1, "the stylesheet is added once");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a terminal renderer that cannot be loaded or is of another build is said on the pane, attaches to nothing, and a later switch tries again", async () => {
+			for (const [mode, text] of [["missing", "could not be loaded"], ["stale", "out of date"]] as const) {
+				terminalMode = mode;
+				await reset(`terminal-lazy-${mode}`);
+				await ui.evaluate("window.ui.view({mode:'terminal'})");
+				await ui.wait("document.querySelector('.omp-terminal-state--err[role=\"alert\"]')");
+				const said = await ui.evaluate<string>("document.querySelector('.omp-terminal-state--err[role=\"alert\"]').textContent");
+				assert.ok(said.includes(text) && said.endsWith("Reload the window"), said);
+				assert.equal(await ui.evaluate("document.querySelector('.xterm')"), null, "no terminal surface");
+				assert.equal(await ui.evaluate("Array.from(document.querySelectorAll('.omp-terminal-note')).some(note=>note.textContent==='Starting…')"), false, "a pane that will never start does not say it is starting");
+				assert.equal(await ui.evaluate("window.sent.some(message=>message.type==='omp:terminal-attach')"), false, "nothing asks the host for a screen nobody can draw");
+				// A copy request is answered although there is no screen to copy.
+				await ui.evaluate("window.ui.receive({type:'omp:terminal-copy-request',requestId:'0123456789abcdef0123456789abcdef'})");
+				await ui.wait("window.sent.some(message=>message.type==='omp:terminal-copy-reply' && message.text===null)");
+			}
+			terminalMode = "ok";
+			await reset("terminal-lazy-retry");
+			terminalMode = "missing";
+			await ui.evaluate("window.ui.view({mode:'terminal'})");
+			await ui.wait("document.querySelector('.omp-terminal-state--err[role=\"alert\"]')");
+			terminalMode = "ok";
+			await ui.evaluate("window.ui.view({mode:'chat'})");
+			await ui.wait("document.querySelector('.omp-composer') && !document.querySelector('.omp-terminal-state--err')");
+			await ui.evaluate("window.ui.view({mode:'terminal'})");
+			await ui.wait("document.querySelector('.xterm') && window.sent.some(message=>message.type==='omp:terminal-attach')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-terminal-state--err')"), null);
 		});
 
 		await t.test("native xterm retains real output through resize, stopping, and stopped recovery", async () => {

@@ -24,6 +24,7 @@
  *
  * OSC 52 has no handler in this library.
  */
+import xtermStylesheet from "@xterm/xterm/css/xterm.css";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
@@ -100,6 +101,24 @@ function isRenderableGrid(grid: TerminalGrid): boolean {
 	);
 }
 
+/** The element id of xterm.js's own stylesheet, so it is added once per document. */
+const XTERM_STYLE_ID = "omp-xterm-styles";
+
+/**
+ * Add xterm.js's base rules (`.xterm`, its viewport and screen) to the document, once. They are text in this bundle and a
+ * `<style>` element of the document, which the document's policy admits only with its nonce: every `<style>` element script
+ * creates in the document gets it (`adoptNonceForCreatedStyles`, installed by the page script that loaded this one). The element
+ * goes first in `<head>` because these rules are the base the page's own `.omp-terminal-host .xterm…` rules refine, with equal
+ * specificity, by coming later.
+ */
+function ensureXtermStyles(): void {
+	if (document.getElementById(XTERM_STYLE_ID) !== null) return;
+	const style = document.createElement("style");
+	style.id = XTERM_STYLE_ID;
+	style.textContent = xtermStylesheet;
+	document.head.prepend(style);
+}
+
 /**
  * Create the renderer in `host`.
  *
@@ -108,6 +127,7 @@ function isRenderableGrid(grid: TerminalGrid): boolean {
  * fit is relative to that.
  */
 export function createTerminalRenderer(host: HTMLElement, hooks: TerminalRendererHooks): TerminalRenderer {
+	ensureXtermStyles();
 	const computed = getComputedStyle(host);
 	const appearance = terminalAppearanceFrom(name => computed.getPropertyValue(name));
 	// Dropdown/palette values arrive from the theme as-is; the renderer takes the
