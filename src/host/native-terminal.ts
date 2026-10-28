@@ -211,6 +211,17 @@ export function setOmpResolutionLog(logger: Logger | null): void {
 }
 
 /**
+ * Runs work that only informs (a diagnostic helper process) under the window's helper scheduler, which holds it back until the
+ * startup restore is over and bounds how many run at once; the extension sets it once, at activation. Without one the work
+ * starts at once.
+ */
+export type OmpBackgroundRunner = <T>(label: string, run: (signal: AbortSignal) => Promise<T>) => Promise<T>;
+let ompBackgroundRunner: OmpBackgroundRunner | null = null;
+export function setOmpBackgroundRunner(runner: OmpBackgroundRunner | null): void {
+  ompBackgroundRunner = runner;
+}
+
+/**
  * Where the explicit OMP path setting is read from; the extension registers it once, at activation.
  * It is called on every resolution, so a changed setting is read by the next launch. Without a
  * reader (a process that is not the extension host) PATH decides.
@@ -284,7 +295,8 @@ async function reportOtherInstalls(
   for (const other of distinct.values()) {
     let version: string | null = null;
     try {
-      const result = await runOmpCli(other.executable, ["--version"], VERSION_TIMEOUT_MS);
+      const probe = (signal?: AbortSignal): Promise<OmpCliResult> => runOmpCli(other.executable, ["--version"], VERSION_TIMEOUT_MS, signal === undefined ? {} : { signal });
+      const result = await (ompBackgroundRunner === null ? probe() : ompBackgroundRunner("version of another OMP install", probe));
       if (result.exitCode === 0) version = parseVersion(result.stdout) ?? parseVersion(result.stderr);
     } catch {
       // The release stays unknown; the install is still reported.
@@ -992,6 +1004,13 @@ function parseVersion(output: string): string | null {
   return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
 }
 
+/** The rejection of a CLI run that its caller cancelled. */
+function cancelledCliRun(executable: OmpCommand, args: readonly string[]): Error {
+  const error = new Error(`\`${path.basename(executable.command)} ${args.join(" ")}\` was cancelled.`);
+  error.name = "AbortError";
+  return error;
+}
+
 /**
  * Run an `omp` CLI subcommand and capture its output.
  *
@@ -1003,13 +1022,18 @@ function parseVersion(output: string): string | null {
  * over the global layer, so a CLI read that describes one session must run in
  * that session's directory with that session's overlay, exactly as its launch
  * did. The environment is merged over this process's own, never replaced.
+ *
+ * `options.signal` cancels the run: its process is ended and the call rejects with an `AbortError`; a signal that is
+ * already aborted spawns nothing.
  */
 export async function runOmpCli(
   executable: OmpCommand,
   args: readonly string[],
   timeoutMs = CLI_TIMEOUT_MS,
-  options: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> } = {},
+  options: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>>; readonly signal?: AbortSignal } = {},
 ): Promise<OmpCliResult> {
+  // A run cancelled before it starts spawns nothing.
+  if (options.signal?.aborted === true) throw cancelledCliRun(executable, args);
   const { promise, resolve, reject } = Promise.withResolvers<OmpCliResult>();
   const child = spawn(executable.command, [...executable.prefixArgs, ...args], {
     windowsHide: true,
@@ -1041,6 +1065,14 @@ export async function runOmpCli(
       ),
     );
   }, timeoutMs);
+
+  // A cancelled run ends its process and says so; a run that already settled ignores the signal.
+  const onAbort = (): void => {
+    child.kill();
+    settle(() => reject(cancelledCliRun(executable, args)));
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  void promise.then(() => options.signal?.removeEventListener("abort", onAbort), () => options.signal?.removeEventListener("abort", onAbort));
 
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => {

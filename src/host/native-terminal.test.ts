@@ -26,6 +26,7 @@ import type {
 	resolveOmpPackageRoot as resolveOmpPackageRootType,
 	setOmpPathReader as setOmpPathReaderType,
 	setOmpResolutionLog as setOmpResolutionLogType,
+	runOmpCli as runOmpCliType,
 } from "./native-terminal.ts";
 
 /** The part of the compiled module these tests drive. */
@@ -35,6 +36,7 @@ interface NativeTerminalModule {
 	readonly resolveOmpPackageRoot: typeof resolveOmpPackageRootType;
 	readonly setOmpPathReader: typeof setOmpPathReaderType;
 	readonly setOmpResolutionLog: typeof setOmpResolutionLogType;
+	readonly runOmpCli: typeof runOmpCliType;
 }
 
 let native: NativeTerminalModule;
@@ -1096,5 +1098,29 @@ describe("the bun.exe a bun shim runs on", () => {
 		await withPath([install.bin, script.dir], async () => {
 			await assert.rejects(native.resolveOmpBinary(), /no bun runtime was found beside it/);
 		});
+	});
+});
+
+describe("runOmpCli cancellation", () => {
+	const hang = { command: process.execPath, prefixArgs: ["-e", "setInterval(() => {}, 1000)"] };
+
+	it("ends the process and rejects with an AbortError when its signal aborts", async () => {
+		const controller = new AbortController();
+		const run = native.runOmpCli(hang, [], 60_000, { signal: controller.signal });
+		const outcome = assert.rejects(run, (error: Error) => error.name === "AbortError");
+		setImmediate(() => controller.abort());
+		await outcome;
+	});
+
+	it("spawns nothing for a signal that is already aborted", async () => {
+		const marker = path.join(temp, "cancelled-before-start.txt");
+		const writes = { command: process.execPath, prefixArgs: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`] };
+		await assert.rejects(native.runOmpCli(writes, [], 60_000, { signal: AbortSignal.abort() }), (error: Error) => error.name === "AbortError");
+		await assert.rejects(stat(marker), { code: "ENOENT" });
+	});
+
+	it("is unaffected by a signal that never aborts", async () => {
+		const result = await native.runOmpCli({ command: process.execPath, prefixArgs: ["-e", "process.stdout.write('ok')"] }, [], 60_000, { signal: new AbortController().signal });
+		assert.deepEqual([result.exitCode, result.stdout], [0, "ok"]);
 	});
 });

@@ -2,6 +2,7 @@
 import type { FooterAccountUsage, FooterQuotaWindow, FooterUsage } from "../shared/footer-metadata.ts";
 import { silentLogger, type Logger } from "../shared/logger.ts";
 import type { OmpCliResult } from "./native-terminal.ts";
+import { isHelperCancelled } from "./helper-scheduler.ts";
 export const PROVIDER_USAGE_ARGS = ["usage", "--json", "--redact"] as const;
 export const PROVIDER_USAGE_TIMEOUT_MS = 20_000;
 export const PROVIDER_USAGE_REFRESH_MS = 5 * 60_000;
@@ -133,7 +134,7 @@ export class ProviderUsageCache {
 				const parsed = result.exitCode === 0 ? parseProviderUsageJson(result.stdout, provider) : null;
 				if (parsed === null) this.log.warn("Provider usage refresh returned no valid reading; retaining the last value.");
 				else { reading.reading = parsed; reading.readAt = this.now(); }
-			} catch (error) { this.log.warn(`Provider usage refresh failed (${describeUsageKind(error)}); retaining the last value.`); }
+			} catch (error) { if (!isHelperCancelled(error)) this.log.warn(`Provider usage refresh failed (${describeUsageKind(error)}); retaining the last value.`); }
 			finally { reading.pending = null; }
 		})();
 		await reading.pending;

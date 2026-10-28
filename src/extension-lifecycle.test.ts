@@ -192,7 +192,8 @@ export const harness = {
     return () => { w.editorPanels = previous; };
   },
   // The window a case replaces is disposed as deactivation disposes it: an operation that case left pending (a Resume still waiting for its writer) must not keep the process alive through its clocks.
-  installWindow(next) { window?.pendingDisplay.dispose(); window?.pending.dispose(); window = next; },
+  // The fixture's helper scheduler has no restore to wait for and no cross-window slots: a helper run starts as soon as it is asked for.
+  installWindow(next) { window?.pendingDisplay.dispose(); window?.pending.dispose(); window?.helpers?.dispose(); next.helpers ??= new HelperScheduler({ log, backgroundGate: Promise.resolve(), backgroundSettleMs: 0 }); window = next; },
   window: () => windowState(),
   createWindowState,
   localLauncher: (context, index) => localLauncher(context, index, fixtureChat), handleTerminalGuestMessage,
@@ -999,20 +1000,21 @@ describe("footer host readback", () => {
       harness.closeLoginTerminal("omp login");
       await harness.providerModelsIdle();
       assert.equal(fixture.calls.length, 2);
+      // A session's first look is no change: the catalogue was read at activation and again after the sign-in, so it is not read a third time.
       harness.recordSessionModels(index, TAB, false);
       await harness.providerModelsIdle();
-      assert.equal(fixture.calls.length, 3);
+      assert.equal(fixture.calls.length, 2, "a first look at a session's models does not start a read of a catalogue this window already read");
       assert.equal(harness.sessionModelAvailability(TAB), false);
       harness.recordSessionModels(index, TAB, false);
       await harness.providerModelsIdle();
-      assert.equal(fixture.calls.length, 3, "unchanged session models reuse the cached flag");
+      assert.equal(fixture.calls.length, 2, "unchanged session models reuse the cached flag");
       harness.recordSessionModels(index, TAB, true);
       await harness.providerModelsIdle();
-      assert.equal(fixture.calls.length, 4);
+      assert.equal(fixture.calls.length, 3, "a changed answer is a hint that credentials changed");
       assert.equal(harness.sessionModelAvailability(TAB), true);
       fixture.unresolved = true;
       await harness.refreshDefaultProviderModels();
-      assert.equal(fixture.calls.length, 4, "missing OMP is not treated as an empty catalogue");
+      assert.equal(fixture.calls.length, 3, "missing OMP is not treated as an empty catalogue");
     } finally {
       for (const subscription of subscriptions) subscription.dispose();
       fixture.enabled = false; fixture.unresolved = false;

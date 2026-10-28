@@ -24,6 +24,7 @@ import {
   resolveBunRuntime,
   resolveOmpBinary,
   resolveOmpPackageRoot,
+  setOmpBackgroundRunner,
   setOmpPathReader,
   setOmpResolutionLog,
   terminalWriterForHandle,
@@ -33,8 +34,10 @@ import { runProviderLogin, runProviderLogout } from "./host/provider-login-flow"
 import type { LoginFlowDeps } from "./host/provider-login-flow";
 import { startLoginSession } from "./host/provider-login-rpc";
 import { createLoginUi } from "./wiring/provider-login-ui";
-import { runOmpCli } from "./host/native-terminal";
+import { runOmpCli, type OmpCliResult } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS, UsageFailureNotes } from "./host/provider-usage";
+import { HelperScheduler, isHelperCancelled } from "./host/helper-scheduler";
+import { createHelperSlots } from "./host/helper-slots";
 import { readOmpSetting, readOmpSettings, TODO_CLEAR_DELAY_SETTING } from "./host/omp-setting-read";
 import { enabledMagicKeywords, MAGIC_KEYWORD_SETTING_KEYS } from "./shared/magic-keywords";
 import { observeSessionBranch } from "./host/session-branch";
@@ -908,6 +911,11 @@ interface WindowState {
   providerAuthRun: AbortController | null;
   /** Provider usage per launch scope. */
   readonly usageCaches: Map<string, ProviderUsageCache>;
+  /**
+   * Every helper process this window starts for what a conversation shows (provider usage, model catalogue, settings reads, inventory,
+   * served-model check): bounded, background work held back until the startup restore is over and spread across windows (ADR-0084).
+   */
+  helpers: HelperScheduler;
 
   // Lifecycle
   /**
@@ -1421,6 +1429,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     providerLoginTerminal: null,
     providerAuthRun: null,
     usageCaches: new Map<string, ProviderUsageCache>(),
+    helpers: undefined as never, // assigned by `activate` before anything reads it
     // Lifecycle
     context,
     output: undefined,
@@ -1561,6 +1570,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
   setOmpPathReader(configuredOmpPath);
   context.subscriptions.push({ dispose: () => setOmpPathReader(null) });
+  // Every helper process that shows something next to a conversation goes through the window's helper scheduler (ADR-0084): background work
+  // waits for the startup restore (the gate), runs one at a time and takes a cross-window slot; the window's disposal ends what it runs.
+  s.helpers = new HelperScheduler({
+    log,
+    backgroundGate: s.startupRestoreOver.promise,
+    slots: createHelperSlots({ storageDir: context.globalStorageUri.fsPath }),
+  });
+  setOmpBackgroundRunner((label, run) => s.helpers.run({ label, class: "background", run }));
+  context.subscriptions.push({ dispose: () => { setOmpBackgroundRunner(null); s.helpers.dispose(); } });
   // The native module (ADR-0076) answers every Windows question below in process. Its one load starts here, before the
   // first reader asks, and every reader awaits it: a reader that ran ahead of an unfinished load would file this window's
   // claims without a creation time for good.
@@ -1996,9 +2014,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     readTodoClearDelay: async (tabId, cwd) => {
       try {
         const executable = await executableFor(hostOf(stateOf(tabId)) ?? null);
-        return await readOmpSetting({ run: runOmpCli, executable, cwd, env: ompCliScopeEnvironment(index.get(tabId)?.scope.profile ?? null), key: TODO_CLEAR_DELAY_SETTING });
+        return await readOmpSetting({ run: visibleOmpCli, executable, cwd, env: ompCliScopeEnvironment(index.get(tabId)?.scope.profile ?? null), key: TODO_CLEAR_DELAY_SETTING });
       } catch (error) {
-        log.warn(`tab ${tabId}: ${TODO_CLEAR_DELAY_SETTING} could not be read (${messageOf(error)}); OMP's default applies`);
+        if (!isHelperCancelled(error)) log.warn(`tab ${tabId}: ${TODO_CLEAR_DELAY_SETTING} could not be read (${messageOf(error)}); OMP's default applies`);
         return undefined;
       }
     },
@@ -2010,14 +2028,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       try {
         const executable = await executableFor(hostOf(stateOf(tabId)) ?? null);
         const values = await readOmpSettings({
-          run: runOmpCli, executable,
+          run: visibleOmpCli, executable,
           cwd: cwd ?? index.get(tabId)?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
           env: ompCliScopeEnvironment(profile),
           keys: MAGIC_KEYWORD_SETTING_KEYS,
         });
         return enabledMagicKeywords(values);
       } catch (error) {
-        log.warn(`tab ${tabId}: the magic keyword settings could not be read (${messageOf(error)}); the page keeps what it has`);
+        if (!isHelperCancelled(error)) log.warn(`tab ${tabId}: the magic keyword settings could not be read (${messageOf(error)}); the page keeps what it has`);
         return null;
       }
     },
@@ -2119,7 +2137,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
   s.launcherView = view;
   subscribeProviderLoginRefresh(context, index);
-  s.inventoryViews = registerInventoryViews(context, { target: () => toolsTarget(index), pending: s.pending, log });
+  s.inventoryViews = registerInventoryViews(context, { target: () => toolsTarget(index), pending: s.pending, log, helpers: s.helpers });
   context.subscriptions.push({ dispose: () => { s.inventoryViews = null; } });
   s.contextView = registerContextView(context, {
     target: () => contextTarget(index),
@@ -6402,12 +6420,13 @@ async function servedModelVerdicts(pairs: readonly ServedModelPair[]): Promise<S
     return await s.servedModels.resolve(key, pairs, async missing => {
       const [helper] = await stageRuntimeAssets({ storageDir: context.globalStorageUri.fsPath, sourcePaths: [context.asAbsolutePath(SERVED_MODEL_HELPER)] });
       if (helper === undefined) return null;
-      const verdicts = await readServedModels({ bunPath: bun, helperPath: helper.path, packageRoot: pkg.root, cwd: path.dirname(helper.path), pairs: missing });
+      // A page asked for these verdicts: on-screen work, bounded with the window's other helpers (the reader has no cancel, so a closing window only stops waiting for it).
+      const verdicts = await s.helpers.run({ label: "served-model check", class: "visible", run: () => readServedModels({ bunPath: bun, helperPath: helper.path, packageRoot: pkg.root, cwd: path.dirname(helper.path), pairs: missing }) });
       if (verdicts === null) log.warn(`the served-model verdicts of ${key} could not be read`);
       return verdicts;
     });
   } catch (error) {
-    log.warn(`the served-model verdicts could not be read: ${messageOf(error)}`);
+    if (!isHelperCancelled(error)) log.warn(`the served-model verdicts could not be read: ${messageOf(error)}`);
     return unknown();
   }
 }
@@ -7551,6 +7570,16 @@ async function executableFor(runtime: SessionHostRuntime | null): Promise<OmpCom
 }
 let resolvingExecutable: Promise<OmpCommand> | null = null;
 
+/**
+ * `runOmpCli` for what a page shows now (a settings question a Chat page asks): one of the window's bounded helper runs, ahead of background
+ * work and never held back by the startup restore (ADR-0084).
+ */
+const visibleOmpCli = (
+  executable: OmpCommand, args: readonly string[], timeoutMs: number, options: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> },
+): Promise<OmpCliResult> => windowState().helpers.run({
+  label: `omp ${args[0] ?? ""}`, class: "visible", run: signal => runOmpCli(executable, args, timeoutMs, { ...options, signal }),
+});
+
 const usageFailureNotes = new UsageFailureNotes();
 /** A provider-usage failure goes to the log with its cause, once per distinct cause for each tab. */
 function noteUsageFailure(binding: object, stage: string, error: unknown): void {
@@ -7559,34 +7588,51 @@ function noteUsageFailure(binding: object, stage: string, error: unknown): void 
 }
 
 /** Cache only a successful default-profile catalogue; unresolved OMP adds no onboarding UI. */
-function refreshDefaultProviderModels(): Promise<void> {
+function refreshDefaultProviderModels(reason: "credentials" | "discovery" = "credentials"): Promise<void> {
   const s = windowState();
-  s.defaultProviderModelsDirty = true;
+  // A credential change repeats a read that is already running (it may have started before the change); a discovery asked for
+  // by a session's first look or by activation joins whatever read is queued or running and starts one only when there is none.
+  if (reason === "credentials") s.defaultProviderModelsDirty = true;
   if (s.defaultProviderModelsRead !== null) return s.defaultProviderModelsRead;
   s.defaultProviderModelsRead = (async () => {
     do {
       s.defaultProviderModelsDirty = false;
-      let executable: OmpCommand;
-      try { executable = await executableFor(null); }
-      catch {
-        s.defaultProviderModelsAvailable = null;
-        s.launcherProvider?.setProviderLoginRequired(false);
-        continue;
-      }
       try {
-        const result = await runOmpCli(executable, ["models", "--json"], 15_000, {
-          cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
-          env: ompCliScopeEnvironment(DEFAULT_OMP_PROFILE),
-        });
-        if (result.exitCode !== 0) continue;
-        const parsed: unknown = JSON.parse(result.stdout);
-        if (typeof parsed !== "object" || parsed === null || !("models" in parsed) || !Array.isArray(parsed.models)) continue;
-        s.defaultProviderModelsAvailable = parsed.models.length > 0;
-        s.launcherProvider?.setProviderLoginRequired(!s.defaultProviderModelsAvailable);
-      } catch { log.warn("Default-profile models could not be read; retaining the last availability."); }
+        // Not needed for the first view: held back until the startup restore is over, bounded with the window's other helpers and spread across windows (ADR-0084).
+        await s.helpers.run({ label: "models of the default profile", class: "background", key: "models:default", run: signal => readDefaultProviderModels(s, signal) });
+      } catch (error) {
+        if (isHelperCancelled(error)) return;
+        log.warn("Default-profile models could not be read; retaining the last availability.");
+      }
     } while (s.defaultProviderModelsDirty);
   })().finally(() => { s.defaultProviderModelsRead = null; });
   return s.defaultProviderModelsRead;
+}
+
+/** One read of the default profile's model catalogue: `omp models --json`. */
+async function readDefaultProviderModels(s: WindowState, signal: AbortSignal): Promise<void> {
+  let executable: OmpCommand;
+  try { executable = await executableFor(null); }
+  catch {
+    s.defaultProviderModelsAvailable = null;
+    s.launcherProvider?.setProviderLoginRequired(false);
+    return;
+  }
+  try {
+    const result = await runOmpCli(executable, ["models", "--json"], 15_000, {
+      cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
+      env: ompCliScopeEnvironment(DEFAULT_OMP_PROFILE),
+      signal,
+    });
+    if (result.exitCode !== 0) return;
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (typeof parsed !== "object" || parsed === null || !("models" in parsed) || !Array.isArray(parsed.models)) return;
+    s.defaultProviderModelsAvailable = parsed.models.length > 0;
+    s.launcherProvider?.setProviderLoginRequired(!s.defaultProviderModelsAvailable);
+  } catch (error) {
+    if (signal.aborted) throw error;
+    log.warn("Default-profile models could not be read; retaining the last availability.");
+  }
 }
 
 /**
@@ -7617,7 +7663,7 @@ function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: 
     if (!ownedLoginClosed && terminal.name !== "omp login") return;
     announceCredentialsChanged(index);
   }), { dispose: () => { s.providerAuthRun?.abort(); } });
-  void refreshDefaultProviderModels();
+  void refreshDefaultProviderModels("discovery");
 }
 
 function recordSessionModels(index: SessionIndex, tabId: string, available: boolean): void {
@@ -7625,9 +7671,13 @@ function recordSessionModels(index: SessionIndex, tabId: string, available: bool
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
   if (!binding || binding.message.hasAvailableModels === available) return;
+  const firstLook = binding.message.hasAvailableModels === undefined;
   binding.message = { ...binding.message, hasAvailableModels: available };
   publishFooterMetadata(tabId);
-  void refreshDefaultProviderModels();
+  // A session's first look is no change: the read of the default profile this window queued at activation covers it, so it asks again
+  // only when that catalogue was never read. A changed answer is a hint that credentials changed.
+  if (!firstLook) void refreshDefaultProviderModels("credentials");
+  else if (s.defaultProviderModelsAvailable === null) void refreshDefaultProviderModels("discovery");
 }
 
 /** Read this conversation's own profile through RPC, never a per-session CLI. */
@@ -7743,9 +7793,16 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     binding.message = { ...binding.message, provider: model.provider, ...cache.get(model.provider, model.id) };
     binding.usageReadAt = cache.readAt(model.provider);
     publishFooterMetadata(tabId);
-    const usage = await cache.refresh(model.provider, model.id, () => runOmpCli(executable,
-      [...PROVIDER_USAGE_ARGS, "--provider", model.provider], PROVIDER_USAGE_TIMEOUT_MS,
-      { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile) }), forceUsage);
+    // A quota on screen (the active tab, or any Chat panel that is visible, as in a split) goes at once, bounded, and promotes a background read of the
+    // same scope that is still queued; every other tab's read waits for the startup restore (ADR-0084).
+    const usageKey = `usage\0${scope}\0${model.provider}`;
+    const onScreen = forceUsage || index.activeTabId === tabId || [...s.tabs.values()].some(state => state.tabId === tabId && state.panel?.visible === true);
+    if (onScreen) s.helpers.promote(usageKey);
+    const usage = await cache.refresh(model.provider, model.id, () => s.helpers.run({
+      label: "provider usage", class: onScreen ? "visible" : "background", key: usageKey,
+      run: signal => runOmpCli(executable, [...PROVIDER_USAGE_ARGS, "--provider", model.provider], PROVIDER_USAGE_TIMEOUT_MS,
+        { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile), signal }),
+    }), forceUsage);
     const chosen = s.sessionRuntime.conversations.liveOf(tabId)?.state?.model;
     if (s.footerBindings.get(tabId) !== binding || !sameSession() || hostOf(stateOf(tabId)) !== runtime ||
       chosen?.provider !== model.provider || chosen?.id !== model.id) return;

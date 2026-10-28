@@ -10,6 +10,7 @@ import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "../h
 import { configuredOmpPath } from "../host/omp-vscode";
 import { OMP_PATH_SETTING } from "../shared/omp-unavailable";
 import type { Logger } from "../shared/logger.ts";
+import type { HelperScheduler } from "../host/helper-scheduler.ts";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets";
 import type { InventoryTreeItem } from "../views/inventory-tree.ts";
 import type { InventoryScope, ViewKind } from "../host/inventory/inventory-model.ts";
@@ -23,6 +24,8 @@ export interface InventoryViewsDeps {
 	/** The window's pending-operation registry: a switched row reads `Saving <name>…` until its write is done. */
 	readonly pending: PendingOperations;
 	log: Logger;
+	/** The window's helper scheduler: the worker processes of every read and switch run through it. */
+	readonly helpers: Pick<HelperScheduler, "run">;
 }
 /** The calls `extension.ts` makes when the active editor or its session changes. */
 export interface InventoryHandle extends vscode.Disposable {
@@ -71,8 +74,12 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 				return { unavailable: "The inventory worker could not be prepared." };
 			}
 		},
-		run: input => runSettingsWorker({ bunPath: input.environment.bun, helperPath: input.environment.helperPath, packageRoot: input.environment.packageRoot,
-			cwd: input.cwd, profile: input.profile, request: input.request }),
+		// Every read and every switch is one of the window's bounded helper runs; a view that is showing reads at once, and a closing window ends the worker (ADR-0084).
+		run: input => deps.helpers.run({
+			label: `inventory ${String(input.request.action)}`, class: "visible",
+			run: signal => runSettingsWorker({ bunPath: input.environment.bun, helperPath: input.environment.helperPath, packageRoot: input.environment.packageRoot,
+				cwd: input.cwd, profile: input.profile, request: input.request, signal }),
+		}),
 	});
 	const providers = new Map<ViewKind, InventoryTreeProvider>();
 	const trees = new Map<ViewKind, vscode.TreeView<InventoryTreeItem>>();

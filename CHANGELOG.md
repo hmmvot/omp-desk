@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A reload no longer starts a batch of helper processes beside the restore.** After Reload Window every window started, as its Chat tabs went live, the short-lived OMP processes that fill the quota meter, the sign-in prompt and the Chat page's settings (about two dozen at once across four windows in one start analysis, each loading OMP's whole package on a machine that was busy restoring). They now go through one scheduler per window: what the visible tab shows (its quota, a setting the page asked for, the inventory views, the served-model check) starts at once but at most two at a time; everything else (the quota of the other tabs, the check whether the default profile has a model, the versions of other OMP installs) waits until the window's restore is over, runs one at a time and takes one of two slots shared by all windows, so the machine runs at most two of them whatever the number of windows. Each tab's first look at its models no longer asks for a fresh read of the default profile's catalogue (a read is repeated only after a sign-in, a sign-out or a changed answer). Closing the window cancels queued helpers and ends running ones. The Desk log (Info) gets one `helper runs:` line per window with the count, the peak at once and the first and last start; at Debug level every helper is logged with its wait and run time. In a model of four windows with six tabs each, 36 helpers with a peak of 20 at once became 28 with a peak of 4, none of the deferred ones before its window's restore ended; the first installed measurement comes with the build that carries this.
+
 ## [0.4.11] - 2026-10-27
 
 ### Added
