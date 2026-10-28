@@ -161,8 +161,13 @@ function proofDirectory(storageDir: string): string {
 	return join(storageDir, RUNTIME_ASSET_DIRECTORY, PTY_PROOF_DIRECTORY);
 }
 
+/** The name the key goes by on disk: a hash of the whole key, so equal keys share it and any differing field does not. */
+export function ptyProofKeyName(key: PtyProofKey): string {
+	return createHash("sha256").update(canonicalJson(key), "utf8").digest("hex");
+}
+
 export function ptyProofPath(storageDir: string, key: PtyProofKey): string {
-	return join(proofDirectory(storageDir), `${createHash("sha256").update(canonicalJson(key), "utf8").digest("hex")}.json`);
+	return join(proofDirectory(storageDir), `${ptyProofKeyName(key)}.json`);
 }
 
 /**

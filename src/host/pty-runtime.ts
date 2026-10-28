@@ -52,7 +52,8 @@ import {
 	type StagedRuntimeAsset,
 	type StagedRuntimeTree,
 } from "./runtime-assets.ts";
-import { forgetPtyProof, ptyProofKey, ptyProofPath, readPtyProof, writePtyProof, type PtyProofRecord, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
+import { forgetPtyProof, ptyProofKey, ptyProofKeyName, ptyProofPath, readPtyProof, writePtyProof, type PtyProofRecord, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
+import { singleFlight, type PtyFlightAttempt, type PtyFlightOptions } from "./pty-proof-flight.ts";
 import { isPtyDigest, PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
 import {
 	SELF_CHECK_DEADLINE_FLAG,
@@ -120,6 +121,21 @@ export interface ReusedPtyProof {
 	readonly file: string;
 }
 
+/** How the cross-window single-flight of the self-check shaped an answer, for the log. */
+export interface PtyFlightNote {
+	/**
+	 * `stored`: a proof another check stored appeared while this one waited (or just before it could start). `shared`: another check
+	 * ended without a proof while this one waited, and this answer is that outcome. `owner`: this window ran the check after waiting for
+	 * another's. `local`: the wait ran out and this window ran its own. "Another check" is another window's unless {@link foreign} is
+	 * false, when it was this window's own (a launch behind its window's warm-up).
+	 */
+	readonly via: "stored" | "shared" | "owner" | "local";
+	readonly waitedMs: number;
+	/** Whether a holder this window waited for ran in another process; false when it was this window's own check (a launch behind its window's warm-up). */
+	readonly foreign: boolean;
+	readonly why?: string;
+}
+
 export interface PtyRuntimeReadiness {
 	/**
 	 * A broker may be started from {@link runtime}. True for a proven tree and for one
@@ -143,6 +159,8 @@ export interface PtyRuntimeReadiness {
 	 * no self-check ran for it. `provedAt` is when that earlier self-check ran.
 	 */
 	readonly reusedProof?: ReusedPtyProof;
+	/** Set when the answer came by way of the single-flight with another window ({@link PtyFlightNote}). */
+	readonly flight?: PtyFlightNote;
 }
 
 export interface PtyRuntimeOptions {
@@ -178,6 +196,8 @@ export interface PtyRuntimeOptions {
 	readonly runtimeArgs?: readonly string[];
 	/** Test seam; defaults to `Date.now`. */
 	readonly now?: () => number;
+	/** Test seams of the cross-window single-flight of the self-check ({@link singleFlight}). */
+	readonly flight?: PtyFlightOptions;
 }
 
 /**
@@ -229,6 +249,9 @@ export interface SelfCheckResult {
 
 /** Extra time the host gives the entry beyond its two deadlines: process start and the addon load. */
 const SELF_CHECK_HOST_SLACK_MS = 30_000;
+
+/** Time a check's lock outlives the longest run its holder can legitimately have, so a late finish is not taken over. */
+const SELF_CHECK_LOCK_MARGIN_MS = 5_000;
 
 /** The parsed first JSON line the staged entry printed, or `null` when it printed none. */
 function selfCheckAnswerRecord(stdout: string): Record<string, unknown> | null {
@@ -408,6 +431,13 @@ async function runSelfCheck(
 	return { kind: "proven", answer, detail: "the runtime proved itself" };
 }
 
+/** A runtime that passed its self-check in this process, and the stored proof it was taken from when this process did not run the check itself. */
+interface ProvedEntry {
+	readonly runtime: PtyRuntime;
+	/** Kept with the entry, so a launch that finds the proof already in process (a window's warm-up read it) can still withdraw exactly that stored proof when the launch contradicts it. */
+	readonly reusedProof?: ReusedPtyProof;
+}
+
 /**
  * Runtimes that already passed their self-check.
  *
@@ -416,7 +446,7 @@ async function runSelfCheck(
  * different ABI question, and the same digest under another storage directory points
  * at another copy.
  */
-const provedRuntimes = new Map<string, PtyRuntime>();
+const provedRuntimes = new Map<string, ProvedEntry>();
 
 /** Forget every in-process proof, so the next call reads the persistent proof or runs the check (a new window's view). */
 export function forgetProvedPtyRuntimes(): void {
@@ -543,7 +573,7 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		options.pipeOnly === true ? `pipe-only\0${await executableStamp(ptyRuntimeCommand(options.nodePath).command)}` : "full"
 	}`;
 	const cached = provedRuntimes.get(cacheKey);
-	if (cached !== undefined) return readyAnswer(cached);
+	if (cached !== undefined) return { ...readyAnswer(cached.runtime), ...(cached.reusedProof === undefined ? {} : { reusedProof: cached.reusedProof }) };
 	if (!(await verifyStagedRuntimeTree(tree))) {
 		return notReady("the staged broker tree does not hold the bytes it was staged with");
 	}
@@ -566,15 +596,59 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 	});
 	// A window or reload that finds the proof an earlier one stored under the same key skips the self-check:
 	// the tree was staged, its access verified and every copy re-hashed above exactly as for a first run.
-	if (key !== null) {
-		const stored = await readPtyProof(options.storageDir, key, now());
-		if (stored.kind === "hit") {
-			const reused = build(stored.record.selfCheck);
-			provedRuntimes.set(cacheKey, reused);
-			return { ...readyAnswer(reused), reusedProof: { provedAt: stored.record.provedAt, file: ptyProofPath(options.storageDir, key) } };
+	const reuse = (stored: PtyProofRecord, flight?: PtyFlightNote): PtyRuntimeReadiness => {
+		const reused = build(stored.selfCheck);
+		const reusedProof: ReusedPtyProof = { provedAt: stored.provedAt, file: ptyProofPath(options.storageDir, stored.key) };
+		provedRuntimes.set(cacheKey, { runtime: reused, reusedProof });
+		return { ...readyAnswer(reused), reusedProof, ...(flight === undefined ? {} : { flight }) };
+	};
+	const checkAndRecord = async (): Promise<SelfCheckResult> => {
+		const check = await (options.runSelfCheck ?? runSelfCheck)({ entry, native, tree }, options);
+		if (check.kind !== "broken" && check.answer !== null && key !== null) {
+			const record: PtyProofRecord = { format: 1, key, provedAt: new Date(now()).toISOString(), selfCheck: check.answer };
+			// Failing to remember a proof costs the next window one more self-check, never a launch.
+			await writePtyProof(options.storageDir, record).catch(() => undefined);
+		}
+		return check;
+	};
+	let check: SelfCheckResult;
+	let flight: PtyFlightNote | undefined;
+	if (key === null) {
+		check = await checkAndRecord();
+	} else {
+		// One window runs the self-check of this exact key at a time; the others take its stored proof, or the outcome it ended
+		// with while they waited, and run their own only when the wait runs out (ADR-0032, amendment 2026-10-28).
+		const deadlineMs = options.selfCheckDeadlineMs ?? SELF_CHECK_DEADLINE_MS;
+		const flown = await singleFlight<PtyProofRecord, SelfCheckResult & PtyFlightAttempt>({
+			storageDir: options.storageDir,
+			name: ptyProofKeyName(key),
+			deadlineMs,
+			maxRunMs: 2 * deadlineMs + SELF_CHECK_HOST_SLACK_MS + SELF_CHECK_LOCK_MARGIN_MS,
+			readStored: async () => {
+				const stored = await readPtyProof(options.storageDir, key, now());
+				return stored.kind === "hit" ? stored.record : null;
+			},
+			attempt: async () => {
+				const result = await checkAndRecord();
+				return { ...result, kind: result.kind === "broken" ? "broken" : result.answer === null ? "inconclusive" : "proven" };
+			},
+			...(options.flight === undefined ? {} : { options: options.flight }),
+		});
+		const noted = (via: PtyFlightNote["via"], why?: string): PtyFlightNote => ({ via, waitedMs: flown.waitedMs, foreign: flown.foreign, ...(why === undefined ? {} : { why }) });
+		if (flown.via === "stored") return reuse(flown.stored, flown.waitedMs > 0 ? noted("stored") : undefined);
+		if (flown.via === "shared") {
+			flight = noted("shared");
+			check = {
+				kind: flown.outcome.kind,
+				answer: null,
+				detail: `${flown.outcome.detail} (${flown.foreign ? "the check another window ran at the same moment" : "the check this window was already running"}; this window waited ${flown.waitedMs} ms for it)`,
+			};
+		} else {
+			check = flown.attempt;
+			if (flown.via === "local") flight = noted("local", flown.why);
+			else if (flown.waitedMs > 0) flight = noted("owner");
 		}
 	}
-	const check = await (options.runSelfCheck ?? runSelfCheck)({ entry, native, tree }, options);
 	if (check.kind === "broken") {
 		return notReady(check.detail, tree.digest);
 	}
@@ -588,15 +662,11 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 			...readyAnswer(runtime),
 			proven: false,
 			reason: `${check.detail}; no fault was observed, so the runtime is admitted unproven while the check is repeated with a longer deadline`,
+			...(flight === undefined ? {} : { flight }),
 		};
 	}
-	provedRuntimes.set(cacheKey, runtime);
-	if (key !== null) {
-		const record: PtyProofRecord = { format: 1, key, provedAt: new Date(now()).toISOString(), selfCheck: check.answer };
-		// Failing to remember a proof costs the next window one more self-check, never a launch.
-		await writePtyProof(options.storageDir, record).catch(() => undefined);
-	}
-	return readyAnswer(runtime);
+	provedRuntimes.set(cacheKey, { runtime });
+	return { ...readyAnswer(runtime), ...(flight === undefined ? {} : { flight }) };
 
 	function notReady(reason: string, digest: string | null = null): PtyRuntimeReadiness {
 		return {

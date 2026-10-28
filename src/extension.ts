@@ -54,7 +54,8 @@ import { acquireClaim, claimsDirectory, createClaimHolder, createOwnerGeneration
 import { CoalescedRun } from "./host/coalesced-run";
 import { startFsTurnaroundProbe } from "./host/fs-turnaround";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
-import type { OmpCommand, OmpPackageRoot } from "./host/native-terminal";
+import type { OmpBinary, OmpCommand, OmpPackageRoot } from "./host/native-terminal";
+import { startChatRuntimeWarmup } from "./host/chat-runtime-warmup";
 import {
   SESSION_INDEX_LOCAL_KEY,
   SESSION_INDEX_STORAGE_KEY,
@@ -2441,6 +2442,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // folder a reinstall may be renaming. The launch paths stage again themselves and
   // report their own failure; this one is just early, and silent.
   void s.staging.entries().catch(() => {});
+  // The Bun plan's pipe-only check of the first Chat is run now, in the background and after this function has returned, so the first
+  // Chat finds it done; several windows share one run (ADR-0074 amendment 2026-10-28).
+  const warmingClient = s.ptyClient;
+  if (warmingClient !== undefined) startChatRuntimeWarmup({ resolve: sharedOmpBinary, warm: binary => warmingClient.warmChatRuntime(binary), log });
   activation.mark("rest of setup");
   log.info(`window timing: activation ${activation.summary([["host up when the bundle began loading", MODULE_EVALUATION_STARTED_AT], ["bundle evaluation", activationEnteredAt - MODULE_EVALUATION_STARTED_AT, activationEnteredCpu - MODULE_EVALUATION_STARTED_CPU_MS], [`catalog read (${fileCalls} file calls, from the start of the setup)`, catalogReadMs]])}`);
   log.info("extension activated");
@@ -7597,17 +7602,24 @@ function ompCliScopeEnvironment(profile: string | null): Record<string, string> 
 }
 
 /**
+ * The installed OMP a launch would run, resolved now. One resolution at a time: every concurrent caller (the footer of each tab after a
+ * restore, the first of them under load; the Bun pre-check at activation) used to run its own `omp --version` probe, which only made a
+ * busy machine busier and every probe slower.
+ */
+function sharedOmpBinary(): Promise<OmpBinary> {
+  resolvingExecutable ??= resolveOmpBinary().finally(() => { resolvingExecutable = null; });
+  return resolvingExecutable;
+}
+let resolvingExecutable: Promise<OmpBinary> | null = null;
+
+/**
  * The installed OMP a CLI call runs: the exact one a host this window launched started from,
  * or — for a re-adopted host that did not record it — the one a launch would resolve now.
  */
 async function executableFor(runtime: SessionHostRuntime | null): Promise<OmpCommand> {
   if (runtime?.binary != null) return runtime.binary;
-  // One resolution at a time: every concurrent caller (the footer of each tab after a restore, the first of them under load)
-  // used to run its own `omp --version` probe, which only made a busy machine busier and every probe slower.
-  resolvingExecutable ??= resolveOmpBinary().finally(() => { resolvingExecutable = null; });
-  return resolvingExecutable;
+  return await sharedOmpBinary();
 }
-let resolvingExecutable: Promise<OmpCommand> | null = null;
 
 /**
  * `runOmpCli` for what a page shows now (a settings question a Chat page asks): one of the window's bounded helper runs, ahead of background

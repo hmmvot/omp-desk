@@ -63,6 +63,26 @@ function probeTiming(readiness: PtyRuntimeReadiness, elapsedMs: number): string 
 	return check < 0 ? `ready in ${elapsedMs} ms` : `self-check ${check} ms, ready in ${elapsedMs} ms`;
 }
 
+/**
+ * What the cross-window single-flight did to an answer, as a log suffix (`""` when it did nothing): the Output log is where an
+ * installed update's several windows show whether one of them did the check for the others (ADR-0032, amendment 2026-10-28).
+ */
+function flightSuffix(readiness: PtyRuntimeReadiness): string {
+	const flight = readiness.flight;
+	if (flight === undefined) return "";
+	const whose = flight.foreign ? "another window's" : "this window's own";
+	switch (flight.via) {
+		case "stored":
+			return `; waited ${flight.waitedMs} ms for ${whose} check that was running and took its proof`;
+		case "shared":
+			return `; waited ${flight.waitedMs} ms for ${whose} check that was running and took its answer`;
+		case "owner":
+			return `; waited ${flight.waitedMs} ms for ${whose} check, which left no proof, and ran this one`;
+		case "local":
+			return `; ran its own check after waiting ${flight.waitedMs} ms (${flight.why ?? "no reason given"})`;
+	}
+}
+
 export class PtyRuntimeProof {
 	private readonly input: PtyRuntimeProofInput;
 	private readonly now: () => number;
@@ -132,12 +152,12 @@ export class PtyRuntimeProof {
 				this.proven = readiness;
 				this.input.log?.info(
 					readiness.reusedProof === undefined
-						? `PTY runtime proved itself: ${probeTiming(readiness, this.now() - started)}`
-						: `PTY runtime proof reused from ${readiness.reusedProof.provedAt}: ready in ${this.now() - started} ms`,
+						? `PTY runtime proved itself: ${probeTiming(readiness, this.now() - started)}${flightSuffix(readiness)}`
+						: `PTY runtime proof reused from ${readiness.reusedProof.provedAt}: ready in ${this.now() - started} ms${flightSuffix(readiness)}`,
 				);
 			} else if (readiness.ready) {
 				this.provisional = readiness;
-				this.input.log?.warn(`PTY runtime admitted unproven after ${this.now() - started} ms: ${readiness.reason ?? "the self-check was inconclusive"}`);
+				this.input.log?.warn(`PTY runtime admitted unproven after ${this.now() - started} ms: ${readiness.reason ?? "the self-check was inconclusive"}${flightSuffix(readiness)}`);
 				this.reprobes = 0;
 				this.scheduleReprobe();
 			}
@@ -172,8 +192,8 @@ export class PtyRuntimeProof {
 			this.provisional = null;
 			this.input.log?.info(
 				readiness.reusedProof === undefined
-					? `PTY runtime proved itself on the repeated self-check: ${probeTiming(readiness, this.now() - started)}`
-					: `PTY runtime proof reused from ${readiness.reusedProof.provedAt}: ready in ${this.now() - started} ms`,
+					? `PTY runtime proved itself on the repeated self-check: ${probeTiming(readiness, this.now() - started)}${flightSuffix(readiness)}`
+					: `PTY runtime proof reused from ${readiness.reusedProof.provedAt}: ready in ${this.now() - started} ms${flightSuffix(readiness)}`,
 			);
 		} else if (readiness.ready) {
 			// Cannot happen with the extended deadline (the host refuses a late answer to it),

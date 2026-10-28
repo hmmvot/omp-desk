@@ -161,6 +161,34 @@ A **proven** self-check is stored under `<globalStorage>/runtime/pty-proof/<sha2
 
 Status of this amendment: **accepted** after independent architecture review (2026-10-13); the review's findings were resolved before acceptance.
 
+## Amendment 2026-10-28 (accepted after independent architecture review): windows that need the same check run it once
+
+### Context
+
+The 2026-10-13 amendment stores a proven self-check, but a window that finds no stored proof runs the check, and after an update every window finds none at the same moment: four windows of one update each ran the same self-check at once (8.9–16.0 s each, 22–23 s until ready) for a tree, an executable and an operating system build that are the same in all of them. Concurrent checks slow one another, which is how a check that takes seconds alone runs past its deadline and admits every window provisionally.
+
+### Decision
+
+The self-check of one proof key runs in one window at a time ([design](../designs/2026-10-28-one-pty-check-for-all-windows.md)). A lock `<globalStorage>/runtime/pty-flight/<sha256 of the key>.lock` (named like the proof file, beside it, not inside `pty-proof/`) is taken, created whole by linking a temporary file, before the check and released after the proof is stored; it carries the holder's process id and the longest time its check can last. The stored proof stays the only result of a success: a window that finds the lock held polls the proof and reuses it when it appears (`reusedProof`, so the 2026-10-13 withdrawal of a reused proof applies unchanged).
+
+- **Staleness.** A lock is taken over when its holder's process is not alive, when its time is past although the process id is alive, or when its content is corrupt, after a second read that confirms it is the same lock. A lock that cannot be read for a moment is waited for, never removed. The lock is not a mutual exclusion the answer depends on: two windows that both take over a stale lock run two checks and the proof write, atomic and equal, makes the duplicate harmless.
+- **Bounded wait.** `2 × the check's deadline + 5 s`; past it, or when the directory cannot be used, the window runs its own check without the lock, exactly as before.
+- **What is never stored stays unstored.** A check that ends inconclusive or broken writes no proof. It leaves a short outcome (kind, detail, the deadline it ran under) beside the lock, and only a window that waited for that very holder, with a deadline no longer than the holder's, takes it as its own answer (provisional admission or refusal, worded as another window's); a window that starts later, or with a longer deadline (the 90 s re-check of 2026-10-12), runs its own check. The outcome file is read by no other path, so a failure is never reused as a proof.
+- The key already covers every input of the answer (tree digest, runtime version, executable path/size/time, versions, platform, architecture, OS release, pipe-only), so flights of different keys never wait for each other; staging, the access verification and the byte verification stay per window and precede the flight.
+
+### Consequences
+
+- Positive: after an update the windows run one check, not one each; the windows behind it take its proof, or its outcome, instead of competing with it.
+- Negative: a window waits for a check another window runs (at most the bound above) where it would have run its own concurrently; a holder whose process id was reused delays waiters until the lock's time is up; two small files per key may stay behind after a crash or an inconclusive check.
+- Not changed: the proof's contents, its 24-hour age bound, the 2026-10-12 provisional admission and extended re-check, the access rules the staging pass establishes (the flight directory lives below `runtime/` like `pty-proof/`).
+
+### Review
+
+- Reviewer: reviewer (separate agent), two passes, against the source and tests (see the [design](../designs/2026-10-28-one-pty-check-for-all-windows.md), Architecture Review).
+- Outcome: accept with changes, then confirmed. The lock protocol, the outcome rule, the wait bounds and the access-rule claim were found sound; one must-fix (the in-process cache dropped the stored proof's file, which would have ended the withdrawal of a reused proof for every window that warmed up: fixed and tested), three should-fix items and four nits, all applied.
+
+Status of this amendment: **accepted** (2026-10-28).
+
 ## Related Documents
 
 [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md);

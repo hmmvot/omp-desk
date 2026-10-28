@@ -62,7 +62,7 @@ import {
 } from "./pty-protocol.ts";
 import { BrokerHandle, type BrokerHandleEvent, type SnapshotCollector } from "./broker-handle.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, type PtyIdentityReading } from "./pty-identity.ts";
-import { proveBunRuntime } from "./pty-bun-proof.ts";
+import { proveBunRuntime, type BunProofResult } from "./pty-bun-proof.ts";
 import { connectPtyBroker, type PtyClientSideConnection, type PtyConnectTimings } from "./pty-ipc.ts";
 import {
 	acquirePtySlotLock,
@@ -119,6 +119,12 @@ export interface ChatBrokerRuntimePolicy {
 	readonly trust?: ExecutableTrustProbe;
 	/** Test seam: how the launch's `bun.exe` is located. */
 	readonly bunLaunch?: BunLaunchDeps;
+}
+
+/** How one {@link PtyBrokerClient.warmChatRuntime} ended. `skipped`: the launch would not take the Bun plan (or it is held); `failed`: the check could not run. */
+export interface ChatRuntimeWarmup {
+	readonly outcome: "proved" | "reused" | "inconclusive" | "refused" | "skipped" | "failed";
+	readonly detail: string;
 }
 
 /** A proven Bun plan: the staged tree proved pipe-only under this exact file. */
@@ -947,30 +953,11 @@ export class PtyBrokerClient {
 		const stamp = await bunStamp(executable);
 		if (stamp === null) return refuse("executable", `${executable} could not be read`);
 		const key = `${executable.toLowerCase()}\0${stamp}`;
-		const held = this.bunHeld.get(key);
-		if (held !== undefined) {
-			if (held.until === null || (this.options.now ?? Date.now)() < held.until) return { kind: "vscode", fallback: held.fallback };
-			this.bunHeld.delete(key);
-		}
+		const held = this.heldBunFallback(key);
+		if (held !== null) return { kind: "vscode", fallback: held };
 		// The pipe-only check overlaps the window's first full proof when a Chat starts before that has answered; an inconclusive
 		// answer that came meanwhile is not acted on (it runs once more after the full proof, `proveBunRuntime`).
-		const [trust, proved] = await Promise.all([
-			verifyExecutableTrust(executable, policy.trust),
-			proveBunRuntime({
-				prove: () =>
-					ensurePtyRuntime({
-						storageDir: this.options.storageDir,
-						extensionRoot: this.options.extensionRoot,
-						nodePath: executable,
-						pipeOnly: true,
-						runtimeArgs: BUN_RUNTIME_ARGS,
-						...(this.options.env === undefined ? {} : { env: this.options.env }),
-						...(this.options.access === undefined ? {} : { access: this.options.access }),
-					}),
-				fullProbeRunning: () => this.proof.probing(),
-				fullProbeSettled: () => this.proof.settled(),
-			}),
-		]);
+		const [trust, proved] = await Promise.all([verifyExecutableTrust(executable, policy.trust), this.proveBunPipeOnly(executable)]);
 		const readiness = proved.readiness;
 		if (!trust.ok) return refuse("trust", `${executable} is not trusted to host a broker: ${trust.reason}`);
 		if (!readiness.ready || readiness.runtime === null) {
@@ -995,6 +982,76 @@ export class PtyBrokerClient {
 			return refuse("version", `${executable} reports ${bun === null ? "no Bun version" : `Bun ${bun}`}; a Chat broker needs Bun ${MIN_BUN_VERSION} or newer`);
 		}
 		return { kind: "bun", runtime: readiness.runtime, executable, version: bun, stamp, reused: readiness.reusedProof ?? null, key };
+	}
+
+	/**
+	 * The Bun plan's pipe-only check of one `bun.exe`, as a launch and the warm-up run it. When a Chat starts before this window's
+	 * first full proof has answered, the two overlap; an inconclusive answer that came meanwhile is not acted on (it runs once more
+	 * after the full proof, `proveBunRuntime`).
+	 */
+	private async proveBunPipeOnly(executable: string): Promise<BunProofResult> {
+		return await proveBunRuntime({
+			prove: () =>
+				ensurePtyRuntime({
+					storageDir: this.options.storageDir,
+					extensionRoot: this.options.extensionRoot,
+					nodePath: executable,
+					pipeOnly: true,
+					runtimeArgs: BUN_RUNTIME_ARGS,
+					...(this.options.env === undefined ? {} : { env: this.options.env }),
+					...(this.options.access === undefined ? {} : { access: this.options.access }),
+				}),
+			fullProbeRunning: () => this.proof.probing(),
+			fullProbeSettled: () => this.proof.settled(),
+		});
+	}
+
+	/**
+	 * Run the Bun plan's pipe-only check of this OMP launch's `bun.exe` ahead of the first Chat start, so that start finds the proof
+	 * in this process and in the store instead of waiting for it
+	 * ([ADR-0074](../../docs/decisions/0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md), amendment
+	 * 2026-10-28). It judges what a launch judges up to the check itself (setting, platform, launcher, file, hold) and stops there:
+	 * the trust read is the launch's own, and neither a hold nor a fallback is recorded, so a warm-up whose check ran out of time
+	 * costs the next launch nothing it would not have paid. It starts no broker or session. Never throws; every check runs through
+	 * the cross-window single-flight, so several windows warming at once run one.
+	 */
+	async warmChatRuntime(binary: OmpLaunchFacts): Promise<ChatRuntimeWarmup> {
+		const policy = this.options.chatBrokerRuntime;
+		if (policy === undefined) return { outcome: "skipped", detail: "no Chat broker runtime policy" };
+		try {
+			if (policy.setting() === "vscode") return { outcome: "skipped", detail: `${CHAT_BROKER_RUNTIME_SETTING} is set to "vscode"` };
+			const inspected = await inspectBunLaunch(binary, policy.bunLaunch);
+			if (!inspected.ok) return { outcome: "skipped", detail: inspected.fallback.detail };
+			const executable = inspected.executable;
+			const stamp = await bunStamp(executable);
+			if (stamp === null) return { outcome: "skipped", detail: `${executable} could not be read` };
+			const held = this.heldBunFallback(`${executable.toLowerCase()}\0${stamp}`);
+			if (held !== null) return { outcome: "skipped", detail: held.detail };
+			const clock = this.options.now ?? Date.now;
+			const started = clock();
+			const proved = await this.proveBunPipeOnly(executable);
+			const readiness = proved.readiness;
+			const ms = clock() - started;
+			const outcome: ChatRuntimeWarmup["outcome"] = !readiness.ready ? "refused" : !readiness.proven ? "inconclusive" : readiness.reusedProof === undefined ? "proved" : "reused";
+			const detail = `${executable}: ${outcome} in ${ms} ms${readiness.flight === undefined ? "" : ` (${readiness.flight.via} after waiting ${readiness.flight.waitedMs} ms)`}${readiness.reason === null ? "" : `: ${readiness.reason}`}`;
+			const line = `Bun runtime pre-check ahead of the first Chat: ${detail}`;
+			if (outcome === "refused" || outcome === "inconclusive") this.options.log?.warn(line);
+			else this.options.log?.info(line);
+			return { outcome, detail };
+		} catch (error) {
+			const detail = `the check could not run: ${error instanceof Error ? error.message : String(error)}`;
+			this.options.log?.warn(`Bun runtime pre-check ahead of the first Chat: ${detail}`);
+			return { outcome: "failed", detail };
+		}
+	}
+
+	/** Why one executable file ({@link BunBrokerPlan.key}) is kept off the Bun path right now, or `null`; a hold that ran out is dropped. */
+	private heldBunFallback(key: string): ChatBrokerFallback | null {
+		const held = this.bunHeld.get(key);
+		if (held === undefined) return null;
+		if (held.until === null || (this.options.now ?? Date.now)() < held.until) return held.fallback;
+		this.bunHeld.delete(key);
+		return null;
 	}
 
 	/** Keep one executable file off the Bun path until it changes (`until: null`) or until a time. */

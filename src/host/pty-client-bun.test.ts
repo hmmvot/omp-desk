@@ -623,6 +623,51 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 		});
 	});
 
+	describe("warms the pipe-only check ahead of the first launch", () => {
+		const preChecks = (window: Window): string[] => window.events.filter(message => message.startsWith("Bun runtime pre-check ahead of the first Chat:"));
+
+		it("checks nothing for a launch that would not take the Bun plan, for the setting that forbids it and for a policy-less window", { timeout: TEST_TIMEOUT_MS }, async () => {
+			const window = windowWith({});
+			assert.equal((await window.client.warmChatRuntime({ command: nodeAsBun, launcher: "program" })).outcome, "skipped");
+			assert.equal((await window.client.warmChatRuntime({ command: nodeAsBun })).outcome, "skipped");
+			assert.equal((await windowWith({ setting: () => "vscode" }).client.warmChatRuntime({ command: nodeAsBun, launcher: "bun-shim" })).outcome, "skipped");
+			assert.equal((await windowWith({ bunLaunch: { platform: "linux" } }).client.warmChatRuntime({ command: nodeAsBun, launcher: "bun-shim" })).outcome, "skipped");
+			assert.equal((await windowWith(null).client.warmChatRuntime({ command: nodeAsBun, launcher: "bun-shim" })).outcome, "skipped");
+			assert.equal(window.trustReads.length, 0);
+			assert.deepEqual(window.events, [], "a skipped warm-up logs nothing at the levels a user reads");
+		});
+
+		it("proves the machine's Bun before any launch asks, and the launch then starts on it", { timeout: TEST_TIMEOUT_MS, skip: NEEDS_BUN }, async () => {
+			assert.ok(REAL);
+			const window = windowWith({});
+			const warmed = await window.client.warmChatRuntime({ command: REAL.executable, launcher: "bun-shim" });
+			assert.ok(warmed.outcome === "proved" || warmed.outcome === "reused", warmed.detail);
+			assert.equal(preChecks(window).length, 1);
+			assert.equal(window.trustReads.length, 0, "the warm-up does not read the executable's security: that is the launch's");
+			assert.deepEqual(runtimeLines(window), [], "a warm-up decides nothing and logs no runtime line");
+			const handle = runningHandle(await launch(window, { command: REAL.executable, launcher: "bun-shim" }));
+			assert.deepEqual(recordedRuntime(handle), { engine: "bun", version: REAL.version });
+			assert.equal(window.trustReads.length, 1);
+		});
+
+		it("holds nothing when its check is refused: the launch runs its own check and decides for itself", { timeout: TEST_TIMEOUT_MS }, async () => {
+			const window = windowWith({});
+			const warmed = await window.client.warmChatRuntime({ command: nodeAsBun, launcher: "bun-shim" });
+			assert.equal(warmed.outcome, "refused", warmed.detail);
+			assert.equal(levelOfPreCheck(window), "warn");
+			const handle = runningHandle(await launch(window, { command: nodeAsBun, launcher: "bun-shim" }));
+			assertOnExtensionHost(handle);
+			const lines = runtimeLines(window);
+			assert.equal(lines.length, 1);
+			assert.ok((lines[0] ?? "").includes(`the pipe-only self-check on ${await realpath(nodeAsBun)} refused it`), lines[0]);
+			assert.equal(window.trustReads.length, 1, "the launch read the trust itself");
+		});
+
+		function levelOfPreCheck(window: Window): string | undefined {
+			return window.levelled.find(line => line.message.startsWith("Bun runtime pre-check ahead of the first Chat:"))?.level;
+		}
+	});
+
 	describe("without a policy", () => {
 		it("starts every broker on the extension host's executable and logs nothing about Bun", { timeout: TEST_TIMEOUT_MS }, async () => {
 			const window = windowWith(null);

@@ -678,7 +678,7 @@ describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win
 			assert.ok(full.reusedProof && pipeOnly.reusedProof);
 			await discardReusedPtyProof(pipeOnly.reusedProof, { pipeOnly: true });
 			const fullAgain = await run(false);
-			assert.equal(fullAgain.reusedProof, undefined, "the full proof is still in the in-process cache");
+			assert.ok(fullAgain.reusedProof, "the full proof is still in the in-process cache, and its answer still names the stored file it came from");
 			assert.equal(runs(), 2);
 			const pipeOnlyAgain = await run(true);
 			assert.equal(pipeOnlyAgain.proven, true);
