@@ -39,6 +39,8 @@ import {
 	removeClaimOfGoneHolder,
 } from "./session-claim.ts";
 import type { ClaimHolder, ObservedClaim, SessionClaim } from "./session-claim.ts";
+import { proveContinuation } from "./session-chain.ts";
+import type { ContinuationProof } from "./session-chain.ts";
 import { acceptOwnerAbsenceEvidence, classifySessionAvailability } from "./session-availability.ts";
 import type {
 	AttachPin,
@@ -700,6 +702,20 @@ interface LiveSession {
 	/** Whether this window currently drives a runtime for the tab, as opposed to retaining its claim. */
 	driven: boolean;
 }
+
+/** A tentative identity write: the row it was decided against and what the row records once the write lands. */
+interface IdentityWrite {
+	readonly before: SharedEntry;
+	readonly sessionId: string;
+	readonly previousSessionId?: string;
+	/** Set when the conversation went on in another file: the row records this file and directory with the new id. */
+	readonly continuation?: { readonly sessionFile: string; readonly sessionDir: string };
+}
+
+/** Result of recording that a row's conversation went on in a newer file. */
+export type ContinuationAcceptance =
+	| { readonly status: "accepted"; readonly entry: SessionIndexEntry }
+	| { readonly status: "refused"; readonly detail: string };
 
 type LaunchStep =
 	| { readonly kind: "running"; readonly handle: OmpHostHandle }
@@ -3107,6 +3123,96 @@ export class SessionIndex {
 		});
 	}
 
+	// Continuations
+
+	/**
+	 * Record that the conversation of a row this window runs went on in a newer file (OMP 18.13: a session that cannot keep
+	 * writing its file continues in a sibling with a new session id). The row keeps its tab, editor and title and changes
+	 * the file and the id it records: one row follows its conversation instead of a second row appearing for the new file.
+	 *
+	 * The chain is proved again here from the files ({@link proveContinuation}); the caller's proof is only what it was
+	 * shown. Refused, with the row untouched, when the row does not record the file the proof starts from or another session
+	 * id, when this window does not run it, when another row (in this window or in the committed record) already holds the
+	 * new file, or when another live window holds that file's claim. The claim of the new file is taken before the write and
+	 * the claim of the old one is given up after it, so the conversation is never unclaimed; the write is one compare-and-swap
+	 * catalog transaction decided against the row as it was read, like a provider identity (ADR-0059). Recording the same
+	 * continuation twice is accepted and changes nothing.
+	 */
+	async acceptContinuation(tabId: string, proof: ContinuationProof, lease?: TabLifecycleLease): Promise<ContinuationAcceptance> {
+		return await this.withinTabLifecycle(tabId, lease, async () => await this.#acceptContinuationHeld(tabId, proof));
+	}
+
+	/** One acceptance's body; the caller already holds the tab's lifecycle. */
+	async #acceptContinuationHeld(tabId: string, proof: ContinuationProof): Promise<ContinuationAcceptance> {
+		const refuse = (detail: string): ContinuationAcceptance => ({ status: "refused", detail });
+		const entry = this.#entries.get(tabId);
+		if (entry === undefined) return refuse(`No indexed tab ${tabId}.`);
+		if (entry.sessionFile === null) return refuse("This row has no session file yet, so no file's conversation can have gone on.");
+		const recordedKey = normalizeSessionIdentityKey(entry.sessionFile);
+		if (recordedKey === normalizeSessionIdentityKey(proof.toFile) && entry.sessionId === proof.toId) return { status: "accepted", entry: toEntry(entry) };
+		if (recordedKey !== normalizeSessionIdentityKey(proof.fromFile)) return refuse(`This row records ${entry.sessionFile}, not ${proof.fromFile}.`);
+		const recordedId = entry.host?.sessionId ?? entry.sessionId;
+		if (recordedId !== null && recordedId !== proof.fromId) return refuse("This row records another session than the file the conversation went on from.");
+		const live = this.#live.get(tabId);
+		if (live === undefined || !live.driven) return refuse("This window does not run this session, so it does not record where the session went on.");
+		const verified = await proveContinuation(entry.sessionFile, proof.toFile);
+		if (verified === null || verified.fromId !== proof.fromId || verified.toId !== proof.toId) {
+			return refuse("The session files do not show that the conversation went on in the file OMP reported.");
+		}
+		const toKey = normalizeSessionIdentityKey(proof.toFile);
+		for (const other of this.#entries.values()) {
+			if (other.tabId !== tabId && other.sessionFile !== null && normalizeSessionIdentityKey(other.sessionFile) === toKey) {
+				return refuse("Another row in Sessions already holds the file this conversation went on in. Forget one of the two rows.");
+			}
+		}
+		let claim: SessionClaim;
+		try {
+			claim = await acquireClaim(this.#claimStorageDir, proof.toFile, entry.ownership?.ownerGeneration ?? createOwnerGeneration(), await this.#claimHolderReady);
+		} catch (error) {
+			if (error instanceof ClaimConflictError) return refuse("The file this conversation went on in is open in another window.");
+			return refuse(describeError(error));
+		}
+		const failure = await this.#persistNow(undefined, {
+			before: sharedEntryOf(entry),
+			sessionId: proof.toId,
+			previousSessionId: proof.fromId,
+			continuation: { sessionFile: proof.toFile, sessionDir: path.dirname(proof.toFile) },
+		});
+		if (failure !== null) {
+			await this.#releaseQuietly(claim);
+			return refuse(failure);
+		}
+		const driven = this.#live.get(tabId);
+		if (driven !== undefined) {
+			const previous = driven.claim;
+			this.#live.set(tabId, { ...driven, claim, sessionFile: proof.toFile });
+			await this.#releaseQuietly(previous);
+		}
+		this.#log?.info(`tab ${tabId}: the conversation went on from ${proof.fromFile} in ${proof.toFile} (${proof.hops} ${proof.hops === 1 ? "link" : "links"}); the row follows it`);
+		return { status: "accepted", entry: toEntry(entry) };
+	}
+
+	/**
+	 * The row that holds the conversation of `sessionFile` in *another* file of its chain, or `null`: a row whose file
+	 * continues `sessionFile` (an older file asked for) or is continued by it (a newer one). A file that has a row of its own
+	 * answers `null` here: this is for the callers that want "the row of this conversation" when the exact file has none,
+	 * not a replacement for {@link SessionIndex.trackSession}, which stays exact. Only rows of the same directory can be linked,
+	 * and a proof reads the files, so a directory of many rows costs a few header reads per row.
+	 */
+	async rowOfChain(sessionFile: string): Promise<SessionIndexEntry | null> {
+		const key = normalizeSessionIdentityKey(sessionFile);
+		const directory = normalizeSessionIdentityKey(path.dirname(sessionFile));
+		for (const row of [...this.#entries.values()]) {
+			if (row.sessionFile === null) continue;
+			if (normalizeSessionIdentityKey(row.sessionFile) === key) return null;
+		}
+		for (const row of [...this.#entries.values()]) {
+			if (row.sessionFile === null || normalizeSessionIdentityKey(path.dirname(row.sessionFile)) !== directory) continue;
+			if (await proveContinuation(sessionFile, row.sessionFile) !== null || await proveContinuation(row.sessionFile, sessionFile) !== null) return toEntry(row);
+		}
+		return null;
+	}
+
 	// Editor slots
 
 	/** The binding of one editor slot, or `null`. */
@@ -3694,11 +3800,7 @@ export class SessionIndex {
 	 * it is reported through {@link SessionIndex.localPersistError} and never gates a
 	 * lifecycle decision that the shared record already settled.
 	 */
-	async #persistNow(companion?: CatalogRecordChange, identity?: {
-		readonly before: SharedEntry;
-		readonly sessionId: string;
-		readonly previousSessionId?: string;
-	}, expectHost?: {
+	async #persistNow(companion?: CatalogRecordChange, identity?: IdentityWrite, expectHost?: {
 		readonly tabId: string;
 		/** Whether the *committed* row's host is still the incarnation this write was decided against. */
 		matches(host: { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null } | null): boolean;
@@ -3719,11 +3821,7 @@ export class SessionIndex {
 	}
 
 	/** One save queued behind the earlier ones; `atTurn` runs when it is this save's turn, before it captures its snapshot. */
-	async #persistTurn(companion: CatalogRecordChange | undefined, identity: {
-		readonly before: SharedEntry;
-		readonly sessionId: string;
-		readonly previousSessionId?: string;
-	} | undefined, expectHost: {
+	async #persistTurn(companion: CatalogRecordChange | undefined, identity: IdentityWrite | undefined, expectHost: {
 		readonly tabId: string;
 		matches(host: { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null } | null): boolean;
 		apply(row: SharedEntry): void;
@@ -3745,7 +3843,11 @@ export class SessionIndex {
 			if (identity !== undefined) {
 				const desired = snapshot.entries.find(row => row.tabId === identity.before.tabId);
 				if (desired !== undefined) {
-					if (desired.sessionFile === null) desired.sessionId = identity.sessionId;
+					if (desired.sessionFile === null || identity.continuation !== undefined) desired.sessionId = identity.sessionId;
+					if (identity.continuation !== undefined) {
+						desired.sessionFile = identity.continuation.sessionFile;
+						desired.sessionDir = identity.continuation.sessionDir;
+					}
 					if (desired.host !== null) desired.host = { ...desired.host, sessionId: identity.sessionId };
 				}
 			}
@@ -3765,11 +3867,22 @@ export class SessionIndex {
 					await this.#store.transactRecords([{ key: SESSION_INDEX_STORAGE_KEY, base: this.#sharedBase, decide: latest => {
 						const before = identity.before;
 						const committed = isPersistedSnapshot(latest) ? latest.entries.find(row => row.tabId === before.tabId) : undefined;
+						// A provider rotation needs the id it rotated away from on the host; a continuation also accepts a row that
+						// never recorded a host id, but never one that records another session.
+						const recordedId = committed?.host?.sessionId ?? committed?.sessionId ?? null;
+						const idMatches = identity.continuation === undefined
+							? committed?.host?.sessionId === identity.previousSessionId
+							: recordedId === null || recordedId === identity.previousSessionId;
 						if (committed === undefined || committed.sessionFile !== before.sessionFile ||
-							!sameRecord(committed.host, before.host) || !sameRecord(committed.ownership, before.ownership) ||
-							committed.host?.sessionId !== identity.previousSessionId) {
+							!sameRecord(committed.host, before.host) || !sameRecord(committed.ownership, before.ownership) || !idMatches) {
 							if (committed !== undefined) rejectedIdentity = cloneSharedEntry(committed);
 							return { refused: "The captured provider identity, file or runtime generation changed before acceptance." };
+						}
+						// Another window's row for the new file would make two rows of one conversation.
+						const continuedInto = identity.continuation === undefined ? null : normalizeSessionIdentityKey(identity.continuation.sessionFile);
+						if (continuedInto !== null && isPersistedSnapshot(latest) && latest.entries.some(row =>
+							row.tabId !== before.tabId && typeof row.sessionFile === "string" && normalizeSessionIdentityKey(row.sessionFile) === continuedInto)) {
+							return { refused: "Another row in Sessions already holds the file this conversation went on in." };
 						}
 						return { desired: mergeSessionIndexRecords({ base: this.#sharedBase, desired: snapshot, latest }).value };
 					} }]);
@@ -3792,7 +3905,11 @@ export class SessionIndex {
 				if (identity !== undefined) {
 					const entry = this.#entries.get(identity.before.tabId);
 					if (entry !== undefined) {
-						if (entry.sessionFile === null) entry.sessionId = identity.sessionId;
+						if (entry.sessionFile === null || identity.continuation !== undefined) entry.sessionId = identity.sessionId;
+						if (identity.continuation !== undefined) {
+							entry.sessionFile = identity.continuation.sessionFile;
+							entry.sessionDir = identity.continuation.sessionDir;
+						}
 						if (entry.host !== null) entry.host = { ...entry.host, sessionId: identity.sessionId };
 					}
 					const live = this.#live.get(identity.before.tabId);
@@ -4352,7 +4469,7 @@ export function mergeSessionIndexRecords(input: {
 		}
 		const merged = theirs === null ? mine : withLaterReplyMarkers(mine, theirs, before);
 		// Both windows changed the row: the run state (intent, host, release) follows the field-conditional rule, not "mine whole".
-		const settled = theirs !== null && before !== null && !sameRecord(before, theirs) ? settleRunState(merged, mine, theirs, before) : merged;
+		const settled = theirs !== null && before !== null && !sameRecord(before, theirs) ? settleIdentity(settleRunState(merged, mine, theirs, before), mine, theirs, before) : merged;
 		// Both windows wrote the same value: nothing was overwritten, so nothing is reported (as `mergeKeyedArray` does).
 		if (theirs !== null && !sameRecord(before, theirs) && !sameRecord(settled, theirs)) {
 			conflicts.push({
@@ -4426,6 +4543,19 @@ function settleRunState(merged: SharedEntry, mine: SharedEntry, theirs: SharedEn
 		ownership: sameRecord(mine.ownership, before.ownership) ? theirs.ownership : mine.ownership,
 		home: mine.home === before.home ? theirs.home : mine.home,
 	};
+}
+
+/**
+ * The identity of a row both windows changed: the file, the session id and the directory move together, and a window that
+ * did not move them keeps the committed ones.
+ *
+ * A conversation that went on in a newer file (OMP 18.13) changes all three in one write. Without this rule a window whose
+ * base still names the old file would take them back with its next title, unread or activity edit, and the live tab would
+ * disagree with its row. A window that changed any of them itself (a promotion, a continuation) keeps its own values.
+ */
+function settleIdentity(merged: SharedEntry, mine: SharedEntry, theirs: SharedEntry, before: SharedEntry): SharedEntry {
+	if (!sameRecord(mine.sessionFile, before.sessionFile) || !sameRecord(mine.sessionId, before.sessionId) || !sameRecord(mine.sessionDir, before.sessionDir)) return merged;
+	return { ...merged, sessionFile: theirs.sessionFile, sessionId: theirs.sessionId, sessionDir: theirs.sessionDir };
 }
 
 /** Keep an import-conflict marker either side holds: only resolution clears it. */

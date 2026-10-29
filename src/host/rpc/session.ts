@@ -146,6 +146,7 @@ import {
 	type HistoryRefresh,
 	type HistorySnapshot,
 } from "./history-reader.ts";
+import { proveContinuation, type ContinuationProof } from "../session-chain.ts";
 
 /** Time and timers; injectable so the state machine is deterministic in tests. */
 export interface RpcSessionTimers {
@@ -182,6 +183,18 @@ export interface RpcSessionOptions {
 	expectedProviderSessionId?: string;
 	/** Persist an accepted provider-only identity before releasing the operation's admission fence. */
 	acceptProviderIdentity?: (sessionFile: string, sessionId: string, previousSessionId: string) => Promise<void>;
+	/**
+	 * Persist the catalog's acceptance of a proven continuation (the conversation went on in a newer file; see
+	 * {@link RpcSession.sessionFile}) before the session goes on; a rejection ends the tab with `identity-diverged`, the way
+	 * {@link acceptProviderIdentity} does. Absent: the session emits an `identity` output carrying the proof.
+	 */
+	acceptContinuation?: (proof: ContinuationProof) => Promise<void>;
+	/** Proves that the file OMP reports continues the one this tab is bound to; defaults to {@link proveContinuation}. A test seam. */
+	proveContinuation?: (fromFile: string, toFile: string) => Promise<ContinuationProof | null>;
+	/** How long a session that moved while attached waits for the new file to appear before judging it (default 2 s). */
+	continuationWaitMs?: number;
+	/** How often that wait looks for the file (default 200 ms). */
+	continuationPollMs?: number;
 	/** Working directory shown for a new conversation (an existing file's header cwd wins). */
 	cwd: string;
 	/** Identifies this host instance in every {@link ChatEpoch}; differs per extension-host start. */
@@ -245,7 +258,7 @@ export type RpcSessionOutput =
 	/** `open_url`: the host shows an extension-owned confirm naming the URL. */
 	| { type: "open-url"; url: string; launchUrl?: string; instructions?: string }
 	/** The bound identity: learned for a new session, verified for a resumed one. */
-	| { type: "identity"; sessionFile: string; sessionId: string; previousSessionId?: string }
+	| { type: "identity"; sessionFile: string; sessionId: string; previousSessionId?: string; continuation?: ContinuationProof }
 	| { type: "prompt-result"; requestId: string | null; result: ChatPromptResult }
 	/** A prompt sent, unconfirmed across a disconnect, never showed up: *not delivered — send again manually*. */
 	| { type: "prompt-lost"; requestId: string }
@@ -576,6 +589,9 @@ const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 /** The link is called stalled when a command waits this long for its answer with no frame arriving, or a working session sends none. */
 const DEFAULT_STALL_AFTER_MS = 5_000;
 const DEFAULT_STALL_CHECK_MS = 1_000;
+/** OMP publishes a moved session's new file with the move's first flush; a state read that names it earlier waits this long for it. */
+const DEFAULT_CONTINUATION_WAIT_MS = 2_000;
+const DEFAULT_CONTINUATION_POLL_MS = 200;
 /** A broker status request outstanding this long tells the page the link is stalled. */
 const LINK_PROBE_GRACE_MS = 2_000;
 /** A full `get_entries` of a session file this large is tens of MiB of chunks; the file answers instead. */
@@ -868,6 +884,8 @@ export class RpcSession {
 	#mutationFence: string | null = null;
 	#rotationAllowed = false;
 	#identityAcceptance: Promise<void> | null = null;
+	/** The continuation being adopted; every other identity judgement waits for it, so one move is accepted once. */
+	#continuation: Promise<boolean> | null = null;
 	#freshFence = false;
 	#resetPhase: ResetPhase | null = null;
 	/** Model and thinking choices OMP could not take when they were made; sent in order as soon as it can. */
@@ -2352,6 +2370,7 @@ export class RpcSession {
 		const state = await statePromise;
 		if (this.#disposed || this.#ended) return;
 		if (state === null) throw new SessionFailure("state-failed");
+		if (!(await this.#followContinuation(state, bind)) || this.#disposed || this.#ended) return;
 		const mismatch = this.#identityMismatch(state, bind);
 		if (mismatch !== null) {
 			this.#fail(mismatch);
@@ -2402,6 +2421,122 @@ export class RpcSession {
 		if (!this.#btw.loaded || this.#btw.running) void this.#btw.history();
 	}
 
+	/**
+	 * Whether OMP reports a file that could be a continuation of the bound one: another session file of the same directory
+	 * that carries OMP's generated name for the id it reports (`<time>_<id>.jsonl`, how OMP names the file it moves to).
+	 * Anything else cannot be proven, so it is judged at once, without reading files.
+	 */
+	#reportsOtherFile(state: ParsedState): boolean {
+		const bound = this.#boundFile;
+		const reported = state.sessionFile;
+		if (bound === null || reported === null || state.sessionId === null || samePath(reported, bound)) return false;
+		return path.basename(reported).toLowerCase().endsWith(`_${state.sessionId}.jsonl`.toLowerCase()) && samePath(path.dirname(reported), path.dirname(bound));
+	}
+
+	/**
+	 * A state read taken while attached that names another file: the move may be a continuation, which is judged before the
+	 * read is applied or failed on.
+	 */
+	async #judgeMovedState(state: ParsedState, queueRevision: number): Promise<void> {
+		if (!(await this.#followContinuation(state, false)) || this.#disposed || this.#ended) return;
+		const mismatch = this.#identityMismatch(state, false);
+		if (mismatch !== null) this.#fail(mismatch);
+		else this.#applyFrame({ type: "state_update", state: this.#newestQueue(state.lite, queueRevision), todoSeed: state.todoSeed });
+	}
+
+	/**
+	 * Adopt a proven continuation when `state` names a file other than the bound one, before {@link #identityMismatch} judges it.
+	 * Resolves `true` when the caller may judge `state` as usual (nothing to follow, no proof, or adopted) and `false` when it must
+	 * stop without judging: the session ended or moved to another connection meanwhile, or the catalog refused and the tab failed.
+	 * Two reads of the same move share one adoption: the later one waits and then finds the file already bound.
+	 */
+	async #followContinuation(state: ParsedState, bind: boolean): Promise<boolean> {
+		while (this.#continuation !== null) await this.#continuation;
+		if (!this.#reportsOtherFile(state)) return true;
+		if (this.#disposed || this.#ended) return false;
+		const epoch = this.#epochCounter;
+		const run = this.#adoptContinuation(state, bind, epoch);
+		this.#continuation = run;
+		let accepted: boolean;
+		try {
+			accepted = await run;
+		} finally {
+			if (this.#continuation === run) this.#continuation = null;
+		}
+		return accepted && !this.#disposed && !this.#ended && epoch === this.#epochCounter;
+	}
+
+	/** `false` only when the catalog refused the continuation; a missing or wrong proof leaves the ordinary identity check to report. */
+	async #adoptContinuation(state: ParsedState, bind: boolean, epoch: number): Promise<boolean> {
+		const from = this.#boundFile;
+		const to = state.sessionFile;
+		if (from === null || to === null) return true;
+		const stale = (): boolean => this.#disposed || this.#ended || epoch !== this.#epochCounter || this.#boundFile !== from;
+		// A first attach reads a file OMP already resolved; only a move that happens while attached can name a file not written yet.
+		if (!bind) await this.#awaitFile(to, stale);
+		if (stale()) return true;
+		let proof: ContinuationProof | null;
+		try {
+			proof = await (this.#options.proveContinuation ?? proveContinuation)(from, to);
+		} catch {
+			proof = null;
+		}
+		// The id OMP serves must be the proven file's own: a proof of the file with another id is no evidence for this session.
+		if (stale() || proof === null || proof.toId !== state.sessionId || !samePath(proof.fromFile, from) || !samePath(proof.toFile, to)) return true;
+		this.#boundFile = proof.toFile;
+		this.#boundId = proof.toId;
+		if (this.#model.header !== null) this.#model = { ...this.#model, header: { ...this.#model.header, id: proof.toId } };
+		this.#fileMaterialized = true;
+		// The old file no longer grows; a reader on it would roll the transcript back.
+		this.#reader = null;
+		this.#readerLegacyIds = false;
+		this.#options.log?.info(`continuation accepted: ${from} -> ${proof.toFile} (${proof.hops} hops)`);
+		if (this.#options.acceptContinuation !== undefined) {
+			try {
+				await this.#options.acceptContinuation(proof);
+			} catch {
+				if (!this.#disposed && !this.#ended) this.#fail("identity-diverged");
+				return false;
+			}
+		} else this.#emit({ type: "identity", sessionFile: proof.toFile, sessionId: proof.toId, continuation: proof });
+		await this.#reopenHistory(proof.toFile);
+		if (this.#live && !this.#disposed && !this.#ended) this.#emitState();
+		return true;
+	}
+
+	/** Wait, bounded, for a file OMP reports but has not written yet. */
+	async #awaitFile(file: string, stale: () => boolean): Promise<void> {
+		const exists = this.#options.fileExists ?? defaultFileExists;
+		const deadline = this.#timers.now() + (this.#options.continuationWaitMs ?? DEFAULT_CONTINUATION_WAIT_MS);
+		for (;;) {
+			if (await exists(file) || stale()) return;
+			const left = deadline - this.#timers.now();
+			if (left <= 0) return;
+			await new Promise<void>(resolve => this.#timers.setTimeout(resolve, Math.min(left, this.#options.continuationPollMs ?? DEFAULT_CONTINUATION_POLL_MS)));
+		}
+	}
+
+	/** Point the history reader at the file the session is bound to now; without it the transcript comes from `get_entries`. */
+	async #reopenHistory(file: string): Promise<void> {
+		try {
+			const open = this.#options.openHistory ?? ((target: string) => HistoryReader.open(target));
+			const reader = await open(file);
+			const history = await reader.snapshot(this.#tailRows);
+			if (this.#disposed || this.#ended || this.#boundFile !== file) return;
+			this.#reader = reader;
+			this.#readerLegacyIds = history.legacyIds;
+		} catch {
+			this.#historyFallbacks += 1;
+		}
+	}
+
+	/**
+	 * The identity rule, stated once. This tab is bound to one session file and the id in it. OMP must keep serving that pair;
+	 * the only change accepted is OMP's own: a PROVEN continuation (the file OMP reports descends from the bound one along
+	 * `continuationOf` headers, and the id it reports is the proven file's own), which {@link #followContinuation} adopts before
+	 * this check runs, and a provider-only id rotation inside the same file while a rotation is expected (ADR-0059). Every other
+	 * difference of file or id is a divergence: `identity-mismatch` at the first attach, `identity-diverged` afterwards.
+	 */
 	#identityMismatch(state: ParsedState, bind: boolean): RpcErrorCode | null {
 		const code: RpcErrorCode = bind ? "identity-mismatch" : "identity-diverged";
 		const report = (): RpcErrorCode => {
@@ -2781,9 +2916,12 @@ export class RpcSession {
 				if (state !== null) {
 					this.#stateAnswerRevision += 1;
 					this.#nativeStateUnanswered = false;
-					const mismatch = this.#identityVerified ? this.#identityMismatch(state, false) : null;
-					if (mismatch !== null) this.#fail(mismatch);
-					else this.#applyFrame({ type: "state_update", state: this.#newestQueue(state.lite, pending.queueRevision), todoSeed: state.todoSeed });
+					if (this.#identityVerified && this.#reportsOtherFile(state)) void this.#judgeMovedState(state, pending.queueRevision);
+					else {
+						const mismatch = this.#identityVerified ? this.#identityMismatch(state, false) : null;
+						if (mismatch !== null) this.#fail(mismatch);
+						else this.#applyFrame({ type: "state_update", state: this.#newestQueue(state.lite, pending.queueRevision), todoSeed: state.todoSeed });
+					}
 				}
 			}
 			if (pending.command.type === "get_subagents") {
@@ -3260,6 +3398,7 @@ export class RpcSession {
 		if (!this.#live) return;
 		const state = await this.#fetchState();
 		if (this.#disposed || this.#ended || !this.#live || state === null) return;
+		if (!(await this.#followContinuation(state, false)) || this.#disposed || this.#ended || !this.#live) return;
 		const mismatch = this.#identityMismatch(state, false);
 		if (mismatch !== null) {
 			this.#fail(mismatch);
@@ -3274,7 +3413,7 @@ export class RpcSession {
 	/** A state-producing builtin need not emit a todo tool frame (slash edit, eval or auto-clear). */
 	async #refreshState(): Promise<void> {
 		const state = await this.#fetchState();
-		if (!this.#disposed && !this.#ended && this.#live && state !== null) {
+		if (state !== null && !this.#disposed && !this.#ended && this.#live && await this.#followContinuation(state, false) && !this.#disposed && !this.#ended && this.#live) {
 			const mismatch = this.#identityMismatch(state, false);
 			if (mismatch !== null) this.#fail(mismatch);
 		}
@@ -3347,7 +3486,8 @@ export class RpcSession {
 		if (this.#disposed || this.#ended || !this.#live || state === null) return;
 		// A new unsaved session still has authoritative todo state after a slash builtin.
 		if (file === null) return;
-		const exists = await (this.#options.fileExists ?? defaultFileExists)(file);
+		if (!(await this.#followContinuation(state, false)) || this.#disposed || this.#ended || !this.#live) return;
+		const exists = await (this.#options.fileExists ?? defaultFileExists)(this.#boundFile ?? file);
 		const mismatch = this.#identityMismatch(state, false);
 		if (mismatch !== null || (this.#fileMaterialized && !exists)) this.#fail("identity-diverged");
 	}

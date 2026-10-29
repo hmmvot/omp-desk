@@ -552,6 +552,71 @@ describe("host control channel", () => {
 		assert.equal((wrong as HostControlIdentityError).reason, "session-mismatch");
 	});
 
+	describe("session continuations", () => {
+		/** A session file as OMP 18.13 writes it: the title slot, then the header with the continuation link. */
+		async function continuationFile(directory: string, id: string, time: string, continuationOf?: string): Promise<string> {
+			const file = path.join(directory, `${time}_${id}.jsonl`);
+			const slot = JSON.stringify({ type: "title", v: 1, title: "", updatedAt: "2026-10-29T12:00:00.000Z", pad: " ".repeat(8) });
+			const header = JSON.stringify({
+				type: "session", version: 3, id, timestamp: "2026-10-29T12:00:00.000Z",
+				...(continuationOf === undefined ? {} : { parentSession: continuationOf, continuationOf }),
+				cwd: "C:\\work",
+			});
+			await writeFile(file, `${slot}\n${header}\n`, "utf8");
+			return file;
+		}
+
+		async function refusedReason(channel: StartedChannel, expected: string): Promise<string> {
+			const error = await caught(channel.connect({ expectedSessionFile: expected }));
+			assert.ok(error instanceof HostControlIdentityError);
+			return (error as HostControlIdentityError).reason;
+		}
+
+		it("accepts a host serving a proven continuation of the expected file (1 and 2 hops) and keeps its own report as the binding", async () => {
+			const channel = await startChannel("omp-control-continuation-");
+			const directory = await makeTempDir("omp-continuation-files-");
+			const first = await continuationFile(directory, "AAA", "2026-10-29T12-00-00-000Z");
+			const second = await continuationFile(directory, "BBB", "2026-10-29T12-05-00-000Z", "AAA");
+			const third = await continuationFile(directory, "CCC", "2026-10-29T12-10-00-000Z", "BBB");
+			for (const served of [second, third]) {
+				channel.fake.host.sessionFile = served;
+				const { client } = await channel.connect({ expectedSessionFile: first });
+				try {
+					assert.equal((await client.snapshot()).host.sessionFile, served);
+				} finally {
+					client.close();
+				}
+			}
+		});
+
+		it("refuses forged, unrelated and cyclic continuations as a session mismatch", async () => {
+			const channel = await startChannel("omp-control-continuation-refused-");
+			const directory = await makeTempDir("omp-continuation-files-");
+			const asked = await continuationFile(directory, "AAA", "2026-10-29T12-00-00-000Z");
+			await continuationFile(directory, "OTH", "2026-10-29T12-01-00-000Z");
+			const unrelated = await continuationFile(directory, "CCC", "2026-10-29T12-05-00-000Z", "OTH");
+			const forged = await continuationFile(directory, "FFF", "2026-10-29T12-06-00-000Z", "GHOST");
+			const left = await continuationFile(directory, "LLL", "2026-10-29T12-07-00-000Z", "RRR");
+			await continuationFile(directory, "RRR", "2026-10-29T12-08-00-000Z", "LLL");
+			const reverse = await continuationFile(directory, "BBB", "2026-10-29T12-09-00-000Z", "AAA");
+			for (const served of [unrelated, forged, left]) {
+				channel.fake.host.sessionFile = served;
+				assert.equal(await refusedReason(channel, asked), "session-mismatch");
+			}
+			// The older file is never a continuation of the newer one.
+			channel.fake.host.sessionFile = asked;
+			assert.equal(await refusedReason(channel, reverse), "session-mismatch");
+		});
+
+		it("keeps a launch without an expected file unchanged", async () => {
+			const channel = await startChannel("omp-control-continuation-none-");
+			const directory = await makeTempDir("omp-continuation-files-");
+			channel.fake.host.sessionFile = await continuationFile(directory, "BBB", "2026-10-29T12-05-00-000Z", "AAA");
+			const { client } = await channel.connect({ expectedSessionFile: null });
+			client.close();
+		});
+	});
+
 	it("proves the peer on an open channel and refuses to prove one that has closed", async () => {
 		const channel = await startChannel("omp-control-proof-");
 		const { client } = await channel.connect();

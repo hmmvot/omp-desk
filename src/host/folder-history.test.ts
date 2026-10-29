@@ -612,6 +612,230 @@ describe("folder-scoped history", () => {
 
 		assert.equal(await treeFingerprint(fixture.temp), before, "a read-only pass changes nothing");
 	});
+
+	describe("one session per continuation chain", () => {
+		const continuing = (id: string, cwd: string, title: string, continuationOf: string): string =>
+			`${JSON.stringify({ type: "session", id, cwd, title, continuationOf })}\n`;
+
+		it("offers only the newest file of a chain when none of it is indexed", async () => {
+			const fixture = await freshTree();
+			await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "Old copy"),
+				OLDER,
+			);
+			const newest = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Continuation", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [newest]);
+			assert.deepEqual(result.issues, [], "a hidden file is not an issue");
+			assert.equal(result.incomplete, false);
+		});
+
+		it("offers one file for a chain of three", async () => {
+			const fixture = await freshTree();
+			await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "First"),
+				OLDER,
+			);
+			await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Second", SESSION_A),
+				MIDDLE,
+			);
+			const last = await fixture.write(
+				`--proj-a--/2026-03-01T00-00-00-000Z_${SESSION_C}.jsonl`,
+				continuing(SESSION_C, fixture.folderA, "Third", SESSION_B),
+				NEWEST,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [last]);
+		});
+
+		it("keeps both branches of a parent that two files continue, and hides only the parent's superseded ancestors", async () => {
+			const fixture = await freshTree();
+			await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "Root"),
+				OLDER,
+			);
+			const branchB = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Branch one", SESSION_A),
+				MIDDLE,
+			);
+			const branchC = await fixture.write(
+				`--proj-a--/2026-03-01T00-00-00-000Z_${SESSION_C}.jsonl`,
+				continuing(SESSION_C, fixture.folderA, "Branch two", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file).sort(), [
+				path.join(fixture.sessions, "--proj-a--", `2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`),
+				branchB,
+				branchC,
+			].sort(), "a diverged family is listed whole: no branch becomes unreachable");
+		});
+
+		it("lists one file of a cycle instead of none", async () => {
+			const fixture = await freshTree();
+			await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				continuing(SESSION_A, fixture.folderA, "Loop one", SESSION_B),
+				OLDER,
+			);
+			const newer = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Loop two", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [newer]);
+		});
+
+		it("breaks a modification-time tie toward the file nobody continues", async () => {
+			const fixture = await freshTree();
+			await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "First"),
+				MIDDLE,
+			);
+			const tail = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Second", SESSION_A),
+				MIDDLE,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [tail]);
+		});
+
+		it("offers the indexed file of a chain with its tab and hides the discovered continuation", async () => {
+			const fixture = await freshTree();
+			const old = await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "Old copy"),
+				OLDER,
+			);
+			await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Continuation", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture, {
+				indexed: [{ tabId: "tab-own", sessionFile: old, cwd: fixture.folderA, sessionId: SESSION_A, profile: null }],
+			});
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [old]);
+			assert.equal(result.candidates[0]?.tabId, "tab-own");
+			assert.equal(result.candidates[0]?.source, "indexed");
+			assert.deepEqual(result.issues, []);
+		});
+
+		it("keeps every indexed file of a chain", async () => {
+			const fixture = await freshTree();
+			const old = await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "Old copy"),
+				OLDER,
+			);
+			const next = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderA, "Continuation", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture, {
+				indexed: [
+					{ tabId: "tab-old", sessionFile: old, cwd: fixture.folderA, sessionId: SESSION_A, profile: null },
+					{ tabId: "tab-next", sessionFile: next, cwd: fixture.folderA, sessionId: SESSION_B, profile: null },
+				],
+			});
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.tabId), ["tab-next", "tab-old"]);
+		});
+
+		it("never hides a continuation's neighbour whose header could not be read or whose file is gone", async () => {
+			const fixture = await freshTree();
+			await fixture.write(`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`, '{"hello":"world"}\n', OLDER);
+			const gone = path.join(fixture.sessions, "--proj-a--", `2026-01-15T00-00-00-000Z_${SESSION_B}.jsonl`);
+			const next = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_C}.jsonl`,
+				continuing(SESSION_C, fixture.folderA, "Continuation", SESSION_B),
+				NEWEST,
+			);
+
+			const result = await scan(fixture, {
+				indexed: [{ tabId: "tab-gone", sessionFile: gone, cwd: fixture.folderA, sessionId: SESSION_B, profile: null }],
+			});
+
+			assert.deepEqual(
+				result.candidates.map(candidate => [candidate.file, candidate.available]),
+				[
+					[next, true],
+					[gone, false],
+				],
+				"an unavailable indexed row and a continuation stay two entries",
+			);
+			assert.deepEqual(result.issues.map(issue => issue.kind).sort(), ["indexed-file-missing", "invalid-header"]);
+		});
+
+		it("lists unrelated files, and files of two directories whose ids collide", async () => {
+			const fixture = await freshTree();
+			const first = await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "Unrelated one"),
+				OLDER,
+			);
+			const second = await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				headerLine(SESSION_B, fixture.folderA, "Unrelated two"),
+				MIDDLE,
+			);
+			// The same id names the files of two buckets, and a header links to it from the other bucket: nothing crosses a directory.
+			const elsewhere = await fixture.write(
+				`--other--/2026-03-01T00-00-00-000Z_${SESSION_C}.jsonl`,
+				continuing(SESSION_C, fixture.folderA, "Links across buckets", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [elsewhere, second, first]);
+		});
+
+		it("applies the folder filter before grouping", async () => {
+			const fixture = await freshTree();
+			const old = await fixture.write(
+				`--proj-a--/2026-01-01T00-00-00-000Z_${SESSION_A}.jsonl`,
+				headerLine(SESSION_A, fixture.folderA, "Stays in this folder"),
+				OLDER,
+			);
+			await fixture.write(
+				`--proj-a--/2026-02-01T00-00-00-000Z_${SESSION_B}.jsonl`,
+				continuing(SESSION_B, fixture.folderB, "Moved to another folder", SESSION_A),
+				NEWEST,
+			);
+
+			const result = await scan(fixture);
+
+			assert.deepEqual(result.candidates.map(candidate => candidate.file), [old]);
+		});
+	});
 });
 
 describe("session file inspection", () => {

@@ -7,6 +7,7 @@
 - **A Chat tab froze or stopped responding.** See [A Chat tab that stops responding](#a-chat-tab-that-stops-responding).
 - **Chat replies stop arriving, or a sent message is reported as unconfirmed.** See [Chat replies stop arriving](#chat-replies-stop-arriving).
 - **OMP became its own program after `omp update`, and the settings editors or the Skills, Tools, MCP and Extensions views stopped opening.** See [After `omp update` changed Bun's launcher](#after-omp-update-changed-buns-launcher).
+- **A session ended with `identity-mismatch`, or a session appears twice, after OMP started the same file elsewhere.** See [A session that continued in a newer file](#a-session-that-continued-in-a-newer-file).
 
 ## After `omp update` changed Bun's launcher
 
@@ -19,6 +20,16 @@ OMP Desk follows `omp` on your `PATH`, so it now starts that program, exactly as
 - **A Chat no longer survives a VS Code update.** Chats keep running through an update only when OMP runs on a `bun.exe` Desk can share ([Sessions](sessions.md#the-vs-code-update-exception)); the compiled program has none, so its Chats run as `Code.exe` like Terminals.
 
 To get the full set back, install OMP with Bun again: run `bun upgrade` (to 1.4.4 or newer), then `bun install -g @oh-my-pi/pi-coding-agent`. Bun writes its launcher over the compiled program and `omp --version` then runs from the package again. Close every OMP session first: Windows does not let Bun replace an `omp.exe` that is running. A running session started before the update may also print `Bun runtime must be >= 1.4.4` when OMP starts one of its helper processes, because the files on disk are already the new release; restart such a session after the update.
+
+## A session that continued in a newer file
+
+OMP 18.13 can move a session to a new file when it cannot keep writing the old one: for example when you open the same session file with `omp --session <file>` in another terminal while OMP Desk still holds it, or when another program changes the file under a running session. The new file is in the same folder, has its own session id, and records which file it continues. Asking OMP for the old file afterwards opens the newer one.
+
+OMP Desk follows that move. When a Chat or a Terminal reports the newer file, OMP Desk reads the files' headers and accepts it only if the newer file really continues the one it asked for; the session keeps its one row in Sessions, its tab and its editor, and the row now points to the newer file. Reload Window, Stop and Resume, and Resume from a folder's history work as before, and History lists the conversation once.
+
+- **A session still ends with `identity-mismatch`, `identity-diverged` or a refused terminal start.** The file OMP opened is not a proven continuation (an unrelated session, a file from another folder, a damaged or missing header, a link that loops). Use **Restart**; when Restart refuses, Forget the row and open the file OMP used from the folder's history.
+- **Sessions shows two rows for one conversation.** They were created before OMP Desk learned about continuations. OMP Desk does not merge them; resume the newer one and forget the older.
+- **A Chat page that kept running while the extension restarted stays disconnected after its session moved.** The page's saved connection names the old file. Reload Window or reopening the editor makes a new one (Stop and Resume does not).
 
 ## The OMP Desk log
 

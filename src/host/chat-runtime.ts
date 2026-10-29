@@ -40,6 +40,7 @@ import type { PendingOperation, PendingOperations, PendingChange } from "./pendi
 import type { PendingKind } from "../shared/pending-operation.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
 import type { HistoryReader } from "./rpc/history-reader.ts";
+import type { ContinuationProof } from "./session-chain.ts";
 import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../protocol/rpc.ts";
 import type { InputReclaim, RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
@@ -121,8 +122,8 @@ export type ChatRuntimeEvent =
 	| { readonly type: "state"; readonly payload: ChatStatePayload }
 	/** OMP announced the session's name (`session_info_update`: `/rename`, or Desk's own rename); the extension records it for the row and the editor title. */
 	| { readonly type: "title"; readonly sessionId: string | null; readonly title: string }
-	/** The identity the process serves: learned for a new session, verified for a resumed one. */
-	| { readonly type: "identity"; readonly sessionFile: string; readonly sessionId: string; readonly previousSessionId?: string }
+	/** The identity the process serves: learned for a new session, verified for a resumed one. `continuation` asks the catalog to accept the conversation's move to a newer file. */
+	| { readonly type: "identity"; readonly sessionFile: string; readonly sessionId: string; readonly previousSessionId?: string; readonly continuation?: ContinuationProof }
 	/** `open_url`: the extension shows an extension-owned confirm naming the URL. */
 	| { readonly type: "open-url"; readonly url: string; readonly launchUrl?: string; readonly instructions?: string }
 	/** The page asked to resume a view-only conversation. */
@@ -334,6 +335,9 @@ export class ChatRuntime {
 			...(input.expectedProviderSessionId === undefined ? {} : { expectedProviderSessionId: input.expectedProviderSessionId }),
 			acceptProviderIdentity: async (sessionFile, sessionId, previousSessionId) => {
 				await this.#options.onEvent(tabId, { type: "identity", sessionFile, sessionId, previousSessionId });
+			},
+			acceptContinuation: async proof => {
+				await this.#options.onEvent(tabId, { type: "identity", sessionFile: proof.toFile, sessionId: proof.toId, continuation: proof });
 			},
 			cwd: input.cwd,
 			hostNonce: nonce,
@@ -853,7 +857,7 @@ export class ChatRuntime {
 				});
 				return;
 			case "identity":
-				this.#options.onEvent(tabId, { type: "identity", sessionFile: output.sessionFile, sessionId: output.sessionId, ...(output.previousSessionId === undefined ? {} : { previousSessionId: output.previousSessionId }) });
+				this.#options.onEvent(tabId, { type: "identity", sessionFile: output.sessionFile, sessionId: output.sessionId, ...(output.previousSessionId === undefined ? {} : { previousSessionId: output.previousSessionId }), ...(output.continuation === undefined ? {} : { continuation: output.continuation }) });
 				return;
 			case "prompt-lost":
 				this.#tellAll(conversation, CHAT_PROMPT_LOST_SENTENCE);

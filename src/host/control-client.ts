@@ -41,6 +41,7 @@ import { Socket } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "node:timers";
 import { win32Native, type ProcessCreationReading } from "./win32-native.ts";
+import { proveContinuation } from "./session-chain.ts";
 import {
 	CONTROL_MAX_FRAME_BYTES,
 	CONTROL_PIPE_NAME_RE,
@@ -928,7 +929,7 @@ export class HostControlClient {
 				this.#context.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
 				"handshake",
 			);
-			this.#verifyChallenge(challenge);
+			await this.#verifyChallenge(challenge);
 			this.#binding = challenge.host;
 		} catch (error) {
 			// A refused or timed-out handshake must not leave the bridge running (or
@@ -938,8 +939,13 @@ export class HostControlClient {
 		}
 	}
 
-	/** Verify that the peer holds the key *and* matches this caller's launch. */
-	#verifyChallenge(challenge: ControlChallengeFrame): void {
+	/**
+	 * Verify that the peer holds the key *and* matches this caller's launch. OMP follows a resumed file to its
+	 * newest continuation, so a host serving another file is still the launched session when the files prove
+	 * it; the proof is read from the files, never from the host's own report. The only await sits before the
+	 * nonce bookkeeping, which stays one synchronous check-and-record.
+	 */
+	async #verifyChallenge(challenge: ControlChallengeFrame): Promise<void> {
 		const { target, expectation } = this.#context;
 		const host = challenge.host;
 
@@ -972,7 +978,8 @@ export class HostControlClient {
 		}
 		if (
 			expectation.sessionFile !== null &&
-			(host.sessionFile === null || !controlPathEquals(expectation.sessionFile, host.sessionFile))
+			(host.sessionFile === null || !controlPathEquals(expectation.sessionFile, host.sessionFile)) &&
+			(host.sessionFile === null || await proveContinuation(expectation.sessionFile, host.sessionFile) === null)
 		) {
 			throw new HostControlIdentityError(
 				"session-mismatch",

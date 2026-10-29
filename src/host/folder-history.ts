@@ -27,6 +27,11 @@
  *   through several roots appears once;
  * - an unreadable root, bucket or file, an invalid header, a missing indexed
  *   file and a cancelled scan are all distinct, visible outcomes.
+ *
+ * A conversation that moved to a newer file (a continuation, see `session-chain.ts`) is offered once: of the candidates one
+ * pass assembled, a chain keeps its indexed ones (the user's own row and tab) or, with none, the newest. The link is the
+ * `continuationOf` of the header this pass already read; a candidate without a readable header or a session id is never
+ * grouped, and a file left out this way is not an issue.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -41,6 +46,8 @@ import {
 	readSessionFileHeader,
 } from "./session-files.ts";
 import type { SessionFileHeader } from "./session-files.ts";
+import { groupChains } from "./session-chain.ts";
+import type { ChainMember } from "./session-chain.ts";
 import type { SessionDeletionSubject } from "./session-lifecycle.ts";
 
 /**
@@ -418,6 +425,56 @@ function candidateForIndexed(state: IndexedFileState, matchedCwd: string): Folde
 	};
 }
 
+/** One candidate with the session id it continues, as its own header recorded it during this pass. */
+interface ChainCandidate {
+	readonly candidate: FolderHistoryCandidate;
+	readonly continuationOf: string | null;
+}
+
+/**
+ * The candidates to hide so that one session of each chain is offered.
+ *
+ * A member that exactly one other file continues is superseded, and is hidden; the head of a chain (nobody continues it)
+ * and a member that two files continue (a diverged family, which OMP itself accepts) stay listed, so no branch is lost.
+ * A chain with an indexed candidate keeps the user's own row (with its tab) and hides the discovered ones instead, unless
+ * the family diverged. A chain that would be hidden whole (a cycle) keeps the member with the newest modification time. A
+ * candidate that is unavailable or has no session id cannot be linked, so it is never grouped and never hidden.
+ */
+function hiddenByChain(entries: readonly ChainCandidate[]): ReadonlySet<FolderHistoryCandidate> {
+	const hidden = new Set<FolderHistoryCandidate>();
+	const members: (ChainMember & ChainCandidate)[] = [];
+	for (const entry of entries) {
+		const { candidate } = entry;
+		if (!candidate.available || candidate.sessionId === null) continue;
+		members.push({
+			...entry,
+			key: candidate.file,
+			directory: path.dirname(candidate.file),
+			sessionId: candidate.sessionId,
+		});
+	}
+	for (const chain of groupChains(members)) {
+		if (chain.length < 2) continue;
+		const continuations = new Map<string, number>();
+		for (const member of chain) if (member.continuationOf !== null) continuations.set(member.continuationOf, (continuations.get(member.continuationOf) ?? 0) + 1);
+		const diverged = [...continuations.values()].some(count => count > 1);
+		const indexed = chain.some(member => member.candidate.source === "indexed");
+		const superseded = chain.filter(member => member.candidate.source !== "indexed" && (indexed && !diverged ? true : continuations.get(member.sessionId) === 1));
+		if (superseded.length === chain.length) {
+			const [kept] = [...chain].sort((left, right) => {
+				const leftTime = left.candidate.modifiedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(left.candidate.modifiedAt);
+				const rightTime = right.candidate.modifiedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(right.candidate.modifiedAt);
+				if (leftTime !== rightTime) return rightTime - leftTime;
+				return left.candidate.file < right.candidate.file ? 1 : left.candidate.file > right.candidate.file ? -1 : 0;
+			});
+			for (const member of superseded) if (member !== kept) hidden.add(member.candidate);
+			continue;
+		}
+		for (const member of superseded) hidden.add(member.candidate);
+	}
+	return hidden;
+}
+
 /**
  * Discover every session file whose own header records `options.cwd`.
  *
@@ -486,6 +543,14 @@ export async function scanFolderHistory(options: FolderHistoryScanOptions): Prom
 	}
 	const candidates = new Map<string, FolderHistoryCandidate>();
 	const indexedFiles = new Map<string, IndexedFileState>();
+	// The `continuationOf` of each candidate, taken from the header read that decided the candidate: grouping chains never
+	// reads a file a second time.
+	const continuations = new Map<string, string>();
+	const noteContinuation = (key: string, inspection: SessionFileInspection): void => {
+		if (inspection.kind === "ok" && inspection.header.continuationOf !== undefined) {
+			continuations.set(key, inspection.header.continuationOf);
+		}
+	};
 	let skippedFiles = 0;
 	let cancelled = false;
 
@@ -535,6 +600,7 @@ export async function scanFolderHistory(options: FolderHistoryScanOptions): Prom
 		}
 		if (matchedCwd === null) continue;
 		candidates.set(key, candidateForIndexed(state, matchedCwd));
+		noteContinuation(key, state.inspection);
 	}
 
 	// Then discovery under every resolved root.
@@ -568,6 +634,7 @@ export async function scanFolderHistory(options: FolderHistoryScanOptions): Prom
 						canonicalFolderKey(owned.verifiedCwd) === folderKey
 					) {
 						candidates.set(key, candidateForIndexed(owned, owned.verifiedCwd));
+						noteContinuation(key, owned.inspection);
 					}
 				} else if (!candidates.has(key)) {
 					const inspection = await inspectSessionFile(file);
@@ -588,6 +655,7 @@ export async function scanFolderHistory(options: FolderHistoryScanOptions): Prom
 								tabId: null,
 								available: true,
 							});
+							noteContinuation(key, inspection);
 						}
 					} else if (inspection.kind === "invalid") {
 						report("invalid-header", file, inspection.detail);
@@ -613,12 +681,17 @@ export async function scanFolderHistory(options: FolderHistoryScanOptions): Prom
 	}
 
 	if (cancelled) report("cancelled", null, "The folder history scan was cancelled, so the list may be missing sessions.");
-	const ordered = [...candidates.values()].sort((left, right) => {
-		const leftTime = left.modifiedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(left.modifiedAt);
-		const rightTime = right.modifiedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(right.modifiedAt);
-		if (leftTime !== rightTime) return rightTime - leftTime;
-		return left.file < right.file ? -1 : left.file > right.file ? 1 : 0;
-	});
+	const hidden = hiddenByChain(
+		[...candidates].map(([key, candidate]) => ({ candidate, continuationOf: continuations.get(key) ?? null })),
+	);
+	const ordered = [...candidates.values()]
+		.filter(candidate => !hidden.has(candidate))
+		.sort((left, right) => {
+			const leftTime = left.modifiedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(left.modifiedAt);
+			const rightTime = right.modifiedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(right.modifiedAt);
+			if (leftTime !== rightTime) return rightTime - leftTime;
+			return left.file < right.file ? -1 : left.file > right.file ? 1 : 0;
+		});
 	return {
 		cwd: options.cwd,
 		candidates: ordered,

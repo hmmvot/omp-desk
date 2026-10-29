@@ -9,6 +9,7 @@
  * as soon as the file exists.
  */
 import type { Logger } from "../shared/logger.ts";
+import type { ContinuationProof } from "../host/session-chain.ts";
 import { controlPathEquals } from "../host/control-protocol.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
@@ -102,6 +103,30 @@ export class LocalIdentity {
 				else log.debug(`tab ${tabId}: the session file ${sessionFile} is not bound yet: ${promotion.detail}`);
 			}
 			window.refresh();
+		});
+	}
+
+	/**
+	 * Make the row of a conversation follow it into the newer file OMP serves (a session continuation, OMP 18.13): the
+	 * process proved by the caller reports a file and an id that continue the ones the row records, and the index records
+	 * them under the tab's gate, re-proving the chain itself. `false` when the catalog refused (another row or window
+	 * holds the new file, the row records something else); the tab then says why and the conversation stays as it was.
+	 */
+	async bindContinuation(tabId: string, runtime: SessionHostRuntime, proof: ContinuationProof): Promise<boolean> {
+		const { index, window, log } = this.#deps;
+		return await index.lifecycle.run(tabId, async lease => {
+			const current = this.#deps.records.get(tabId);
+			if (current === undefined || current.runtime !== runtime) return false;
+			const accepted = await index.acceptContinuation(tabId, proof, lease);
+			if (accepted.status === "refused") {
+				log.warn(`tab ${tabId}: the conversation went on in ${proof.toFile}, but the row was not moved: ${accepted.detail}`);
+				window.conflict(tabId, `This session went on in a newer file, which could not be recorded: ${accepted.detail}`);
+				return false;
+			}
+			// The document a page authenticates against names the file and the id: it is committed again for the new pair.
+			window.bound(tabId);
+			window.refresh();
+			return true;
 		});
 	}
 

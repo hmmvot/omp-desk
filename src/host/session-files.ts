@@ -26,6 +26,11 @@ export interface SessionFileHeader {
 	readonly title: string | null;
 	/** First user prompt summary, used only when OMP has not named the session. */
 	readonly promptTitle?: string;
+	/**
+	 * The session id this file continues, from the header's `continuationOf` (OMP 18.13: the same conversation moved to
+	 * this file when it could not keep writing its own). Absent for a session that is not a continuation.
+	 */
+	readonly continuationOf?: string;
 }
 
 /**
@@ -151,7 +156,7 @@ export function parseSessionFileHeader(content: string): SessionFileHeader | nul
 			continue;
 		}
 		if (typeof parsed !== "object" || parsed === null) continue;
-		const record = parsed as { type?: unknown; v?: unknown; id?: unknown; cwd?: unknown; title?: unknown };
+		const record = parsed as { type?: unknown; v?: unknown; id?: unknown; cwd?: unknown; title?: unknown; continuationOf?: unknown };
 		if (header !== null) {
 			const title = firstPromptTitle(parsed);
 			if (title !== undefined) return title ? { ...header, promptTitle: title } : header;
@@ -169,6 +174,7 @@ export function parseSessionFileHeader(content: string): SessionFileHeader | nul
 			sessionId: record.id,
 			cwd: typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : null,
 			title: slotTitle !== null ? slotTitle || null : headerTitle || null,
+			...(typeof record.continuationOf === "string" && record.continuationOf.length > 0 ? { continuationOf: record.continuationOf } : {}),
 		};
 		if (header.title !== null) return header;
 	}

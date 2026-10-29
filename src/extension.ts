@@ -3419,6 +3419,9 @@ async function openFolderHistoryCandidate(
   // for the same field, and `trackSession` re-uses an existing row for a file it
   // already owns without reading this input at all.)
   let entry = existing;
+  // A file that has no row but whose conversation does (the row went on in a newer file, or this is the newer file of an
+  // older row) opens that row: one conversation is one row.
+  if (entry === null) entry = await index.rowOfChain(candidate.file);
   if (entry === null) {
     try {
       entry = await index.trackSession({
@@ -3444,7 +3447,7 @@ async function openFolderHistoryCandidate(
   // index repairs that recorded value from the same header evidence when the row
   // opens, so the launch that follows runs in the folder the user selected rather
   // than in whatever the row remembered.
-  if (entry.sessionFile === null || normalizeSessionIdentityKey(entry.sessionFile) !== normalizeSessionIdentityKey(candidate.file)) {
+  if (entry.sessionFile === null || (normalizeSessionIdentityKey(entry.sessionFile) !== normalizeSessionIdentityKey(candidate.file) && (await index.rowOfChain(candidate.file))?.tabId !== entry.tabId)) {
     showWarning(
       "That session file now belongs to a different row in Sessions, so it was not resumed. Refresh Sessions and try again.",
     );
@@ -7212,8 +7215,15 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
     }
     case "identity": {
       const runtime = hostOf(stateOf(tabId)) ?? null;
-      if (runtime !== null) return s.sessionRuntime.identity.bind(tabId, runtime, event.sessionFile, event.sessionId, event.previousSessionId);
-      return;
+      if (runtime === null) return;
+      // A proven continuation moves the row to the file the process went on in; the chat session waits for this answer and
+      // ends the tab as diverged when the catalog did not take it.
+      if (event.continuation !== undefined) {
+        return s.sessionRuntime.identity.bindContinuation(tabId, runtime, event.continuation).then(accepted => {
+          if (!accepted) throw new Error("The catalog did not record the continuation.");
+        });
+      }
+      return s.sessionRuntime.identity.bind(tabId, runtime, event.sessionFile, event.sessionId, event.previousSessionId);
     }
     case "open-url":
       void confirmOpenUrl(event);

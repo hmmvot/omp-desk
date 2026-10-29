@@ -18,6 +18,7 @@ import { controlPathEquals } from "../host/control-protocol.ts";
 import type { ControlNativeActivity, ControlNativeState } from "../host/control-protocol.ts";
 import type { NativeHostRuntime } from "../host/native-session.ts";
 import type { OwnerReconciler } from "../host/session-availability.ts";
+import { proveContinuation } from "../host/session-chain.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { EditorSlotBinding, SessionIndexEntry } from "../host/session-model.ts";
@@ -206,17 +207,32 @@ export class LocalNativeWatch {
 	/**
 	 * Apply what the native process reported about the conversation it serves: the same one (record
 	 * its id and file, its title), or another one (`/resume`, `/new`), in which case the running
-	 * process is handed over to that conversation's row under the two-session lock. Never imports
-	 * or materialises a file OMP has not written.
+	 * process is handed over to that conversation's row under the two-session lock. A different file
+	 * that PROVES to be a continuation of the row's file (OMP moved the session off a file it could
+	 * not keep writing) is still the same conversation: the catalog row follows it and the ordinary
+	 * same-row path applies. A different file without that proof is a switch. Never imports or
+	 * materialises a file OMP has not written.
 	 */
 	async #apply(state: RuntimeRecord, runtime: NativeHostRuntime, facts: ControlNativeState): Promise<void> {
 		const { index, window, identity } = this.#deps;
 		const fromId = state.tabId;
 		if (fromId === null || facts.sessionId === null || state.runtime !== runtime || state.transitioning) return;
-		const from = index.get(fromId);
+		let from = index.get(fromId);
 		if (from === null) return;
-		const sameId = from.sessionId === null || from.sessionId === facts.sessionId;
-		const sameFile = from.sessionFile === null || (facts.sessionFile !== null && controlPathEquals(from.sessionFile, facts.sessionFile));
+		let sameId = from.sessionId === null || from.sessionId === facts.sessionId;
+		let sameFile = from.sessionFile === null || (facts.sessionFile !== null && controlPathEquals(from.sessionFile, facts.sessionFile));
+		if (!sameFile && from.sessionFile !== null && facts.sessionFile !== null) {
+			// The proof comes from the files; the process's report only has to agree with it (its id is the new file's id).
+			const proof = await proveContinuation(from.sessionFile, facts.sessionFile);
+			if (proof !== null && proof.toId === facts.sessionId && state.runtime === runtime && !state.transitioning && state.tabId === fromId &&
+				await identity.bindContinuation(fromId, runtime, proof)) {
+				const moved = index.get(fromId);
+				if (moved === null) return;
+				from = moved;
+				sameId = from.sessionId === null || from.sessionId === facts.sessionId;
+				sameFile = from.sessionFile === null || controlPathEquals(from.sessionFile, facts.sessionFile);
+			}
+		}
 		if (sameId && sameFile) {
 			await index.recordHostSessionId(fromId, facts.sessionId);
 			if (facts.sessionFile !== null && from.sessionFile === null) await identity.bind(fromId, runtime, facts.sessionFile, facts.sessionId);

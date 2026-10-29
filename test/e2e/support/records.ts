@@ -19,6 +19,9 @@ export interface RecordedSession {
 	readonly runIntent: string;
 	readonly brokerPid: number | null;
 	readonly childPid: number | null;
+	/** The session file and id the row names right now (`null` for a row that has none yet). */
+	readonly sessionFile: string | null;
+	readonly sessionId: string | null;
 }
 
 interface CatalogEntry {
@@ -26,6 +29,8 @@ interface CatalogEntry {
 	readonly title: string | null;
 	readonly runIntent: string;
 	readonly host: { readonly pid?: number; readonly rpc?: { readonly brokerPid?: number; readonly childPid?: number | null } | null } | null;
+	readonly sessionFile?: string | null;
+	readonly sessionId?: string | null;
 }
 
 /** The index entries of the catalog right now; `[]` while the file is absent or mid-replacement. */
@@ -48,6 +53,8 @@ export function recordedSessions(state: RunState, marker: string): RecordedSessi
 			runIntent: entry.runIntent,
 			brokerPid: entry.host?.rpc?.brokerPid ?? null,
 			childPid: entry.host?.rpc?.childPid ?? entry.host?.pid ?? null,
+			sessionFile: entry.sessionFile ?? null,
+			sessionId: entry.sessionId ?? null,
 		}));
 }
 

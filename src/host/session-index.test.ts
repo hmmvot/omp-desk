@@ -69,6 +69,7 @@ import type { OmpHostHandle, RecordedHost, RunIntent, SessionIndexEntry } from "
 import { catalogPaths, createCatalogStore } from "./profile-catalog.ts";
 import { BROKER_SLOTS_KEY, createBrokerSlotStore, createHostSlotId, mergeBrokerSlotRecords } from "./broker-slots.ts";
 import { mergeSessionIndexRecords } from "./session-index.ts";
+import { proveContinuation } from "./session-chain.ts";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -5020,5 +5021,187 @@ describe("records of ended processes that no window holds", () => {
 		assert.equal(await readClaim(claimDir, orphanFile), null, "the unnamed dead claim is gone");
 		assert.notEqual(await readClaim(claimDir, namedFile), null, "a claim a row names stays");
 		assert.equal((await readClaim(claimDir, liveOrphanFile))?.holderId, liveHolder.id, "a live holder's claim stays");
+	});
+});
+
+describe("session continuations in the catalog", () => {
+	/** The file OMP 18.13 writes when a session moves on: a new id, linked to the one it continues. */
+	async function makeContinuationFile(sessionDir: string, sessionId: string, continuationOf: string, cwd: string, time = "2026-09-24T10-05-00"): Promise<string> {
+		const file = path.join(sessionDir, `${time}_${sessionId}.jsonl`);
+		const slot = JSON.stringify({ type: "session_title", v: 1, title: "", updatedAt: "2026-09-24T10:05:00.000Z" }).padEnd(255, " ");
+		const header = JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: "2026-09-24T10:05:00.000Z", parentSession: continuationOf, continuationOf, cwd });
+		await writeFile(file, `${slot}\n${header}\n`, "utf8");
+		return file;
+	}
+
+	/** A conversation this window really runs: launched through the recorded host, bound to an editor slot. */
+	async function running(store: ConditionalStore, sessionId = "S-OLD") {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = indexFor(store, claimDir);
+		const file = await makeSessionFile(sessionDir, sessionId, cwd);
+		const draft = await index.createDraft({ cwd });
+		assert.equal((await index.promoteDraft(draft.tabId, file)).status, "promoted");
+		const { launcher } = recordingLauncher({ state: "running", host: runningHandle(sessionId) });
+		assert.equal((await index.restore(draft.tabId, { reconciler: noRecordedHost, launcher })).status, "restored");
+		await index.bindEditorSlot("slot:1", draft.tabId, "controlling");
+		return { index, claimDir, sessionDir, cwd, file, tabId: draft.tabId };
+	}
+
+	it("moves the row to the file the conversation went on in: one row, the same tab and editor, the new id, the claim of the new file", async () => {
+		const store = new ConditionalStore();
+		const f = await running(store);
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const proof = await proveContinuation(f.file, next);
+		assert.ok(proof);
+
+		const result = await f.index.acceptContinuation(f.tabId, proof);
+
+		assert.equal(result.status, "accepted", JSON.stringify(result));
+		const row = f.index.get(f.tabId);
+		assert.deepEqual([row?.sessionFile, row?.sessionId, row?.host?.sessionId, row?.sessionDir], [next, "S-NEW", "S-NEW", f.sessionDir]);
+		assert.equal(f.index.list().length, 1, "no second row for the new file");
+		assert.equal(f.index.slotBinding("slot:1")?.tabId, f.tabId, "the editor stays bound to the same tab");
+		assert.notEqual(await readClaim(f.claimDir, next), null, "the new file is claimed");
+		assert.equal(await readClaim(f.claimDir, f.file), null, "the old file's claim is given up");
+		const committed = indexFor(store, f.claimDir).get(f.tabId);
+		assert.deepEqual([committed?.sessionFile, committed?.sessionId], [next, "S-NEW"], "and a window that reads the catalog sees the move");
+	});
+
+	it("follows a chain of two links from the file the row records", async () => {
+		const f = await running(new ConditionalStore());
+		await makeContinuationFile(f.sessionDir, "S-MID", "S-OLD", f.cwd, "2026-09-24T10-05-00");
+		const last = await makeContinuationFile(f.sessionDir, "S-LAST", "S-MID", f.cwd, "2026-09-24T10-10-00");
+		const proof = await proveContinuation(f.file, last);
+		assert.equal(proof?.hops, 2);
+
+		assert.equal((await f.index.acceptContinuation(f.tabId, proof!)).status, "accepted");
+		assert.deepEqual([f.index.get(f.tabId)?.sessionFile, f.index.get(f.tabId)?.sessionId], [last, "S-LAST"]);
+	});
+
+	it("accepts the same continuation twice without changing anything the second time", async () => {
+		const f = await running(new ConditionalStore());
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const proof = (await proveContinuation(f.file, next))!;
+		assert.equal((await f.index.acceptContinuation(f.tabId, proof)).status, "accepted");
+		assert.equal((await f.index.acceptContinuation(f.tabId, proof)).status, "accepted");
+		assert.equal(f.index.get(f.tabId)?.sessionFile, next);
+	});
+
+	it("refuses a proof that the files do not support (forged link, wrong id) and leaves the row and its claim as they were", async () => {
+		const f = await running(new ConditionalStore());
+		const unrelated = await makeContinuationFile(f.sessionDir, "S-FOREIGN", "S-NOBODY", f.cwd);
+		const forged = await f.index.acceptContinuation(f.tabId, { fromFile: f.file, toFile: unrelated, fromId: "S-OLD", toId: "S-FOREIGN", hops: 1 });
+		assert.equal(forged.status, "refused");
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const wrongId = await f.index.acceptContinuation(f.tabId, { fromFile: f.file, toFile: next, fromId: "S-OLD", toId: "S-OTHER", hops: 1 });
+		assert.equal(wrongId.status, "refused");
+		assert.deepEqual([f.index.get(f.tabId)?.sessionFile, f.index.get(f.tabId)?.sessionId], [f.file, "S-OLD"]);
+		assert.notEqual(await readClaim(f.claimDir, f.file), null);
+		assert.equal(await readClaim(f.claimDir, next), null, "nothing was claimed for a refused proof");
+	});
+
+	it("refuses a row that does not record the file the proof starts from, and a row this window does not run", async () => {
+		const f = await running(new ConditionalStore());
+		const other = await makeSessionFile(f.sessionDir, "S-OTHER", f.cwd);
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OTHER", f.cwd);
+		const proof = (await proveContinuation(other, next))!;
+		assert.equal((await f.index.acceptContinuation(f.tabId, proof)).status, "refused", "the row records S-OLD, not S-OTHER");
+
+		const stopped = indexFor(new ConditionalStore(), f.claimDir);
+		const draft = await stopped.createDraft({ cwd: f.cwd });
+		assert.equal((await stopped.promoteDraft(draft.tabId, other)).status, "promoted");
+		assert.equal((await stopped.closeSession(draft.tabId, { confirmedStopped: true })).released, true);
+		assert.equal((await stopped.acceptContinuation(draft.tabId, proof)).status, "refused");
+		assert.equal(stopped.get(draft.tabId)?.sessionFile, other, "a row nothing runs here is not moved");
+	});
+
+	it("refuses when another live window holds the claim of the new file", async () => {
+		const f = await running(new ConditionalStore());
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const proof = (await proveContinuation(f.file, next))!;
+		const rival = createClaimHolder();
+		await acquireClaim(f.claimDir, next, createOwnerGeneration(), rival);
+
+		assert.equal((await f.index.acceptContinuation(f.tabId, proof)).status, "refused");
+		assert.equal(f.index.get(f.tabId)?.sessionFile, f.file);
+		assert.notEqual(await readClaim(f.claimDir, f.file), null, "the row keeps the claim it had");
+		assert.equal((await readClaim(f.claimDir, next))?.holderId, rival.id, "and the other window's claim is untouched");
+	});
+
+	it("refuses when another row already holds the new file, as this window knows it or only as the catalog does", async () => {
+		const store = new ConditionalStore();
+		const f = await running(store);
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const proof = (await proveContinuation(f.file, next))!;
+		const committed = store.value as { entries: Array<Record<string, unknown> & { tabId: string }> };
+		const own = committed.entries.find(row => row.tabId === f.tabId)!;
+		committed.entries.push({ ...own, tabId: "tab:other-window", sessionFile: next, sessionId: "S-NEW", host: null });
+
+		const unaware = await f.index.acceptContinuation(f.tabId, proof);
+		assert.equal(unaware.status, "refused", "the committed record names the file for another row");
+		assert.equal(f.index.get(f.tabId)?.sessionFile, f.file);
+		assert.equal(await readClaim(f.claimDir, next), null, "and the claim taken for the attempt was given back");
+
+		await f.index.refreshFromStore();
+		const aware = await f.index.acceptContinuation(f.tabId, proof);
+		assert.equal(aware.status, "refused", "and so does the row this window now holds");
+		assert.equal(f.index.get(f.tabId)?.sessionFile, f.file);
+	});
+
+	it("refuses, and keeps the committed identity, when another window changed the row's process first", async () => {
+		const store = new ConditionalStore();
+		const f = await running(store);
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const proof = (await proveContinuation(f.file, next))!;
+		const committed = store.value as { entries: Array<{ tabId: string; host: { sessionId: string } | null }> };
+		for (const row of committed.entries) if (row.tabId === f.tabId && row.host !== null) row.host = { ...row.host, sessionId: "S-SOMEONE-ELSE" };
+
+		const result = await f.index.acceptContinuation(f.tabId, proof);
+
+		assert.equal(result.status, "refused");
+		assert.equal(f.index.get(f.tabId)?.sessionFile, f.file, "the in-memory row did not move");
+		assert.equal(await readClaim(f.claimDir, next), null, "and the claim taken for the new file was given back");
+	});
+
+	it("names the row of a chain for either of its files that has no row, and never for a file that has its own", async () => {
+		const f = await running(new ConditionalStore());
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		const unrelated = await makeSessionFile(f.sessionDir, "S-UNRELATED", f.cwd);
+
+		assert.equal((await f.index.rowOfChain(next))?.tabId, f.tabId, "the newer file belongs to the row of the older one");
+		assert.equal(await f.index.rowOfChain(f.file), null, "the row's own file is not 'another file of the chain'");
+		assert.equal(await f.index.rowOfChain(unrelated), null);
+
+		const proof = (await proveContinuation(f.file, next))!;
+		assert.equal((await f.index.acceptContinuation(f.tabId, proof)).status, "accepted");
+		assert.equal((await f.index.rowOfChain(f.file))?.tabId, f.tabId, "after the move the older file still finds its row");
+		assert.equal(await f.index.rowOfChain(next), null);
+
+		const imported = await f.index.trackSession({ sessionFile: unrelated, cwd: f.cwd });
+		assert.notEqual(imported.tabId, f.tabId, "trackSession itself stays exact: an unrelated file gets its own row");
+		assert.equal(f.index.list().length, 2);
+	});
+
+	it("keeps the continuation when a window that never saw the move writes the row again, and keeps a move this window made itself", async () => {
+		const store = new ConditionalStore();
+		const f = await running(store);
+		const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+		type Rows = { entries: Array<{ tabId: string; title: string | null; sessionFile: string | null; sessionId: string | null; sessionDir: string | null }> };
+		const base = clone(store.value) as Rows;
+		const next = await makeContinuationFile(f.sessionDir, "S-NEW", "S-OLD", f.cwd);
+		assert.equal((await f.index.acceptContinuation(f.tabId, (await proveContinuation(f.file, next))!)).status, "accepted");
+		const latest = clone(store.value) as Rows;
+
+		const stale = clone(base);
+		stale.entries.find(row => row.tabId === f.tabId)!.title = "Renamed by a window that never saw the move";
+		const merged = (mergeSessionIndexRecords({ base, desired: stale, latest }).value as Rows).entries.find(row => row.tabId === f.tabId)!;
+		assert.deepEqual([merged.sessionFile, merged.sessionId, merged.sessionDir, merged.title], [next, "S-NEW", f.sessionDir, "Renamed by a window that never saw the move"]);
+
+		const mover = clone(base);
+		const own = mover.entries.find(row => row.tabId === f.tabId)!;
+		own.sessionFile = "C:\\sessions\\elsewhere.jsonl";
+		own.sessionId = "S-ELSEWHERE";
+		const kept = (mergeSessionIndexRecords({ base, desired: mover, latest }).value as Rows).entries.find(row => row.tabId === f.tabId)!;
+		assert.deepEqual([kept.sessionFile, kept.sessionId], ["C:\\sessions\\elsewhere.jsonl", "S-ELSEWHERE"], "a window that changed the identity itself keeps its own");
 	});
 });

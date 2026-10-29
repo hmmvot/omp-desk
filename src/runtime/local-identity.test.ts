@@ -59,3 +59,53 @@ describe("binding a draft to the file its process reported", () => {
 		assert.equal(events.includes("bound"), true, "the retained retry binds once the foreign claim is gone");
 	});
 });
+
+describe("following a session that went on in a newer file", () => {
+	const PROOF = { fromFile: "C:\\sessions\\a.jsonl", toFile: "C:\\sessions\\b.jsonl", fromId: "S-A", toId: "S-B", hops: 1 };
+
+	function fixture(status: "accepted" | "refused", currentRuntime = true) {
+		const runtime = {} as unknown as SessionHostRuntime;
+		const events: string[] = [];
+		const conflicts: string[] = [];
+		const asked: unknown[] = [];
+		const index = {
+			lifecycle: { run: <T>(_tab: string, work: (lease: object) => Promise<T>): Promise<T> => work({}) },
+			acceptContinuation: async (tab: string, proof: unknown) => {
+				asked.push([tab, proof]);
+				return status === "accepted" ? { status } : { status, detail: "Another row in Sessions already holds the file." };
+			},
+		} as unknown as SessionIndex;
+		const records = { get: () => ({ runtime: currentRuntime ? runtime : {} }) } as unknown as RuntimeRecords;
+		const window: IdentityWindow = {
+			bound: () => { events.push("bound"); },
+			conflict: (_tab, detail) => { conflicts.push(detail); },
+			refresh: () => { events.push("refresh"); },
+		};
+		const lines: LoggedLine[] = [];
+		return { runtime, events, conflicts, asked, lines, identity: new LocalIdentity({ index, window, records, log: recordingLogger(lines) }) };
+	}
+
+	it("has the catalog move the row, then commits the document for the new file", async () => {
+		const f = fixture("accepted");
+		assert.equal(await f.identity.bindContinuation(TAB, f.runtime, PROOF), true);
+		assert.deepEqual(f.asked, [[TAB, PROOF]]);
+		assert.deepEqual(f.events, ["bound", "refresh"]);
+		assert.deepEqual(f.conflicts, []);
+	});
+
+	it("tells the user why when the catalog refuses, and changes nothing else", async () => {
+		const f = fixture("refused");
+		assert.equal(await f.identity.bindContinuation(TAB, f.runtime, PROOF), false);
+		assert.deepEqual(f.events, []);
+		assert.equal(f.conflicts.length, 1);
+		assert.match(f.conflicts[0] ?? "", /went on in a newer file.*Another row in Sessions/s);
+		assert.ok(f.lines.some(line => line.level === "warn" && line.message.includes(PROOF.toFile)));
+	});
+
+	it("asks the catalog nothing for a process that is no longer the tab's", async () => {
+		const f = fixture("accepted", false);
+		assert.equal(await f.identity.bindContinuation(TAB, f.runtime, PROOF), false);
+		assert.deepEqual(f.asked, []);
+		assert.deepEqual(f.events, []);
+	});
+});
