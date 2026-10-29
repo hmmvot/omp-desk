@@ -27,6 +27,8 @@ With the compiled program, host control (model readback, subagent work indicator
 
 The Skills, Tools, MCP and Extensions views read OMP's own source files too, so they need a package install as well. With the compiled program, the three editors name `/agents`, `/model` or `/settings` in the session's Terminal view as the way to do the same there.
 
+An OMP that began as a Bun global install can turn into the compiled program: when `omp update` finds that Bun's launcher cannot run the new release (OMP 18.13 needs Bun 1.4.4 or newer), it replaces Bun's `omp.exe` with the compiled program and stops updating the Bun package. Desk then treats it as the compiled program, whatever Bun's global folder still holds; see [After `omp update` changed Bun's launcher](troubleshooting.md#after-omp-update-changed-buns-launcher).
+
 The install form also decides whether a running Chat survives a VS Code update; see [Sessions that survive restarts](sessions.md#sessions-that-survive-restarts).
 
 ## Install and start

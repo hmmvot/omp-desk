@@ -6,6 +6,19 @@
 - **A message says Windows blocked OMP Desk's native module (or it is missing).** See [The native module is blocked or missing](#the-native-module-is-blocked-or-missing).
 - **A Chat tab froze or stopped responding.** See [A Chat tab that stops responding](#a-chat-tab-that-stops-responding).
 - **Chat replies stop arriving, or a sent message is reported as unconfirmed.** See [Chat replies stop arriving](#chat-replies-stop-arriving).
+- **OMP became its own program after `omp update`, and the settings editors or the Skills, Tools, MCP and Extensions views stopped opening.** See [After `omp update` changed Bun's launcher](#after-omp-update-changed-buns-launcher).
+
+## After `omp update` changed Bun's launcher
+
+OMP 18.13 needs Bun 1.4.4 or newer. When `omp update` finds that the launcher Bun installed cannot run the new release (the usual cause is an older Bun: `omp update` printed `bun did not install a working omp … launcher … installing the standalone binary`), it replaces Bun's `omp.exe` with OMP's own compiled program and prints `This install is no longer managed by bun`. Bun's global package folder (`%USERPROFILE%\.bun\install\global\node_modules\@oh-my-pi\pi-coding-agent`) stays on disk, but nothing starts from it any more, and later `omp update` runs replace the program only; the package is never updated again and may fall behind the program.
+
+OMP Desk follows `omp` on your `PATH`, so it now starts that program, exactly as for the compiled program in the table of [Getting started](getting-started.md#requirements):
+
+- **Chat and Terminal work** (host control is carried in `BUN_OPTIONS` after a one-time check of the program).
+- **The Models, Agents and OMP Settings editors, the Skills, Tools, MCP and Extensions views and the stopped-session rename say that OMP has no source on disk.** They read OMP's own TypeScript source, which the compiled program carries inside the executable. Desk deliberately does not read Bun's leftover global package instead: a package of the same release number is not proof that it is the source of the program you run, and after the next `omp update` it would not be. `/settings`, `/agents` and `/model` in the session's Terminal view do the same work.
+- **A Chat no longer survives a VS Code update.** Chats keep running through an update only when OMP runs on a `bun.exe` Desk can share ([Sessions](sessions.md#the-vs-code-update-exception)); the compiled program has none, so its Chats run as `Code.exe` like Terminals.
+
+To get the full set back, install OMP with Bun again: run `bun upgrade` (to 1.4.4 or newer), then `bun install -g @oh-my-pi/pi-coding-agent`. Bun writes its launcher over the compiled program and `omp --version` then runs from the package again. Close every OMP session first: Windows does not let Bun replace an `omp.exe` that is running. A running session started before the update may also print `Bun runtime must be >= 1.4.4` when OMP starts one of its helper processes, because the files on disk are already the new release; restart such a session after the update.
 
 ## The OMP Desk log
 
