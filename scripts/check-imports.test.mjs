@@ -257,6 +257,22 @@ test("a runtime file may not name vscode in any form", () => {
   );
 });
 
+test("a wire file may not refer to vscode, a wire test may", () => {
+  check(
+    {
+      "src/extension.ts": 'import { w } from "./wire/w.ts";\nexport const e = w;\n',
+      "src/wire/w.ts": 'import * as vscode from "vscode";\nexport const w = vscode;\n',
+      "src/wire/dyn.ts": 'export const d = import("vscode");\n',
+      "src/wire/ok.ts": "export const ok = 1;\n",
+      "src/wire/w.test.ts": 'import * as vscode from "vscode";\nexport const t = vscode;\n',
+    },
+    [
+      "src/wire/dyn.ts:1 imports vscode: wire may not reach vscode",
+      "src/wire/w.ts:1 imports vscode: wire may not reach vscode",
+    ],
+  );
+});
+
 test("a runtime file may not reach vscode through a chain of non-test imports", () => {
   check(
     {

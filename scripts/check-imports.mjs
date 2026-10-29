@@ -200,6 +200,13 @@ for (const rel of nodes) {
   }
 }
 
+// R-wire-1: nothing in `src/wire/` refers to `vscode` (ADR-0065 amendment 2026-10-30): the layer is shared with the broker, which runs in
+// plain Node. Wire files may import only wire, protocol, chat and shared, so a direct reference is the whole rule.
+for (const rel of nodes) {
+  if (layerOf(rel) !== "wire" || isTestFile(rel) || !vscodeImporters.has(rel)) continue;
+  findings.push(`${rel}:${vscodeImporters.get(rel)} imports vscode: wire may not reach vscode`);
+}
+
 // R-runtime-1: nothing in `src/runtime/` refers to `vscode`, directly or through a chain of relative
 // imports between non-test files (ADR-0066). The shortest chain to each offending file is printed.
 for (const start of nodes) {
