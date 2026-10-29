@@ -49,6 +49,6 @@ export function fixtureAcl(entries: readonly string[]): string {
 			if (!Object.hasOwn(RIGHTS, right)) throw new Error(`Unknown ACE fixture right ${right}`);
 			return mask | RIGHTS[right]!;
 		}, 0);
-		return [{ principal: fixturePrincipal(name), permissions, denied: groups.includes("DENY") }];
+		return [{ principal: fixturePrincipal(name), permissions, denied: groups.includes("DENY"), inherited: groups.includes("I") }];
 	}));
 }

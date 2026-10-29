@@ -27,6 +27,8 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { win32Native, win32NativeFailure, type Win32Native, type Win32SecurityRead } from "./win32-native.ts";
 import { nativeUnavailableDetail } from "./native-module-failure.ts";
+import { formatForeignAccess, splitPrincipal, type ForeignAccessKind } from "./foreign-access.ts";
+import { REPLACEMENT_FREE_MASK } from "./win32-security.ts";
 import { startToolSpawnTrace, type ToolSpawn, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
 /** One bounded security-tool result; injected so tests never depend on machine ACLs. */
@@ -342,8 +344,9 @@ export function chainSecurityProblem(read: PrivateStorageSecurityRead, chain: { 
 		if (report === undefined || !report.acl.ok) return `the store access of ${target} could not be verified (${report?.acl.detail ?? "the SID reader returned no ACL"})`;
 		const acl = parseWindowsAcl(report.acl.stdout);
 		if (!acl.parsed) return `the store access listing of ${target} could not be read`;
-		for (const principal of acl.principals) {
-			if (!isPermittedAclPrincipal(principal, identity)) return `the store path ${target} is readable by ${principal}, beyond the same-user boundary`;
+		for (const entry of acl.entries) {
+			if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
+			return foreignRefusal("read-store", target, entry.principal, identity, entry, `the store path ${target} is readable by ${entry.principal}, beyond the same-user boundary`);
 		}
 	}
 	for (const target of chain.carriers) {
@@ -354,15 +357,43 @@ export function chainSecurityProblem(read: PrivateStorageSecurityRead, chain: { 
 		for (const entry of acl.entries) {
 			if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
 			if (!permissionsPermitReplacement(entry.permissions)) continue;
-			return `the component ${target} on the path to the store lets ${entry.principal} replace or re-permission it (${entry.permissions})`;
+			return foreignRefusal("replace-folder", target, entry.principal, identity, entry, `the component ${target} on the path to the store lets ${entry.principal} replace or re-permission it (${entry.permissions})`);
 		}
 	}
 	for (const target of [...chain.owned, ...chain.carriers]) {
 		const owner = read.reports.get(target.toLowerCase())?.owner;
 		if (owner === null || owner === undefined) return `the owner of ${target} could not be read`;
-		if (!isPermittedAclPrincipal(owner, identity)) return `the store path ${target} is owned by ${owner}, beyond the same-user boundary`;
+		if (!isPermittedAclPrincipal(owner, identity)) return foreignRefusal("own-store", target, owner, identity, null, `the store path ${target} is owned by ${owner}, beyond the same-user boundary`);
 	}
 	return null;
+}
+
+/**
+ * The refusal for another account's access to the staged tree (ADR-0054), written so the notice can name the folder, the account, the
+ * access, whether the entry is inherited and the account that runs VS Code ({@link formatForeignAccess}). `principal` and `identity` are
+ * SIDs, each with its name when it was resolved. A principal that is not a SID (an owner a test probe reports by name) keeps `plain`.
+ */
+function foreignRefusal(
+	kind: ForeignAccessKind,
+	target: string,
+	principal: string,
+	identity: string,
+	entry: PrivateStorageAclEntry | null,
+	plain: string,
+): string {
+	const other = splitPrincipal(principal);
+	if (other === null) return plain;
+	const current = splitPrincipal(identity);
+	return formatForeignAccess({
+		kind,
+		path: target,
+		principal: other.sid,
+		principalName: other.name,
+		permissions: entry?.permissions ?? null,
+		inherited: entry?.inherited ?? null,
+		current: current?.sid ?? null,
+		currentName: current?.name ?? null,
+	});
 }
 
 /**
@@ -461,6 +492,8 @@ export interface PrivateStorageAclEntry {
 	readonly principal: string;
 	readonly permissions: number;
 	readonly denied: boolean;
+	/** Whether the entry is inherited from a parent (`INHERITED_ACE`); absent when the reading does not say. */
+	readonly inherited?: boolean;
 }
 
 export interface PrivateStorageAclReport {
@@ -479,7 +512,7 @@ export function parseWindowsAcl(stdout: string): PrivateStorageAclReport {
 			if (typeof entry !== "object" || entry === null ||
 				typeof entry.principal !== "string" || principalSid(entry.principal) === null ||
 				!Number.isSafeInteger(entry.permissions) || entry.permissions < -2147483648 || entry.permissions > 4294967295 ||
-				typeof entry.denied !== "boolean") return unreadable;
+				typeof entry.denied !== "boolean" || (entry.inherited !== undefined && typeof entry.inherited !== "boolean")) return unreadable;
 		}
 		return { entries, principals: entries.filter(entry => !entry.denied).map(entry => entry.principal), parsed: true };
 	} catch {
@@ -493,7 +526,7 @@ export function parseWindowsAcl(stdout: string): PrivateStorageAclReport {
  * access and any unknown mask bit can replace or re-permission and fail closed.
  */
 export function permissionsPermitReplacement(permissions: number): boolean {
-	return ((permissions >>> 0) & ~0xE01201BF) !== 0;
+	return ((permissions >>> 0) & ~REPLACEMENT_FREE_MASK) !== 0;
 }
 
 /**
@@ -882,11 +915,13 @@ async function verifyStorage(
 			}
 			const acl = parseWindowsAcl(result.stdout);
 			if (!acl.parsed) return refuse(`the store access listing of ${target} could not be read`);
-			for (const principal of acl.principals) {
-				if (!isPermittedAclPrincipal(principal, identity)) {
-					return refuse(`the store path ${target} is readable by ${await namedPrincipal(principal)}, beyond the same-user boundary`);
+			for (const entry of acl.entries) {
+				if (entry.denied) continue;
+				if (!isPermittedAclPrincipal(entry.principal, identity)) {
+					const named = await namedPrincipal(entry.principal);
+					return refuse(foreignRefusal("read-store", target, named, await namedPrincipal(identity), entry, `the store path ${target} is readable by ${named}, beyond the same-user boundary`));
 				}
-				if (!permittedPrincipals.includes(principal)) permittedPrincipals.push(principal);
+				if (!permittedPrincipals.includes(entry.principal)) permittedPrincipals.push(entry.principal);
 			}
 		}
 		for (const target of carriers) {
@@ -899,8 +934,9 @@ async function verifyStorage(
 			for (const entry of acl.entries) {
 				if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
 				if (!permissionsPermitReplacement(entry.permissions)) continue;
+				const named = await namedPrincipal(entry.principal);
 				return refuse(
-					`the component ${target} on the path to the store lets ${await namedPrincipal(entry.principal)} replace or re-permission it (${entry.permissions})`,
+					foreignRefusal("replace-folder", target, named, await namedPrincipal(identity), entry, `the component ${target} on the path to the store lets ${named} replace or re-permission it (${entry.permissions})`),
 				);
 			}
 		}
@@ -926,7 +962,8 @@ async function verifyStorage(
 			const owner = ownerByPath.get(target.toLowerCase());
 			if (owner === undefined) return refuse(`the owner of ${target} could not be read`);
 			if (!isPermittedAclPrincipal(owner, identity)) {
-				return refuse(`the store path ${target} is owned by ${await namedPrincipal(owner)}, beyond the same-user boundary`);
+				const named = await namedPrincipal(owner);
+				return refuse(foreignRefusal("own-store", target, named, await namedPrincipal(identity), null, `the store path ${target} is owned by ${named}, beyond the same-user boundary`));
 			}
 		}
 		evidence.push("access is limited to the owner, SYSTEM and Administrators");

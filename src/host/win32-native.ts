@@ -20,6 +20,7 @@ import { readFile } from "node:fs/promises";
 import type { Logger } from "../shared/logger.ts";
 import { silentLogger } from "../shared/logger.ts";
 import { CallLane } from "./call-lane.ts";
+import { nameForeignAccess } from "./foreign-access.ts";
 import {
 	decodeAclEntries,
 	formatSid,
@@ -35,6 +36,9 @@ export interface NativeModuleAsset {
 	readonly path: string;
 	readonly sha256: string;
 }
+
+/** How long naming the accounts of a refusal may take; names are diagnostic only, so a lookup that misses it leaves the SIDs. */
+const NAME_LOOKUP_DEADLINE_MS = 5_000;
 
 /** What opening a named mutex for `SYNCHRONIZE` showed. */
 export type MutexState = "held" | "absent" | "error";
@@ -802,7 +806,13 @@ export function startWin32Native(
 					}
 					steps.push({ name: "verify", wallMs: performance.now() - wall, cpuMs: processCpuMs() - cpu });
 				}
-				shared = Promise.resolve(problem === null ? native : refuse(problem));
+				if (problem === null) {
+					shared = Promise.resolve(native);
+				} else {
+					failure = problem;
+					// The synchronous check quotes bare SIDs; the loaded module can name the accounts a person is told about.
+					shared = nameForeignAccess(problem, sids => native.lookupAccountNames(sids, NAME_LOOKUP_DEADLINE_MS)).then(refuse);
+				}
 				return shared;
 			}
 		} catch (error) {

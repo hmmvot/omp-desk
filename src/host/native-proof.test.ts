@@ -252,7 +252,7 @@ describe("a warm start", windowsOnly, () => {
 				const read = real.readSecuritySync(paths);
 				const carrier = proofChain(stagedPath)[0]!.path.toLowerCase();
 				const report = read.reports.get(carrier);
-				const entries = [...(report?.entries ?? []), { principal: "S-1-1-0", permissions: 0x1f01ff, denied: false }];
+				const entries = [...(report?.entries ?? []), { principal: "S-1-1-0", permissions: 0x1f01ff, denied: false, inherited: false }];
 				return { ...read, reports: new Map([...read.reports, [carrier, { entries, owner: report?.owner ?? null }]]) };
 			},
 		};

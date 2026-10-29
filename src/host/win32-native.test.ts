@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
+import { findForeignAccess, formatForeignAccess } from "./foreign-access.ts";
 import { describeLoadSteps, loadWin32Native, peMachineOf, setWin32NativeForTest, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./win32-native.ts";
 import { holdMutex, installedAddonAsset, releaseMutex } from "./win32-test-support.ts";
 
@@ -244,6 +245,8 @@ describe("readSecurity against real paths", { skip: process.platform !== "win32"
 		const own = read.reports.get(directory.toLowerCase());
 		assert.ok(own?.entries !== null && own?.entries !== undefined && own.entries.length > 0);
 		assert.ok(own.entries.some(entry => entry.principal === read.sid && !entry.denied), "the account can access its own temp directory");
+		assert.ok(own.entries.every(entry => typeof entry.inherited === "boolean"), "every entry says whether it is inherited");
+		assert.ok(own.entries.some(entry => entry.inherited), "a directory created in the temp directory holds entries inherited from it");
 		assert.ok([read.sid, "S-1-5-32-544"].includes(own.owner), `the temp directory is owned by this account or Administrators, not ${own.owner}`);
 
 		const windows = read.reports.get("c:\\windows");
@@ -268,7 +271,7 @@ describe("readSecurity against real paths", { skip: process.platform !== "win32"
 		// DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION with no DACL: everyone, everything.
 		assert.equal(setSecurity(file, 1, 0x4 | 0x20000000, null, null, null, null), 0);
 		const read = await native.readSecurity([file], 20_000);
-		assert.deepEqual(read.reports.get(file.toLowerCase())?.entries, [{ principal: "S-1-1-0", permissions: 0xffffffff, denied: false }]);
+		assert.deepEqual(read.reports.get(file.toLowerCase())?.entries, [{ principal: "S-1-1-0", permissions: 0xffffffff, denied: false, inherited: false }]);
 	});
 
 	it("names the SIDs that resolve and leaves the others out", async () => {
@@ -390,6 +393,15 @@ describe("the process's native module", () => {
 		const failed = await startWin32Native(async () => asset, silentLogger, () => ({ asset, verify: () => { throw new Error("the lane died"); } }));
 		assert.equal(failed, null);
 		assert.match(win32NativeFailure() ?? "", /could not be verified \(the lane died\)/);
+
+		// The synchronous check quotes bare SIDs; the refusal a person reads names the accounts, as the loaded module resolves them.
+		setWin32NativeForTest(undefined);
+		const bare = formatForeignAccess({ kind: "replace-folder", path: "C:\\x", principal: "S-1-5-32-545", principalName: null, permissions: 0x1f01ff, inherited: true, current: "S-1-5-18", currentName: null });
+		assert.equal(await startWin32Native(async () => asset, silentLogger, () => ({ asset, verify: () => bare })), null);
+		const named = findForeignAccess(win32NativeFailure() ?? "")?.access;
+		assert.match(named?.principalName ?? "", /.+\\.+/, "the other account is named");
+		assert.match(named?.currentName ?? "", /.+\\.+/, "the account that runs VS Code is named");
+		assert.equal(named?.inherited, true);
 	});
 
 	it("reads the owner and access list synchronously exactly as the lane does, and a path that cannot be read fails alone", { skip: process.platform !== "win32" }, async () => {

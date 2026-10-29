@@ -57,10 +57,16 @@ describe("decodeAclEntries", () => {
 	it("reads allow and deny entries in stored order with their raw masks", () => {
 		const entries = decodeAclEntries(acl([ace(0, 0x1f01ff, SYSTEM), ace(1, 0x120116, ADMINISTRATORS), ace(0, 0xffffffff, EVERYONE)]));
 		assert.deepEqual(entries, [
-			{ principal: "S-1-5-18", permissions: 0x1f01ff, denied: false },
-			{ principal: "S-1-5-32-544", permissions: 0x120116, denied: true },
-			{ principal: "S-1-1-0", permissions: 0xffffffff, denied: false },
+			{ principal: "S-1-5-18", permissions: 0x1f01ff, denied: false, inherited: false },
+			{ principal: "S-1-5-32-544", permissions: 0x120116, denied: true, inherited: false },
+			{ principal: "S-1-1-0", permissions: 0xffffffff, denied: false, inherited: false },
 		]);
+	});
+
+	it("tells an inherited entry from one set on the object itself, by the ACE flags", () => {
+		// 0x10 is INHERITED_ACE; the container and object inherit flags (0x03) say what a child gets and are not the origin.
+		const entries = decodeAclEntries(acl([ace(0, 0x1f01ff, SYSTEM, 0x13), ace(0, 0x1f01ff, ADMINISTRATORS, 0x03), ace(1, 0x2, EVERYONE, 0x10), ace(5, 0x2, objectBody(0, 0, SYSTEM), 0x10)]));
+		assert.deepEqual(entries?.map(entry => entry.inherited), [true, false, true, true]);
 	});
 
 	it("reads object ACEs with and without their GUIDs, and callback ACEs with their trailing data", () => {
@@ -75,18 +81,18 @@ describe("decodeAclEntries", () => {
 			]),
 		);
 		assert.deepEqual(entries, [
-			{ principal: "S-1-5-18", permissions: 0x2, denied: false },
-			{ principal: "S-1-5-18", permissions: 0x4, denied: true },
-			{ principal: "S-1-5-32-544", permissions: 0x8, denied: false },
-			{ principal: "S-1-5-32-544", permissions: 0x10, denied: true },
-			{ principal: "S-1-5-18", permissions: 0x20, denied: false },
-			{ principal: "S-1-1-0", permissions: 0x40, denied: true },
+			{ principal: "S-1-5-18", permissions: 0x2, denied: false, inherited: false },
+			{ principal: "S-1-5-18", permissions: 0x4, denied: true, inherited: false },
+			{ principal: "S-1-5-32-544", permissions: 0x8, denied: false, inherited: false },
+			{ principal: "S-1-5-32-544", permissions: 0x10, denied: true, inherited: false },
+			{ principal: "S-1-5-18", permissions: 0x20, denied: false, inherited: false },
+			{ principal: "S-1-1-0", permissions: 0x40, denied: true, inherited: false },
 		]);
 	});
 
 	it("does not report audit, alarm or label entries, and reports an empty list as empty", () => {
 		assert.deepEqual(decodeAclEntries(acl([ace(2, 0x1, SYSTEM), ace(3, 0x1, SYSTEM), ace(17, 0x1, SYSTEM), ace(0, 0x3, SYSTEM)])), [
-			{ principal: "S-1-5-18", permissions: 0x3, denied: false },
+			{ principal: "S-1-5-18", permissions: 0x3, denied: false, inherited: false },
 		]);
 		assert.deepEqual(decodeAclEntries(acl([])), []);
 	});
@@ -109,6 +115,6 @@ describe("decodeAclEntries", () => {
 	});
 
 	it("reads a NULL DACL as full control for Everyone", () => {
-		assert.deepEqual(nullDaclEntries(), [{ principal: EVERYONE_SID, permissions: 0xffffffff, denied: false }]);
+		assert.deepEqual(nullDaclEntries(), [{ principal: EVERYONE_SID, permissions: 0xffffffff, denied: false, inherited: false }]);
 	});
 });

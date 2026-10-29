@@ -15,7 +15,16 @@ export interface SecurityEntry {
 	readonly permissions: number;
 	/** `true` for a deny entry. */
 	readonly denied: boolean;
+	/** `true` when the entry was inherited from a parent (`INHERITED_ACE` in the ACE flags), `false` when it is set on the object itself. */
+	readonly inherited: boolean;
 }
+
+/**
+ * The access-mask bits an entry may hold without being able to replace or re-permission what it covers: read/execute/synchronize,
+ * data, create and attribute writes, and generic read/write/execute. Any bit outside it (delete, delete-child, write-DACL,
+ * write-owner, generic-all, maximum-allowed, an unknown bit) can replace or re-permission, and fails closed.
+ */
+export const REPLACEMENT_FREE_MASK = 0xe01201bf;
 
 const ACCESS_ALLOWED_ACE_TYPE = 0;
 const ACCESS_DENIED_ACE_TYPE = 1;
@@ -50,6 +59,7 @@ const OBJECT_ACE_TYPES: ReadonlySet<number> = new Set([
  */
 const NON_ACCESS_ACE_TYPES: ReadonlySet<number> = new Set([2, 3, 7, 8, 13, 14, 15, 16, 17]);
 
+const ACE_INHERITED = 0x10;
 const ACE_OBJECT_TYPE_PRESENT = 0x1;
 const ACE_INHERITED_OBJECT_TYPE_PRESENT = 0x2;
 const GUID_BYTES = 16;
@@ -121,7 +131,7 @@ export function decodeAclEntries(bytes: Uint8Array): SecurityEntry[] | null {
 		if (length === null || sidOffset + length > offset + aceSize) return null;
 		const principal = formatSid(bytes, sidOffset);
 		if (principal === null) return null;
-		entries.push({ principal, permissions, denied });
+		entries.push({ principal, permissions, denied, inherited: (bytes[offset + 1]! & ACE_INHERITED) !== 0 });
 		offset += aceSize;
 	}
 	return entries;
@@ -129,7 +139,7 @@ export function decodeAclEntries(bytes: Uint8Array): SecurityEntry[] | null {
 
 /** What a NULL DACL grants: everyone, everything. */
 export function nullDaclEntries(): SecurityEntry[] {
-	return [{ principal: EVERYONE_SID, permissions: FULL_ACCESS_MASK, denied: false }];
+	return [{ principal: EVERYONE_SID, permissions: FULL_ACCESS_MASK, denied: false, inherited: false }];
 }
 
 /** The binary SID of `S-1-<authority>-<sub>...`, or `null` when the text is not a SID this module would format. */

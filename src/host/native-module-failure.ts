@@ -12,16 +12,27 @@
  * text, which is what an administrator needs anyway. Nothing here imports `vscode`.
  */
 
+import { describeForeignAccess, findForeignAccess, foreignAccessDiagnostics, type ForeignAccess } from "./foreign-access.ts";
+
 /** The cause classes the notification distinguishes. */
-export type NativeFailureClass = "blocked-by-policy" | "missing-or-quarantined" | "stage-timeout" | "other";
+export type NativeFailureClass = "blocked-by-policy" | "missing-or-quarantined" | "stage-timeout" | "foreign-account-access" | "other";
 
 /** A native module failure: its class, the Windows error number when the message names one, and the raw message. */
-export interface NativeFailure {
-	readonly kind: NativeFailureClass;
-	/** A Win32 error number the message names or implies (1260, 577, 225 …); `null` when it names none. */
-	readonly code: number | null;
-	readonly raw: string;
-}
+export type NativeFailure =
+	| {
+			readonly kind: Exclude<NativeFailureClass, "foreign-account-access">;
+			/** A Win32 error number the message names or implies (1260, 577, 225 …); `null` when it names none. */
+			readonly code: number | null;
+			readonly raw: string;
+	  }
+	| {
+			/** The staged tree is reachable by an account other than the one running VS Code (ADR-0054): the check refused, correctly. */
+			readonly kind: "foreign-account-access";
+			readonly code: null;
+			readonly raw: string;
+			/** The refusal as facts: which folder, which account, what access, inherited or not, and who runs VS Code. */
+			readonly foreign: ForeignAccess;
+	  };
 
 interface Signature {
 	readonly code: number | null;
@@ -50,6 +61,9 @@ const TIMEOUT = /native stage child did not answer in \d+ ms/i;
 
 /** Classify the raw error of a failed staging or load. Never throws. */
 export function classifyNativeFailure(raw: string): NativeFailure {
+	// The extension's own refusal of the staged tree: a strict wording, so it is read before the Windows messages whose words a path could contain.
+	const foreign = findForeignAccess(raw);
+	if (foreign !== null) return { kind: "foreign-account-access", code: null, raw, foreign: foreign.access };
 	if (TIMEOUT.test(raw)) return { kind: "stage-timeout", code: null, raw };
 	for (const signature of POLICY) {
 		if (signature.pattern.test(raw)) return { kind: "blocked-by-policy", code: signature.code, raw };
@@ -73,6 +87,8 @@ const REMEDY_MORE = "See Troubleshooting in the OMP Desk user guide.";
 /** What the failure means for the person using the window. */
 export function describeNativeFailure(failure: NativeFailure): NativeFailureText {
 	switch (failure.kind) {
+		case "foreign-account-access":
+			return describeForeignAccess(failure.foreign, REMEDY_MORE);
 		case "blocked-by-policy":
 			return {
 				headline: "Windows blocked OMP Desk's native module (koffi.node).",
@@ -114,6 +130,11 @@ export function nativeUnavailableDetail(raw: string | null): string {
 	return raw === null ? "the native module is unavailable" : `the native module is unavailable (${describeNativeFailure(classifyNativeFailure(raw)).headline.replace(/\.$/, "")}): ${REMEDY_MORE}`;
 }
 
+/** The anchor, on the user guide's troubleshooting page, of the section the notification's troubleshooting button opens. */
+export function nativeTroubleshootingAnchor(failure: NativeFailure): string {
+	return failure.kind === "foreign-account-access" ? "another-windows-account-can-reach-omp-desks-folders" : "the-native-module-is-blocked-or-missing";
+}
+
 /** The facts "Copy diagnostics" puts on the clipboard. */
 export interface NativeDiagnosticsInput {
 	readonly failure: NativeFailure;
@@ -133,6 +154,7 @@ export function nativeDiagnosticsText(input: NativeDiagnosticsInput): string {
 		`Cause class: ${input.failure.kind}`,
 		`Windows error code: ${input.failure.code === null ? "not reported by the message" : input.failure.code}`,
 		`Error: ${input.failure.raw.replace(/\s*\r?\n\s*/g, " ")}`,
+		...(input.failure.kind === "foreign-account-access" ? foreignAccessDiagnostics(input.failure.foreign) : []),
 		`Shipped koffi.node: ${input.shipped.path}`,
 		`Shipped SHA-256: ${input.shipped.sha256 ?? "unreadable"}`,
 		`Staged koffi.node: ${input.staged === null ? "unknown" : input.staged.path}`,

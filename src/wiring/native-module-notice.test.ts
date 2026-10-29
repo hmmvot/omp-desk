@@ -24,11 +24,16 @@ import { classifyNativeFailure } from "../host/native-module-failure.ts";
 import { recordingLogger } from "../shared/logger.ts";
 import type { LoggedLine } from "../shared/logger.ts";
 
+/** What the staging child reports when another account can replace a folder on the way to the store (neutral names). */
+const FOREIGN_RAW = "the staged runtime tree is not usable: the component C:\\Users\\<account>\\AppData\\Roaming\\Code\\User\\globalStorage\\publisher.extension on the path to the store lets S-1-5-21-100-200-300-1002 (PC\\OtherUser) replace or re-permission it (2032127: full control, set directly on it); this window runs as S-1-5-21-100-200-300-1001 (PC\\Me)";
+
 interface Fixture {
 	readonly port: NativeNoticePort;
 	readonly shown: Array<{ readonly message: string; readonly buttons: readonly string[] }>;
 	readonly copied: string[];
 	readonly calls: string[];
+	/** The cause class each opened troubleshooting section was asked for. */
+	readonly opened: string[];
 	readonly logs: LoggedLine[];
 }
 
@@ -36,6 +41,7 @@ function fixture(failure: string | null, pick: string | undefined): Fixture {
 	const shown: Fixture["shown"] = [];
 	const copied: string[] = [];
 	const calls: string[] = [];
+	const opened: string[] = [];
 	const logs: LoggedLine[] = [];
 	const port: NativeNoticePort = {
 		failure: () => failure,
@@ -44,12 +50,12 @@ function fixture(failure: string | null, pick: string | undefined): Fixture {
 			return pick;
 		},
 		copy: async text => void copied.push(text),
-		openTroubleshooting: async () => void calls.push("troubleshooting"),
+		openTroubleshooting: async f => { calls.push("troubleshooting"); opened.push(f.kind); },
 		reloadWindow: async () => void calls.push("reload"),
 		diagnostics: async f => `diagnostics for ${f.kind}`,
 		log: recordingLogger(logs),
 	};
-	return { port, shown, copied, calls, logs };
+	return { port, shown, copied, calls, opened, logs };
 }
 
 describe("the native module notice", () => {
@@ -66,6 +72,7 @@ describe("the native module notice", () => {
 		["a quarantine", simulatedNativeFailure("225")!, /missing or could not be read/],
 		["a stage timeout", simulatedNativeFailure("timeout")!, /did not start in time/],
 		["an unrecognized cause", simulatedNativeFailure("other")!, /could not be loaded/],
+		["another account's access to the folder", FOREIGN_RAW, /another Windows account, PC\\OtherUser, has full control of C:\\Users\\<account>\\.*, so it could replace the module that runs as PC\\Me\./],
 	];
 	for (const [name, raw, headline] of raws) {
 		it(`shows ${name} once, with the three buttons, what does not work and the cause in the log`, async () => {
@@ -95,6 +102,21 @@ describe("the native module notice", () => {
 		await announceNativeFailure(f.port);
 		assert.deepEqual(f.calls, ["troubleshooting"]);
 		assert.deepEqual(f.copied, []);
+	});
+
+	it("opens the section of the cause: the other account's own one, the policy one for the rest", async () => {
+		const foreign = fixture(FOREIGN_RAW, NATIVE_NOTICE_TROUBLESHOOTING);
+		await announceNativeFailure(foreign.port);
+		assert.deepEqual(foreign.opened, ["foreign-account-access"]);
+		const policy = fixture(simulatedNativeFailure("1260"), NATIVE_NOTICE_TROUBLESHOOTING);
+		await announceNativeFailure(policy.port);
+		assert.deepEqual(policy.opened, ["blocked-by-policy"]);
+	});
+
+	it("copies the diagnostics of another account's access like any other class", async () => {
+		const f = fixture(FOREIGN_RAW, NATIVE_NOTICE_COPY);
+		await announceNativeFailure(f.port);
+		assert.deepEqual(f.copied, ["diagnostics for foreign-account-access"]);
 	});
 
 	it("reloads the window for Reload Window", async () => {

@@ -4,6 +4,7 @@
 - **Something looks wrong.** Open **View > Output** and choose **OMP Desk**, and run **OMP Desk: Show Diagnostics**. Include both when you [report a bug](https://github.com/hmmvot/omp-desk/issues/new/choose). See [The OMP Desk log](#the-omp-desk-log).
 - **Upgrading from an early local build.** See [Upgrading](upgrading.md#from-the-unpublished-local-build).
 - **A message says Windows blocked OMP Desk's native module (or it is missing).** See [The native module is blocked or missing](#the-native-module-is-blocked-or-missing).
+- **A message says another Windows account has access to OMP Desk's folder (for example when VS Code runs as a different user).** See [Another Windows account can reach OMP Desk's folders](#another-windows-account-can-reach-omp-desks-folders).
 - **A Chat tab froze or stopped responding.** See [A Chat tab that stops responding](#a-chat-tab-that-stops-responding).
 - **Chat replies stop arriving, or a sent message is reported as unconfirmed.** See [Chat replies stop arriving](#chat-replies-stop-arriving).
 - **OMP became its own program after `omp update`, and the settings editors or the Skills, Tools, MCP and Extensions views stopped opening.** See [After `omp update` changed Bun's launcher](#after-omp-update-changed-buns-launcher).
@@ -92,6 +93,54 @@ Allow the file in both places it is loaded from. The extension folder copy is lo
 - **Antivirus.** Restore `koffi.node` from quarantine (in Windows Security: **Protection history**, then **Restore**) and add an exclusion for the extension folder `%USERPROFILE%\.vscode\extensions\hmmvot.omp-desk-*` and for `%APPDATA%\Code\User\globalStorage\hmmvot.omp-desk\runtime`. A product that holds the file for a long scan on first sight shows up as a stage that timed out: **Reload Window** after the scan.
 
 **Updates.** The path of the extension folder changes with every OMP Desk version, so use the wildcard form there or re-add it. The file's hash changes only when OMP Desk moves to a different koffi version (the [changelog](../../CHANGELOG.md) says so), and differs between the x64 and arm64 builds; a hash rule written for one koffi version stops matching after such an update, and the message above returns until the rule is updated. Check **Copy diagnostics** after an update that shows it.
+
+## Another Windows account can reach OMP Desk's folders
+
+The message reads like this (the account and the folder are yours):
+
+> The native module (koffi.node) did not load: another Windows account, `PC\OtherUser`, has full control of `C:\Users\<account>\AppData\Roaming\Code\User\globalStorage\<publisher.extension>`, so it could replace the module that runs as `PC\<account>`. Remove that account's access to the folder, or run VS Code as the account you are signed in to Windows with, then choose **Reload Window**.
+
+**Why OMP Desk refuses.** OMP Desk starts programs from copies it keeps in VS Code's global storage (the native module, helpers, the broker). It runs them only when the account that runs VS Code, `SYSTEM` and the Administrators are the only ones who can replace those files, replace a folder on the way to them, or change who may do so. An account that could swap one of them could run its own code as you. The refusal is the check working; it is never relaxed, and there is nothing to allow-list. Because the check cannot pass, the module stays unavailable and the same things stop working as in [The native module is blocked or missing](#the-native-module-is-blocked-or-missing): New Session, Resume and re-attaching a running Chat; saved sessions are still listed.
+
+Typical ways to get here are an access entry added to the profile folder (to make it reachable from another account, for instance), a folder copied, restored or moved together with its permissions, and VS Code running as a different Windows account than the one you are signed in to Windows with. The message has one of three forms:
+
+- *has full control of / modify access to / delete or permission-changing access to `<folder>`, so it could replace the module* is an entry on the folder itself or on a folder on the way to it. Only an entry that lets the account replace or re-permission counts; read-only entries on a parent such as `C:\Users` are fine.
+- *has read access to `<path>`, where the module that runs as `<account>` is kept* is an entry on OMP Desk's own folders, which only you, `SYSTEM` and the Administrators may open.
+- *`<path>` is owned by another Windows account* is an owner other than you or the Administrators, who can change the folder's permissions whatever its entries say.
+
+**See which entries there are.** In a Command Prompt or PowerShell of the account that runs VS Code:
+
+```powershell
+whoami /user
+```
+
+prints the account VS Code runs as and its SID (`S-1-5-21-…`). **Copy diagnostics** in the message has the folder (`Folder:`), the other account (`Other account:`), what it may do (`Its access:`), whether the entry is inherited (`Entry:`) and who VS Code runs as (`VS Code runs as:`). To list every folder on the way to the module, set `$p` to the folder the message names:
+
+```powershell
+$p = "C:\Users\<account>\AppData\Roaming\Code\User\globalStorage\<publisher.extension>"
+while ($p) { icacls $p; $p = Split-Path $p -Parent }
+```
+
+An entry reads `PC\OtherUser:(OI)(CI)(F)` for full control (`(M)` is modify, `(RX)` is read and execute). `(I)` at the start of the flags means the entry is **inherited** from the folder above; without it the entry is set on that folder itself.
+
+**Remove an entry that is set on the folder itself.** From a prompt of the account that owns the folder, or an elevated one when it answers "Access is denied":
+
+```powershell
+icacls "C:\Users\<account>\AppData\Roaming\Code\User\globalStorage\<publisher.extension>" /remove:g "PC\OtherUser"
+```
+
+`/remove:g` removes only what was granted to that account, on that folder. Then choose **Reload Window**; OMP Desk stages and verifies the module again.
+
+**An inherited entry** cannot be removed where you see it: it comes from a folder above. Walk up with the loop above to the first folder whose entry for that account has no `(I)`, and remove it there with the same `icacls … /remove:g` command. If that folder is one you must not change (a whole shared profile, say), use the second or third way under **VS Code run as a different user** below. Do not turn inheritance off on a system folder to get rid of an entry.
+
+**If the folder is owned by another account**, run VS Code as that account, or from an elevated prompt give it back: `icacls "<folder>" /setowner "PC\<account>"`.
+
+**VS Code run as a different user.** The message names the accounts as the VS Code that shows it sees them: the module "runs as" the account that runs VS Code, and the other account is whichever one holds the entry, which can be the account you are signed in to Windows with. If you start VS Code as another account (**Shift** + right-click, **Run as different user**, or `runas /user:…`), its data and OMP Desk's folders are in that account's profile, and an entry there for the signed-in account lets that account replace what the other one runs, which is what the check refuses. Either:
+
+- run VS Code as the account you are signed in to Windows with, so that its own profile is used, or
+- start the other account's VS Code with its data in a folder only that account can change, with `Code.exe --user-data-dir <folder>`; no folder on the path to `<folder>` may be changeable by anyone else, or
+- remove the entry as above, if the other account does not need it.
+
 ## My sessions and folders disappeared
 
 If VS Code removed OMP Desk's storage folder (for example after a failed reinstall of the extension), OMP Desk restores the sessions, the folders and the reconnect records of running sessions on the next start from a private copy it keeps in `%LOCALAPPDATA%\omp-desk\recovery\<key>`, shows one notice with the age of the copy, and writes the restore to the **OMP Desk** log. If no usable copy exists, it says so once instead of starting silently empty, and names what it still sees (open editors for sessions that are gone, remembered sessions, running OMP processes with no record).

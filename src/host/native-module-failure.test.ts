@@ -12,6 +12,7 @@ import {
 	describeNativeFailure,
 	nativeDiagnosticsText,
 	nativeFailureMessage,
+	nativeTroubleshootingAnchor,
 	nativeUnavailableDetail,
 } from "./native-module-failure.ts";
 
@@ -144,5 +145,69 @@ describe("the diagnostics", () => {
 		assert.match(text, /Windows error code: not reported/);
 		assert.match(text, /Shipped SHA-256: unreadable/);
 		assert.match(text, /Staged koffi\.node: unknown/);
+	});
+});
+
+describe("another account's access to the staged tree", () => {
+	const FOLDER = "C:\\Users\\<account>\\AppData\\Roaming\\Code\\User\\globalStorage\\publisher.extension";
+	const OTHER = "S-1-5-21-100-200-300-1002";
+	const ME = "S-1-5-21-100-200-300-1001";
+	const STAGED = (reason: string): string => `the staged runtime tree is not usable: ${reason}`;
+	const explicit = STAGED(`the component ${FOLDER} on the path to the store lets ${OTHER} (PC\\OtherUser) replace or re-permission it (2032127: full control, set directly on it); this window runs as ${ME} (PC\\Me)`);
+
+	it("is its own class, whatever words the path holds, and carries the facts", () => {
+		for (const raw of [explicit, explicit.replace("<account>", "quarantine-1260-access is denied")]) {
+			const failure = classifyNativeFailure(raw);
+			assert.equal(failure.kind, "foreign-account-access");
+			assert.equal(failure.code, null);
+			assert.equal(failure.raw, raw);
+			assert.equal(failure.kind === "foreign-account-access" && failure.foreign.principalName, "PC\\OtherUser");
+		}
+	});
+
+	it("is still recognized in the wording that named only the mask", () => {
+		const failure = classifyNativeFailure(STAGED(`the component ${FOLDER} on the path to the store lets ${OTHER} (PC\\OtherUser) replace or re-permission it (2032127)`));
+		assert.equal(failure.kind, "foreign-account-access");
+		assert.equal(failure.kind === "foreign-account-access" && failure.foreign.inherited, null);
+	});
+
+	it("tells the person the folder, the account, the account VS Code runs as, what to do and what does not work", () => {
+		const message = nativeFailureMessage(classifyNativeFailure(explicit));
+		assert.ok(message.startsWith(`The native module (koffi.node) did not load: another Windows account, PC\\OtherUser, has full control of ${FOLDER}, so it could replace the module that runs as PC\\Me. Remove that account's access to the folder, or run VS Code as the account you are signed in to Windows with, then choose Reload Window. See Troubleshooting in the OMP Desk user guide. Until it loads,`), message);
+		assert.ok(message.endsWith(NATIVE_FAILURE_EFFECT));
+		assert.doesNotMatch(message, /AppLocker|antivirus/i, "the policy remedy does not apply here");
+	});
+
+	it("opens its own section of the troubleshooting, and the other classes keep theirs", () => {
+		assert.equal(nativeTroubleshootingAnchor(classifyNativeFailure(explicit)), "another-windows-account-can-reach-omp-desks-folders");
+		assert.equal(nativeTroubleshootingAnchor(classifyNativeFailure(LOAD("This program is blocked by group policy."))), "the-native-module-is-blocked-or-missing");
+		assert.equal(nativeTroubleshootingAnchor(classifyNativeFailure("the native stage child did not answer in 60000 ms")), "the-native-module-is-blocked-or-missing");
+	});
+
+	it("names the cause class and the facts in the diagnostics, after the error", () => {
+		const text = nativeDiagnosticsText({
+			failure: classifyNativeFailure(explicit),
+			shipped: { path: "C:\\ext\\out\\native\\koffi.node", sha256: "a".repeat(64) },
+			staged: null,
+			vscodeVersion: "1.141.1",
+			deskVersion: "0.4.12",
+			arch: "x64",
+		});
+		const lines = text.split("\n");
+		assert.deepEqual(lines.map(line => line.split(":")[0]), [
+			"OMP Desk native module diagnostics", "Cause class", "Windows error code", "Error",
+			"Folder", "Other account", "Its access", "Entry", "VS Code runs as",
+			"Shipped koffi.node", "Shipped SHA-256", "Staged koffi.node", "Staged SHA-256", "Architecture", "VS Code", "OMP Desk",
+		]);
+		assert.equal(lines[1], "Cause class: foreign-account-access");
+		assert.equal(lines[4], `Folder: ${FOLDER}`);
+		assert.equal(lines[5], `Other account: ${OTHER} (PC\\OtherUser)`);
+		assert.equal(lines[6], "Its access: full control (mask 2032127)");
+		assert.equal(lines[7], "Entry: set directly on it");
+		assert.equal(lines[8], `VS Code runs as: ${ME} (PC\\Me)`);
+	});
+
+	it("shows the cause in the detail of a refused check", () => {
+		assert.match(nativeUnavailableDetail(explicit), /^the native module is unavailable \(The native module \(koffi\.node\) did not load: another Windows account, PC\\OtherUser, has full control of .*\): See Troubleshooting/);
 	});
 });

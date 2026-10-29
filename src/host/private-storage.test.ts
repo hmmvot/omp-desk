@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { after, before, it } from "node:test";
-import { synchronousLocalPaths, isPermittedAclPrincipal, namedPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, readVerifiedStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
+import { synchronousLocalPaths, isPermittedAclPrincipal, namedPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, readVerifiedStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, chainSecurityProblem, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
+import { findForeignAccess } from "./foreign-access.ts";
+import { classifyNativeFailure, nativeFailureMessage } from "./native-module-failure.ts";
 import { formatToolSpawn, reportToolSpawn, setToolSpawnObserver, type ToolSpawn } from "./tool-spawn-trace.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { loadWin32Native, setWin32NativeForTest, type Win32Native, type Win32SecurityRead } from "./win32-native.ts";
@@ -282,6 +284,76 @@ it("still refuses an extra ACE on the store, a replace right on a carrier and an
 	});
 });
 
+const OTHER_SID = "S-1-5-21-100-200-300-1002";
+const NAMES = new Map([[OTHER_SID, "PC\\OtherUser"], [TEST_CURRENT_SID, "PC\\Me"]]);
+
+it("says which folder, which account, what access, whether it is inherited and who runs VS Code when another account can replace a folder on the way to the store", async () => {
+	await withStore(async layout => {
+		setWin32NativeForTest(fakeNative({ sid: TEST_CURRENT_SID, failure: null, reports: new Map() }, NAMES));
+		try {
+			const carrier = path.dirname(layout.root);
+			for (const [grant, inherited] of [[`${OTHER_SID}:(OI)(CI)(F)`, false], [`${OTHER_SID}:(I)(OI)(CI)(F)`, true]] as const) {
+				const security = fakeSecurity({ entries: target => target === carrier ? [...CLEAN_ENTRIES, grant] : CLEAN_ENTRIES });
+				const refused = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: security.read } });
+				assert.equal(refused.ready, false, "an account that can replace a carrier was admitted");
+				const found = findForeignAccess(refused.reason ?? "")?.access;
+				assert.deepEqual(found, {
+					kind: "replace-folder",
+					path: carrier,
+					principal: OTHER_SID,
+					principalName: "PC\\OtherUser",
+					permissions: 0x1f01ff,
+					inherited,
+					current: TEST_CURRENT_SID,
+					currentName: "PC\\Me",
+				});
+				const failure = classifyNativeFailure(`the staged runtime tree is not usable: ${refused.reason}`);
+				assert.equal(failure.kind, "foreign-account-access");
+				const message = nativeFailureMessage(failure);
+				assert.ok(message.includes(`another Windows account, PC\\OtherUser, has full control of ${carrier}, so it could replace the module that runs as PC\\Me.`), message);
+				assert.equal(message.includes("inherited from a parent folder"), inherited, message);
+			}
+		} finally { setWin32NativeForTest(realNative ?? undefined); }
+	});
+});
+
+it("describes the sibling refusals (an account that can read the store, a foreign owner) the same way and keeps refusing them", async () => {
+	await withStore(async layout => {
+		setWin32NativeForTest(fakeNative({ sid: TEST_CURRENT_SID, failure: null, reports: new Map() }, NAMES));
+		try {
+			const readable = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries: target => target === layout.root ? [...CLEAN_ENTRIES, `${OTHER_SID}:(OI)(CI)(RX)`] : CLEAN_ENTRIES }).read } });
+			assert.equal(readable.ready, false);
+			assert.deepEqual(findForeignAccess(readable.reason ?? "")?.access, {
+				kind: "read-store", path: layout.root, principal: OTHER_SID, principalName: "PC\\OtherUser", permissions: 0x1200a9, inherited: false, current: TEST_CURRENT_SID, currentName: "PC\\Me",
+			});
+			assert.match(nativeFailureMessage(classifyNativeFailure(readable.reason ?? "")), /another Windows account, PC\\OtherUser, has read access to .*, where the module that runs as PC\\Me is kept\./);
+
+			const owned = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ owner: () => OTHER_SID }).read } });
+			assert.equal(owned.ready, false);
+			assert.deepEqual(findForeignAccess(owned.reason ?? "")?.access, {
+				kind: "own-store", path: layout.root, principal: OTHER_SID, principalName: "PC\\OtherUser", permissions: null, inherited: null, current: TEST_CURRENT_SID, currentName: "PC\\Me",
+			});
+			assert.equal(classifyNativeFailure(owned.reason ?? "").kind, "foreign-account-access");
+		} finally { setWin32NativeForTest(realNative ?? undefined); }
+	});
+});
+
+it("reads an entry that does not say where it came from and keeps the refusal's wording when the account has no name", () => {
+	const entry = { principal: OTHER_SID, permissions: 0x1f01ff, denied: false };
+	assert.equal(parseWindowsAcl(JSON.stringify([entry])).parsed, true, "a reading without the flag is still a reading");
+	assert.equal(parseWindowsAcl(JSON.stringify([{ ...entry, inherited: "yes" }])).parsed, false, "a flag that is not a boolean is refused");
+	const files = ["C:\\a", "C:\\a\\store"];
+	const reports = (inherited: boolean | undefined) => new Map<string, PrivateStorageSecurityReport>(files.map(target => [target.toLowerCase(), {
+		acl: { ok: true, stdout: JSON.stringify(target === "C:\\a" ? [...JSON.parse(fixtureAcl(CLEAN_ENTRIES)), { ...entry, ...(inherited === undefined ? {} : { inherited }) }] : JSON.parse(fixtureAcl(CLEAN_ENTRIES))), detail: null },
+		owner: fixturePrincipal("WORKSTATION\\dev"),
+	}]));
+	const chain = { owned: ["C:\\a\\store"], carriers: ["C:\\a"] };
+	const unspecified = chainSecurityProblem({ sid: TEST_CURRENT_SID, failure: null, reports: reports(undefined) }, chain) ?? "";
+	assert.match(unspecified, /^the component C:\\a on the path to the store lets S-1-5-21-100-200-300-1002 replace or re-permission it \(2032127: full control\); this window runs as S-1-5-21-100-200-300-1001$/);
+	assert.equal(findForeignAccess(unspecified)?.access.inherited, null);
+	assert.equal(findForeignAccess(chainSecurityProblem({ sid: TEST_CURRENT_SID, failure: null, reports: reports(true) }, chain) ?? "")?.access.inherited, true);
+});
+
 it("refuses when the read fails, times out or answers something that is not an identity", async () => {
 	await withStore(async layout => {
 		const verifyWith = async (read: NonNullable<PrivateStorageProbe["readSecurity"]>, extra: Partial<PrivateStorageProbe> = {}) =>
@@ -313,7 +385,7 @@ it("refuses when the read fails, times out or answers something that is not an i
 });
 
 it("maps the native read per path, keeps each read independent and ignores nothing it was asked for", async () => {
-	const entries = [{ principal: "S-1-5-18", permissions: 0x1f01ff, denied: false }];
+	const entries = [{ principal: "S-1-5-18", permissions: 0x1f01ff, denied: false, inherited: false }];
 	const native = fakeNative({
 		sid: TEST_CURRENT_SID,
 		failure: null,

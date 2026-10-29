@@ -30,7 +30,8 @@ export interface NativeNoticePort {
 	/** Show an error with buttons; resolves to the one chosen, `undefined` when it was dismissed. */
 	readonly showError: (message: string, buttons: readonly string[]) => PromiseLike<string | undefined>;
 	readonly copy: (text: string) => PromiseLike<void>;
-	readonly openTroubleshooting: () => PromiseLike<unknown>;
+	/** Open the user-guide section for this failure's class (see {@link nativeTroubleshootingAnchor}). */
+	readonly openTroubleshooting: (failure: NativeFailure) => PromiseLike<unknown>;
 	readonly reloadWindow: () => PromiseLike<unknown>;
 	/** The text "Copy diagnostics" copies; see {@link nativeDiagnosticsFor}. */
 	readonly diagnostics: (failure: NativeFailure) => Promise<string>;
@@ -49,7 +50,7 @@ export async function announceNativeFailure(port: NativeNoticePort): Promise<voi
 	try {
 		const picked = await port.showError(nativeFailureMessage(failure), [NATIVE_NOTICE_COPY, NATIVE_NOTICE_TROUBLESHOOTING, NATIVE_NOTICE_RELOAD]);
 		if (picked === NATIVE_NOTICE_COPY) await port.copy(await port.diagnostics(failure));
-		else if (picked === NATIVE_NOTICE_TROUBLESHOOTING) await port.openTroubleshooting();
+		else if (picked === NATIVE_NOTICE_TROUBLESHOOTING) await port.openTroubleshooting(failure);
 		else if (picked === NATIVE_NOTICE_RELOAD) await port.reloadWindow();
 	} catch (error) {
 		port.log.warn(`the native module notice failed: ${error instanceof Error ? error.message : String(error)}`);

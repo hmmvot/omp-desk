@@ -134,6 +134,7 @@ import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./
 import { describeLoadSteps, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./host/win32-native";
 import { warmNativeAsset } from "./host/native-proof";
 import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, simulatedNativeFailure } from "./wiring/native-module-notice";
+import { nativeTroubleshootingAnchor } from "./host/native-module-failure";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
 import { comparablePosix, findFileMentions } from "./host/file-mentions";
@@ -430,8 +431,8 @@ const HOST_CONTROL_MODULE = "out/omp-host-control.mjs";
 const NATIVE_ADDON = "out/native/koffi.node";
 /** Packaged one-shot child that stages that addon and verifies the tree it lands in (ADR-0076). */
 const NATIVE_STAGE_CHILD = "out/native-stage.js";
-/** The user-guide section that explains a native module that cannot load and how an administrator allows it. */
-const NATIVE_TROUBLESHOOTING_URL = "https://github.com/hmmvot/omp-desk/blob/main/docs/guide/troubleshooting.md#the-native-module-is-blocked-or-missing";
+/** The user guide's troubleshooting page; the notice for a native module that cannot load opens the section for its cause (see `nativeTroubleshootingAnchor`). */
+const NATIVE_TROUBLESHOOTING_PAGE = "https://github.com/hmmvot/omp-desk/blob/main/docs/guide/troubleshooting.md";
 /**
  * The Bun helper that renames a *stopped* session's stored title through the
  * installed agent's own storage code. It is a plain packaged ESM file: it is not
@@ -1624,7 +1625,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         failure: win32NativeFailure,
         showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
         copy: text => vscode.env.clipboard.writeText(text),
-        openTroubleshooting: () => vscode.env.openExternal(vscode.Uri.parse(NATIVE_TROUBLESHOOTING_URL)),
+        openTroubleshooting: failure => vscode.env.openExternal(vscode.Uri.parse(`${NATIVE_TROUBLESHOOTING_PAGE}#${nativeTroubleshootingAnchor(failure)}`)),
         reloadWindow: () => vscode.commands.executeCommand("workbench.action.reloadWindow"),
         diagnostics: failure => nativeDiagnosticsFor({
           failure,
