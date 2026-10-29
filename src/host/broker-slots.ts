@@ -54,7 +54,7 @@ export function createHostSlotId(): string {
 	return `host:${randomUUID()}`;
 }
 
-export interface BrokerMemento {
+export interface BrokerSlotStorage {
 	get(key: string, fallback: unknown): unknown;
 	update(key: string, value: unknown, base?: unknown): PromiseLike<void>;
 }
@@ -243,19 +243,20 @@ export interface BrokerSlotStore {
 }
 
 /**
- * Build the table over one memento.
+ * Build the table over one keyed storage: in the extension, the profile catalog store, which merges this window's write
+ * with what other windows committed ({@link mergeBrokerSlotRecords}).
  *
  * The bound is applied per map on write: the table is a lookup, and a slot whose
  * record the broker has already retired is uninteresting here — the broker's own
  * record is the authority on whether a process still exists.
  */
-export function createBrokerSlotStore(memento: BrokerMemento): BrokerSlotStore {
+export function createBrokerSlotStore(storage: BrokerSlotStorage): BrokerSlotStore {
 	let cache: BrokerSlotTable | null = null;
 	/** The record this window's table was derived from, named as the merge base. */
 	let loadedBase: unknown = undefined;
 	const load = (): BrokerSlotTable => {
 		if (cache === null) {
-			loadedBase = memento.get(BROKER_SLOTS_KEY, null);
+			loadedBase = storage.get(BROKER_SLOTS_KEY, null);
 			cache = parseTable(loadedBase);
 		}
 		return cache;
@@ -273,7 +274,7 @@ export function createBrokerSlotStore(memento: BrokerMemento): BrokerSlotStore {
 			conflictedConversations: [...(current.unreadableConversations ?? [])],
 			conflictedEditors: [...(current.unreadableEditors ?? [])],
 		};
-		await memento.update(BROKER_SLOTS_KEY, written, loadedBase);
+		await storage.update(BROKER_SLOTS_KEY, written, loadedBase);
 		loadedBase = written;
 		// What this window just wrote is readable by construction, so nothing new is
 		// recorded as dropped.

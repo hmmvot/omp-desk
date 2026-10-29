@@ -8,9 +8,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { BROKER_SLOT_LIMIT, createBrokerSlotStore, createHostSlotId, isHostSlotId } from "./broker-slots.ts";
-import type { BrokerMemento } from "./broker-slots.ts";
+import type { BrokerSlotStorage } from "./broker-slots.ts";
 
-function memento(initial: unknown = null): BrokerMemento & { readonly writes: readonly unknown[] } {
+function storage(initial: unknown = null): BrokerSlotStorage & { readonly writes: readonly unknown[] } {
 	const writes: unknown[] = [];
 	let value = initial;
 	return {
@@ -36,7 +36,7 @@ describe("broker slot ids", () => {
 
 describe("broker slot table", () => {
 	it("records one slot under both identities and reads it back", async () => {
-		const store = createBrokerSlotStore(memento());
+		const store = createBrokerSlotStore(storage());
 		const slot = createHostSlotId();
 		assert.deepEqual(await store.record({ slot, conversation: "tab:a", editor: "editor-1" }), { ok: true });
 		assert.equal(store.forConversation("tab:a"), slot);
@@ -45,7 +45,7 @@ describe("broker slot table", () => {
 	});
 
 	it("moves a conversation binding to the row the same host now serves", async () => {
-		const store = createBrokerSlotStore(memento());
+		const store = createBrokerSlotStore(storage());
 		const slot = createHostSlotId();
 		await store.record({ slot, conversation: "tab:a", editor: "editor-1" });
 		const moved = await store.repointConversation("tab:a", "tab:b");
@@ -57,7 +57,7 @@ describe("broker slot table", () => {
 	});
 
 	it("refuses to overwrite a live incumbent's conversation mapping", async () => {
-		const store = createBrokerSlotStore(memento());
+		const store = createBrokerSlotStore(storage());
 		const incumbent = createHostSlotId();
 		const newcomer = createHostSlotId();
 		await store.record({ slot: incumbent, conversation: "tab:b", editor: "editor-incumbent" });
@@ -75,7 +75,7 @@ describe("broker slot table", () => {
 	});
 
 	it("refuses a new host at the bound instead of evicting a recorded one", async () => {
-		const store = createBrokerSlotStore(memento());
+		const store = createBrokerSlotStore(storage());
 		const slots: string[] = [];
 		for (let index = 0; index < BROKER_SLOT_LIMIT; index++) {
 			const slot = createHostSlotId();
@@ -135,7 +135,7 @@ describe("broker slot table", () => {
  */
 describe("broker slot provenance", () => {
 	it("answers none, a slot, and unreadable apart", async () => {
-		const store = createBrokerSlotStore(memento());
+		const store = createBrokerSlotStore(storage());
 		const slot = createHostSlotId();
 
 		assert.deepEqual(store.provenanceFor({ conversation: "tab:a" }), { kind: "none" });
@@ -148,7 +148,7 @@ describe("broker slot provenance", () => {
 
 	it("reports a mapping or a table it had to drop as unreadable, never as absent", () => {
 		const dropped = createBrokerSlotStore(
-			memento({ byEditor: { "editor-1": "not-a-slot" }, byConversation: { "tab:a": "not-a-slot" } }),
+			storage({ byEditor: { "editor-1": "not-a-slot" }, byConversation: { "tab:a": "not-a-slot" } }),
 		);
 		assert.deepEqual(dropped.provenanceFor({ conversation: "tab:a" }), { kind: "unreadable" });
 		assert.deepEqual(dropped.provenanceFor({ editor: "editor-1" }), { kind: "unreadable" });
@@ -158,7 +158,7 @@ describe("broker slot provenance", () => {
 			"another identity's dropped mapping does not make this one unreadable",
 		);
 
-		const malformed = createBrokerSlotStore(memento("not-a-table"));
+		const malformed = createBrokerSlotStore(storage("not-a-table"));
 		assert.deepEqual(malformed.provenanceFor({ conversation: "tab:a" }), { kind: "unreadable" });
 		assert.equal(malformed.forConversation("tab:a"), null, "the existing readers keep answering as before");
 	});
@@ -166,7 +166,7 @@ describe("broker slot provenance", () => {
 
 describe("broker slot references", () => {
 	it("lists every mapping and is complete for a table it wrote or read in full", async () => {
-		const store = createBrokerSlotStore(memento());
+		const store = createBrokerSlotStore(storage());
 		const slot = createHostSlotId();
 		await store.record({ slot, conversation: "tab:a", editor: "editor-1" });
 		assert.deepEqual(store.references(), {
@@ -174,16 +174,16 @@ describe("broker slot references", () => {
 			byEditor: { "editor-1": slot },
 			complete: true,
 		});
-		assert.equal(createBrokerSlotStore(memento()).references().complete, true, "an empty table is fully read");
+		assert.equal(createBrokerSlotStore(storage()).references().complete, true, "an empty table is fully read");
 	});
 
 	it("reports a dropped value, a conflict marker or an unreadable table as incomplete", () => {
 		const slot = createHostSlotId();
-		const dropped = createBrokerSlotStore(memento({ byConversation: { "tab:a": slot, "tab:b": "not-a-slot" }, byEditor: {} }));
+		const dropped = createBrokerSlotStore(storage({ byConversation: { "tab:a": slot, "tab:b": "not-a-slot" }, byEditor: {} }));
 		assert.equal(dropped.references().complete, false);
 		assert.deepEqual(dropped.references().byConversation, { "tab:a": slot }, "the readable mapping is still listed");
-		const conflicted = createBrokerSlotStore(memento({ byConversation: {}, byEditor: {}, conflictedEditors: ["editor-1"] }));
+		const conflicted = createBrokerSlotStore(storage({ byConversation: {}, byEditor: {}, conflictedEditors: ["editor-1"] }));
 		assert.equal(conflicted.references().complete, false);
-		assert.equal(createBrokerSlotStore(memento("not-a-table")).references().complete, false);
+		assert.equal(createBrokerSlotStore(storage("not-a-table")).references().complete, false);
 	});
 });
