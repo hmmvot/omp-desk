@@ -157,237 +157,6 @@ export const commands = { calls: [], handler: null, async executeCommand(...args
 } };
 `;
 
-// Export private entrypoints only in the test bundle, never in the shipped extension.
-const ACCESS = `
-import { sessionItemState as fixtureRowState } from './views/session-tree';
-import * as fixtureVscode from 'vscode';
-import { acquireClaim as fixtureClaim, createClaimHolder as fixtureHolder, setClaimFailures } from './host/session-claim';
-import { capturedDesktopXml, capturedDesktopXmls, resetDesktopXmls } from './host/desktop-notifications';
-import { providerLoginFixture, storedRenameFixture } from './host/native-terminal';
-import { providerAuthFixture } from './host/provider-login-rpc';
-import { bridgeViewType } from './host/bridge-identity';
-// The harness runs windows without an activation context: the cases that need one set it on the window.
-const fixtureContext = undefined as never;
-// The chat runtime the case built; the runtime and its launcher are constructed from it.
-let fixtureChat = undefined as never;
-const fixtureWindow = () => windowState();
-export const harness = {
-  closeSession, presentRestoreOutcome, handOverSession, handleChatEvent, restoreTabs,
-  // The session flows live in the window's sessionFlows handle (wiring/session-flows.ts); these adapters keep the cases' argument shapes.
-  openTab: (...args) => fixtureWindow().sessionFlows.openTab(...args),
-  switchSessionMode: (...args) => fixtureWindow().sessionFlows.switchSessionMode(...args),
-  restartChat: (...args) => fixtureWindow().sessionFlows.restartChat(...args),
-  openSessionInMode: (...args) => fixtureWindow().sessionFlows.openSessionInMode(...args),
-  // The process services live in the runtime (cut 5); these adapters keep the cases' argument shapes.
-  connectHostControl: (context, _index, tabId, owner, runtime, prepared) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.connect(tabId, owner, runtime, prepared); },
-  reconnectHostControl: (context, _index, tabId, owner, runtime) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.reconnect(tabId, owner, runtime); },
-  establishControl: (context, _index, tabId, owner, attempt, input) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.establish(tabId, owner, attempt, input); },
-  startNativeWatch: (_index, state, native) => fixtureWindow().sessionRuntime.nativeWatch.start(recordFor(state), native),
-  handleNativeHostExited: (_index, state, native) => fixtureWindow().sessionRuntime.exit.nativeExited(recordFor(state), native),
-  bindConversationIdentity: (_index, tabId, runtime, file, sessionId, previous) => fixtureWindow().sessionRuntime.identity.bind(tabId, runtime, file, sessionId, previous),
-  retryPendingIdentity: (_index, tabId) => fixtureWindow().sessionRuntime.identity.retry(tabId),
-  /** The runtime's record of the conversation an editor shows: its process, control channel, fence and failure. */
-  record: recordFor,
-  handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
-  defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
-  resumeWorkspaceFolder, newSessionInPlace, deleteSessionInPlace,
-  panelFactory(handler) {
-    const w = fixtureWindow(), previous = w.editorPanels;
-    w.editorPanels = registerEditorPanels({ ...editorPanelsDeps(), createWebviewPanel: handler });
-    return () => { w.editorPanels = previous; };
-  },
-  // The window a case replaces is disposed as deactivation disposes it: an operation that case left pending (a Resume still waiting for its writer) must not keep the process alive through its clocks.
-  // The fixture's helper scheduler has no restore to wait for and no cross-window slots: a helper run starts as soon as it is asked for.
-  installWindow(next) { window?.pendingDisplay.dispose(); window?.pending.dispose(); window?.helpers?.dispose(); next.helpers ??= new HelperScheduler({ log, backgroundGate: Promise.resolve(), backgroundSettleMs: 0 }); window = next; },
-  window: () => windowState(),
-  holdStartupRestore() {
-    const w = fixtureWindow(), over = Promise.withResolvers();
-    let pending = true;
-    w.catalogAdoption = { ...w.catalogAdoption, startupRestoreOver: () => pending ? over.promise : null };
-    return { end() { pending = false; over.resolve(); } };
-  },
-  createWindowState,
-  localLauncher: (context, index) => localLauncher(context, index, fixtureChat), handleTerminalGuestMessage,
-  startConversation: (index, tabId, runtime, file, replay) => localLauncher(fixtureWindow().context, index, fixtureChat).startConversation(tabId, runtime, file, replay),
-  pushSessionView, handleShellEditorClosed,
-  SessionTreeProvider,
-  terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
-  copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
-  handleBridgeRequest,
-  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette, signInProvider, logoutProviderFromPalette,
-  providerLoginFixture, providerAuthFixture,
-  storedRenameFixture,
-  providerModelsIdle: () => fixtureWindow().defaultProviderModelsRead ?? Promise.resolve(),
-  closeLoginTerminal: name => fixtureVscode.window.closedTerminals.fire(name === "omp login" && fixtureWindow().providerLoginTerminal !== null ? fixtureWindow().providerLoginTerminal : { name }),
-  closeOtherTerminal: name => fixtureVscode.window.closedTerminals.fire({ name }),
-  profilePicker(handler) {
-    const previous = fixtureVscode.window.showQuickPick;
-    fixtureVscode.window.showQuickPick = handler;
-    return () => { fixtureVscode.window.showQuickPick = previous; };
-  },
-  inputBox(handler) {
-    const previous = fixtureVscode.window.showInputBox;
-    fixtureVscode.window.showInputBox = handler;
-    return () => { fixtureVscode.window.showInputBox = previous; };
-  },
-  sessionModelAvailability: tabId => fixtureWindow().footerBindings.get(tabId)?.message.hasAvailableModels,
-  handlePassiveSlotMessage, passiveReasonForSlot,
-  footerIdle: () => Promise.all([...fixtureWindow().footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
-  restoredDraft: slot => fixtureWindow().draftRestores.get(slot)?.reply ?? null,
-  readChatDisplayPreferences, refreshChatDisplayPreferences,
-  configurationWrites: () => fixtureVscode.workspace.configurationWrites,
-  openedDocuments: () => fixtureVscode.window.openedDocuments,
-  quickPicks: () => fixtureVscode.window.quickPicks,
-  shellContext(cwd, panel) {
-    const slot = createShellSlotId(), state = newTabState(slot);
-    state.shellSlot = slot; state.panel = panel; fixtureWindow().tabs.set(slot, state);
-    fixtureWindow().shellSlots = { get: key => key === slot ? { cwd } : null };
-    return { slot, state };
-  },
-  async shellFixture(cwd, panel, liveness) {
-    const slot = createShellSlotId(), state = newTabState(slot), values = new Map(), w = fixtureWindow();
-    state.shellSlot = slot; state.panel = panel; w.tabs.set(slot, state);
-    w.shellSlots = createShellSlotStore({ get: key => values.get(key), update: async (key, value) => { values.set(key, value); } });
-    await w.shellSlots.add({ slot, cwd, folderKey: cwd, label: 'Project terminal' });
-    w.ptyGate.client = async () => ({ attach: async () => ({ handle: liveness === 'unreachable' ? null : { refreshStatus: async () => ({ state: liveness }) } }) });
-    return { slot, state, record: () => w.shellSlots.get(slot), remove: () => w.shellSlots.remove(slot) };
-  },
-  hostGeneration: () => fixtureWindow().bridgeHost.hostGeneration,
-  clipboardWrites: () => fixtureVscode.env.clipboard.writes,
-  quotePreviewSelection: index => quoteEditorSelectionToSession(fixtureContext, index),
-  setActiveTab: tab => { fixtureVscode.window.tabGroups.activeTabGroup.activeTab = tab; },
-  customTabInput: (viewType, fsPath) => { const input = new fixtureVscode.TabInputCustom(); input.viewType = viewType; input.uri = { scheme: 'file', fsPath }; return input; },
-  webviewTabInput: viewType => { const input = new fixtureVscode.TabInputWebview(); input.viewType = viewType; return input; },
-  clipboardText: value => { if (value !== undefined) fixtureVscode.env.clipboard.text = value; return fixtureVscode.env.clipboard.text; },
-  lastQuickPick: () => fixtureVscode.window.quickPicks.at(-1),
-  quickPickCount: () => fixtureVscode.window.quickPicks.length,
-  infos: () => fixtureVscode.window.infos,
-  desktopPayload: capturedDesktopXml,
-  desktopPayloads: capturedDesktopXmls,
-  focusSession(active, editorId = '${EDITOR}', tabId = '${TAB}') {
-    const input = active ? new fixtureVscode.TabInputWebview() : new fixtureVscode.TabInputText();
-    if (active) input.viewType = bridgeViewType(tabId, editorId);
-    fixtureVscode.window.tabGroups.activeTabGroup.activeTab = { input };
-  },
-  desktopEnvironment(context) {
-    const previousContext = fixtureWindow().context;
-    fixtureWindow().context = context;
-    fixtureVscode.env.uriScheme = 'vscode';
-    fixtureVscode.env.asExternalUri = async uri => uri.with({ query: uri.query + '&windowId=9471' });
-    return () => {
-      fixtureWindow().context = previousContext;
-      delete fixtureVscode.env.uriScheme;
-      delete fixtureVscode.env.asExternalUri;
-    };
-  },
-  configuration(values) { fixtureVscode.workspace.configurationValues = values; },
-  editorLifecycle() {
-    const w = fixtureWindow(), previous = w.editorPanels;
-    w.editorPanels = registerEditorPanels(editorPanelsDeps());
-    // Bridge bootstrap is covered by real sockets separately; these cases drive editor identity, disposal and runtime
-    // delivery through the ordinary panel route. The window's own bridge host (and so its host generation) stays
-    // installed and runs its real endpoint creation; only the listener is faked, and it never binds. The factory is not
-    // put back on restore: a provisioning still in flight when a case ends resolves it late, and a real listener bound
-    // then would outlive the window and keep the process alive. A reset gives the next case a window with the real one.
-    w.createBridgeEndpoint = () => ({ bind: async () => null, failure: 'fixture listener', close() {} });
-    return () => { w.editorPanels = previous; };
-  },
-  createPanel: () => fixtureVscode.window.createWebviewPanel(),
-  warning(handler) { fixtureVscode.window.showWarningMessage = handler; },
-  information(handler) { fixtureVscode.window.showInformationMessage = handler; },
-  picker(mode) { fixtureVscode.window.showQuickPick = async rows => rows.find(row => row.mode === mode); },
-  folders(folders, openingWindows = [], pickerOrder = folders) {
-    fixtureWindow().launcherFolders = {
-      list: () => folders, listForPicker: () => pickerOrder, get: id => folders.find(folder => folder.id === id) ?? null, folderForCwd: cwd => folders.find(folder => folder.path === cwd) ?? null,
-      windowsWithFolder: (folderPath, options) => typeof openingWindows === 'function' ? openingWindows(folderPath, options) : openingWindows,
-      identityKeyOf: value => value,
-    };
-  },
-  errors() { return fixtureVscode.window.errors; },
-  errorActions() { return fixtureVscode.window.errorActions; },
-  chooseOnError(choice) { fixtureVscode.window.errorChoice = choice; },
-  rowState: fixtureRowState,
-  policy(context, ports, hostLauncher, stopPort) {
-    const w = fixtureWindow();
-    w.context = context;
-    w.reconciler = createOwnerReconciler(ports);
-    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, fixtureChat, () => hostLauncher, w.sessionRuntime.records);
-    // The broker facts of the fixture's rows come in through the runtime's deps, not by reassigning a function of the module.
-    w.sessionRuntime = new LocalSessionRuntime({
-      ...runtimeDeps,
-      launcher: () => hostLauncher,
-      brokerProvenance: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }),
-      recorded: new LocalRecordedStop({
-        index: w.indexForBridge, writer: runtimeDeps.writer, control: runtimeDeps.control, brokerSlots: () => fixtureWindow().brokerSlots,
-        window: { forgetOutcome: conversation => { fixtureWindow().outcomes.delete(conversation); } },
-        stopPort: () => stopPort,
-      }),
-    });
-    w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
-    w.sessionActions = registerSessionActions(sessionActionsDeps());
-    const dialogs = [];
-    fixtureVscode.window.showWarningMessage = async (message, options, action) => { dialogs.push({ message, detail: options?.detail, action }); return action; };
-    fixtureVscode.window.showInputBox = async () => "Recovered draft title";
-    return dialogs;
-  },
-  attachChatRoute, state: tabState,
-  reviveEditorPanel, openSession, requestSessionRowExpand, viewTypeOf: bridgeViewType,
-  tabStrip(columns, activeColumn = 0) {
-    // One group per column; each entry is the view type of one webview editor tab.
-    const groups = columns.map((viewTypes, at) => {
-      const group = { viewColumn: at + 1, tabs: [], activeTab: null };
-      group.tabs = viewTypes.map(viewType => { const input = new fixtureVscode.TabInputWebview(); input.viewType = viewType; return { input, group, isActive: false }; });
-      return group;
-    });
-    fixtureVscode.window.tabGroups.all = groups;
-    fixtureVscode.window.tabGroups.activeTabGroup = groups[activeColumn] ?? { activeTab: null, viewColumn: 1, tabs: [] };
-    return groups;
-  },
-  commandHandler(handler) { fixtureVscode.commands.calls.length = 0; fixtureVscode.commands.handler = handler; return fixtureVscode.commands.calls; },
-  tabsChanged() { fixtureVscode.window.tabGroups.changes.fire(); },
-  bindRevived(slot, panel) { const w = fixtureWindow(); w.tabs.get(slot).panel = panel; for (const resolve of w.panelBindWaiters.get(slot) ?? []) resolve(); },
-  markPageRunning(slot) { fixtureWindow().bridgeLiveEditors.add(slot); },
-  controlClient: HostControlClient,
-  SessionIndex, acquireClaim: fixtureClaim, createClaimHolder: fixtureHolder, launcherOwnershipFacts, refreshRowsForClaims, startClaimWatch,
-  setClaimFailures,
-  reset(index, conversation) {
-    harness.installWindow(createWindowState(fixtureContext));
-    const w = fixtureWindow();
-    fixtureChat = conversation;
-    w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation);
-    // The fixture's window has no startup restore to wait for: the pass is over and covers no row.
-    w.catalogAdoption = { ...w.catalogAdoption, startupRestoreSettled: () => true, startupRestoreOver: () => null, startupRestore: () => null, restoreCovers: () => false, startupCovers: () => false };
-    w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, openMermaid() {}, log() {} });
-    fixtureVscode.window.errors.length = 0;
-    fixtureVscode.env.clipboard.writes.length = 0;
-    fixtureVscode.workspace.configurationValues = {};
-    delete fixtureVscode.env.uriScheme;
-    delete fixtureVscode.env.asExternalUri;
-    resetDesktopXmls();
-    fixtureVscode.window.tabGroups.activeTabGroup.activeTab = null;
-    w.reconciler = { reconcile: async () => ({ kind: 'free', evidence: [] }) };
-    w.staging = { entries: async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' }, runtimeProbe: { path: 'fixture-runtime-probe.mjs' } }), native: async () => null };
-    w.ptyGate = { client: async () => ({}) };
-    w.ptyGate.attachClient = async () => ({ fixture: true });
-    w.ptyGate.chatLaunchClient = async () => await w.ptyGate.client();
-    w.ptyGate.invalidate = () => {};
-    // The fixture's runtimes carry process ids no real process has: a root is running unless a case says it ended.
-    w.rootGone = async () => false;
-  },
-  editor(index, endpoint, panel, editorId = '${EDITOR}', tabId = '${TAB}') {
-    const state = newTabState(editorId); state.tabId = tabId; state.panel = panel;
-    state.bridge = { editorId, endpoint, documentId: '${DOCUMENT}', bound: true };
-    state.document = { kind: 'guest', bridgeDocumentId: '${DOCUMENT}' };
-    const w = fixtureWindow();
-    w.tabs.set(editorId, state);
-    w.bridgeEditors.reserve({ tabId, editorId, provenance: 'saved', sequence: 1 });
-    w.bridgeEndpoints.set(editorId, endpoint);
-    return state;
-  }
-};
-// A window is installed from the start, so a case that reaches an internal before its first reset still has one.
-harness.installWindow(createWindowState(fixtureContext));`;
-
 interface State {
   mode: "chat" | "terminal";
   tabId: string | null;
@@ -634,14 +403,14 @@ const pages: BridgeClient[] = [];
 
 before(async () => {
   root = await mkdtemp(path.join(tmpdir(), "omp-extension-lifecycle-"));
-  const entry = fileURLToPath(new URL("./extension.ts", import.meta.url));
+  // The entry is the test-only harness module over the entry module's exports (`src/extension-harness.ts`), not `extension.ts` itself.
+  const entry = fileURLToPath(new URL("./extension-harness.ts", import.meta.url));
   const outfile = path.join(root, "extension.mjs");
   await build({ entryPoints: [entry], outfile, bundle: true, platform: "node", format: "esm", target: "node22", plugins: [{
     name: "lifecycle-fixtures",
     setup(builder) {
       builder.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "fixture" }));
       builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: VSCODE, loader: "js", resolveDir: path.dirname(entry) }));
-      builder.onLoad({ filter: /[/\\]extension\.ts$/ }, async () => ({ contents: (await readFile(entry, "utf8")) + ACCESS, loader: "ts" }));
       builder.onResolve({ filter: /^\.\/(?:host\/)?session-claim(?:\.ts)?$/ }, () => ({ path: "claims", namespace: "claim-fixture" }));
       builder.onLoad({ filter: /^claims$/, namespace: "claim-fixture" }, () => ({
         contents: `import { acquireClaim as actual } from ${JSON.stringify(path.join(path.dirname(entry), "host", "session-claim.ts"))};
@@ -713,7 +482,7 @@ before(async () => {
         ["rpc-reconcile", "export async function brokerNativeGenerationReader() { return async () => ({ kind: 'gone' }); }"],
         // The root-absence reader is shared by the native and RPC runtime modules.
       ]) {
-        // `extension.ts` imports `./host/<name>`; the runtime layer imports `../host/<name>.ts`: both are the same module.
+        // `extension.ts` and the harness import `./host/<name>`; the runtime layer imports `../host/<name>.ts`: both are the same module.
         builder.onResolve({ filter: new RegExp(`^(?:\\./|\\.\\./)host/${name}(?:\\.ts)?$`) }, () => ({ path: name!, namespace: "native-fixture" }));
         if (name === "rpc-reconcile") builder.onResolve({ filter: /^\.\/rpc-reconcile$/ }, () => ({ path: name, namespace: "native-fixture" }));
         builder.onLoad({ filter: new RegExp(`^${name}$`), namespace: "native-fixture" }, () => ({

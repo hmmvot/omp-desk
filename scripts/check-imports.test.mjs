@@ -126,6 +126,26 @@ test("reports a layer file importing extension.ts", () => {
   );
 });
 
+test("the test entry src/extension-harness.ts may import extension.ts and every layer, no non-test file may import it", () => {
+  checkClean({
+    "src/extension.ts": "export const e = 1;\n",
+    "src/extension-harness.ts": 'import { e } from "./extension";\nimport { v } from "./webview/y.ts";\nexport const harness = [e, v];\n',
+    "src/webview/y.ts": "export const v = 1;\n",
+  });
+  check(
+    {
+      "src/extension.ts": "export const e = 1;\n",
+      "src/extension-harness.ts": 'import { e } from "./extension";\nexport const harness = e;\n',
+      "src/wiring/w.ts": '\nimport { harness } from "../extension-harness";\nexport const w = harness;\n',
+      "src/stray-harness.ts": "export const stray = 1;\n",
+    },
+    [
+      "src/stray-harness.ts:1 is directly under src/: only extension.ts may be; move it to a layer",
+      "src/wiring/w.ts:2 imports src/extension-harness.ts: the test entry is bundled by its test only",
+    ],
+  );
+});
+
 test("resolves .tsx files and index.tsx directories", () => {
   check(
     {

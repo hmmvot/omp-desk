@@ -420,6 +420,10 @@ import type {
   NativeFileObservationRecord,
 } from "./host/native-file-observation";
 
+// The declarations exported below, other than `activate`, `deactivate` and `fileEvidenceDeletionRefusal`, exist for
+// `src/extension-harness.ts`, the entry the lifecycle test bundles: they are private functions of this module that the
+// test drives directly. They are not an API; nothing else imports them, and each is used as before inside this module.
+
 const PANEL_VIEW_TYPE = "omp.session";
 // The three packaged entries a child process runs. Each is staged into extension
 // global storage before use (`runtimeEntries`), so no long-lived process holds
@@ -508,7 +512,7 @@ const CONFLICT_LABEL: Record<SessionConflictKind, string> = {
  * role, generation and the reason a slot is passive, and {@link passiveReasonOf} is
  * the one way to read it.
  */
-interface TabState {
+export interface TabState {
   /** The immutable key this record is filed under in {@link WindowState.tabs}. */
   slotId: string;
   /** The conversation this editor shows, or `null` for a folder shell. */
@@ -600,7 +604,7 @@ interface TabState {
  * `activate` builds it with {@link createWindowState} and installs it in the one module
  * binding, {@link window}; every function reads it through {@link windowState}. Grouped by concern.
  */
-interface WindowState {
+export interface WindowState {
   // Session index and claims
   /**
    * Ownership reconciliation for this window, built by activation.
@@ -1081,7 +1085,7 @@ function windowRoutingDeps(): WindowRoutingDeps {
  * What the session actions read of this window and call into. The getters read the installed window when they run,
  * so the actions can be created with the window, before it is installed.
  */
-function sessionActionsDeps(): SessionActionsDeps<TabState> {
+export function sessionActionsDeps(): SessionActionsDeps<TabState> {
   return {
     context: () => windowState().context,
     reconciler: () => windowState().reconciler,
@@ -1222,7 +1226,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
  * panels can be created with the window, before it is installed. The lifecycle harness builds its handle from these with a
  * panel factory of its own.
  */
-function editorPanelsDeps(): EditorPanelsDeps<TabState> {
+export function editorPanelsDeps(): EditorPanelsDeps<TabState> {
   return {
     records: () => windowState().sessionRuntime.records,
     tabs: () => windowState().tabs,
@@ -1387,7 +1391,7 @@ function sessionFlowsDeps(): SessionFlowsDeps<TabState> {
 }
 
 /** The initial state of one window: every collection empty, every handle not yet created. */
-function createWindowState(context: vscode.ExtensionContext): WindowState {
+export function createWindowState(context: vscode.ExtensionContext): WindowState {
   const pending = new PendingOperations({ log: line => log.debug(line), launchReady: launchReadinessOf });
   const launchTimeline = new LaunchTimeline(Date.now, line => log.info(line));
   launchTimeline.observe(observeLaunchSteps(pending));
@@ -1555,9 +1559,22 @@ const RENAME_NOTICE_KEY = "ompDesk.renameNotice.v1";
 const UPDATER_NOTICE_KEY = "ompDesk.updaterNotice.v1";
 
 /** The installed window state. Throws when no window is installed, which is the invariant every caller relies on. */
-function windowState(): WindowState {
+export function windowState(): WindowState {
   if (window === undefined) throw new Error("The OMP Desk window state is not installed: `activate` has not run.");
   return window;
+}
+
+/**
+ * Installs `next` as this window's state, as `activate` does, for the lifecycle test's entry (`src/extension-harness.ts`):
+ * `window` is the module's own binding, so it cannot be assigned from another module. The window it replaces is disposed
+ * as deactivation disposes it: an operation that case left pending (a Resume still waiting for its writer) must not keep the
+ * process alive through its clocks. The helper scheduler has no restore to wait for and no cross-window slots: a helper
+ * run starts as soon as it is asked for.
+ */
+export function installWindowForTest(next: WindowState): void {
+  window?.pendingDisplay.dispose(); window?.pending.dispose(); window?.helpers?.dispose();
+  next.helpers ??= new HelperScheduler({ log, backgroundGate: Promise.resolve(), backgroundSettleMs: 0 });
+  window = next;
 }
 
 /** Records that the page of the editor's current document announced itself, so text can be sent to its composer. */
@@ -1568,7 +1585,7 @@ function noteReadyDocument(state: TabState, announcedDocumentId: string | undefi
   s.readyDocuments.set(state, document);
 }
 
-async function revealDesktopNotification(index: SessionIndex, extensionId: string, uri: vscode.Uri): Promise<void> {
+export async function revealDesktopNotification(index: SessionIndex, extensionId: string, uri: vscode.Uri): Promise<void> {
   const s = windowState();
   if (uri.authority.toLowerCase() !== extensionId.toLowerCase() || uri.path !== "/reveal") return;
   const tabId = new URLSearchParams(uri.query).get("session");
@@ -2539,7 +2556,7 @@ export function deactivate(): void {
  * makes the native launch pass OMP's explicit default-profile sentinel instead of
  * inheriting a profile from this extension host's environment.
  */
-async function newSession(
+export async function newSession(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   argument: unknown,
@@ -2591,7 +2608,7 @@ async function newSession(
 }
 
 /** Reserve a draft in the folder and open its editor: the launch itself, in this window. `onDraft` is told the draft's tab once it exists. */
-async function startNewSession(
+export async function startNewSession(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   current: LauncherFolder,
@@ -2651,7 +2668,7 @@ async function createSessionInColumn(
   }
 }
 
-async function newSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
+export async function newSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
   const s = windowState();
   const entry = index.get(tabId);
   const state = stateOf(tabId);
@@ -2687,7 +2704,7 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
   }
 }
 
-async function deleteSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
+export async function deleteSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
   const entry = index.get(tabId);
   const panel = stateOf(tabId)?.panel;
   if (entry === null || panel == null) {
@@ -2815,7 +2832,7 @@ async function clearSession(context: vscode.ExtensionContext, index: SessionInde
  * Menu/palette Open uses "resumed", the claim-and-exact-file launch path. Fileless
  * drafts retain immediate launch because they have no saved history to view.
  */
-async function openSession(
+export async function openSession(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   argument: unknown,
@@ -3315,7 +3332,7 @@ async function pickFolderHistoryCandidate(
  * never scans. The folder is resolved again after the scan and again after the
  * picker, so a folder removed while a dialog was open is never resumed from.
  */
-async function resumeWorkspaceFolder(
+export async function resumeWorkspaceFolder(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   argument: unknown,
@@ -3593,7 +3610,7 @@ function selectEditorTab(slot: string): Promise<boolean> {
  * `selected` says whether the user's editor now shows this tab; `panel` is the handle, when the
  * window holds one.
  */
-async function reviveEditorPanel(
+export async function reviveEditorPanel(
   index: SessionIndex,
   tabId: string,
 ): Promise<{ readonly selected: boolean; readonly panel: vscode.WebviewPanel | null }> {
@@ -3695,12 +3712,12 @@ async function pendingEntry<T>(
 // Launch and reconciliation ports
 
 /** This window's session runtime: its index, chat runtime, reconciler, launcher, stop operations and process services behind the `SessionRuntime` port. */
-function createSessionRuntime(index: SessionIndex, chat: ChatRuntime): LocalSessionRuntime {
+export function createSessionRuntime(index: SessionIndex, chat: ChatRuntime): LocalSessionRuntime {
   return new LocalSessionRuntime(sessionRuntimeDeps(index, chat));
 }
 
 /** The ports of this window's session runtime; read at call time, so a replaced reconciler, launcher or root probe is used by the next call. */
-function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: () => OmpHostLauncher, held?: RuntimeRecords): LocalSessionRuntimeDeps {
+export function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: () => OmpHostLauncher, held?: RuntimeRecords): LocalSessionRuntimeDeps {
   const records = held ?? new RuntimeRecords(record => slotState(record.slotId)?.pipeline ?? null);
   const stop = new LocalStopOperations({
     chat: () => chat,
@@ -3821,7 +3838,7 @@ function recordOf(state: { readonly tabId: string | null } | null | undefined): 
 }
 
 /** The runtime's record of the conversation an editor shows, created for the editor on first use. */
-function recordFor(state: TabState): ConversationRecord {
+export function recordFor(state: TabState): ConversationRecord {
   if (state.tabId === null) throw new Error("A folder shell hosts no conversation.");
   return windowState().sessionRuntime.records.acquire(state.tabId, state.slotId);
 }
@@ -4068,7 +4085,7 @@ function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): 
 }
 
 /** The host launcher the runtime hands to the index: this window's launch and attach, over `launcherWindow`'s hooks. */
-function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, chat: ChatRuntime): LocalLauncher {
+export function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, chat: ChatRuntime): LocalLauncher {
   const s = windowState();
   return new LocalLauncher({
     index,
@@ -4098,11 +4115,11 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
 }
 
 const SESSION_DEFAULT_MODE_KEY = "omp.session.defaultMode";
-function defaultSessionMode(context: vscode.ExtensionContext): SessionViewMode {
+export function defaultSessionMode(context: vscode.ExtensionContext): SessionViewMode {
   return context.globalState.get<string>(SESSION_DEFAULT_MODE_KEY) === "terminal" ? "terminal" : "chat";
 }
 
-async function chooseDefaultSessionView(context: vscode.ExtensionContext): Promise<void> {
+export async function chooseDefaultSessionView(context: vscode.ExtensionContext): Promise<void> {
   const current = defaultSessionMode(context);
   const picked = await vscode.window.showQuickPick([
     { label: "$(comment-discussion) Chat", description: current === "chat" ? "Current profile default" : "", mode: "chat" as const },
@@ -4119,7 +4136,7 @@ function sessionAdmissionReason(state: TabState): string | null {
   return passiveReasonForSlot(state.slotId);
 }
 
-function pushSessionView(index: SessionIndex | null, state: TabState, force = false): void {
+export function pushSessionView(index: SessionIndex | null, state: TabState, force = false): void {
   const s = windowState();
   if (state.tabId === null) return;
   const entry = index?.get(state.tabId) ?? null;
@@ -4139,7 +4156,7 @@ function pushSessionView(index: SessionIndex | null, state: TabState, force = fa
 }
 
 /** Only explicit activation and fresh-document readiness issue keyboard intent. */
-function activateNativeEditor(state: TabState): void {
+export function activateNativeEditor(state: TabState): void {
   if (state.mode !== "terminal" || state.document?.kind !== "guest" || activePanelTab() !== state || !vscode.window.state.focused) return;
   void state.panel?.webview.postMessage({ type: "omp:terminal-activate", token: encodeHex(randomBytes(16)) } satisfies GuestTerminalActivateMessage);
 }
@@ -4256,7 +4273,7 @@ function createProfileCatalog(context: vscode.ExtensionContext): Promise<OpenedC
  * import) belongs to the click that created it, which opens it explicitly, and
  * sweeping it into the batch as well would put two restores on one row.
  */
-async function restoreTabs(
+export async function restoreTabs(
   index: SessionIndex,
   cohort: ReadonlySet<string>,
   /** Filled as the pass goes, for the timeline line that closes it; a caller that does not report it passes none. */
@@ -4346,7 +4363,7 @@ async function restoreTabs(
   });
 }
 
-async function handleRestoreOutcome(
+export async function handleRestoreOutcome(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   tabId: string,
@@ -4387,7 +4404,7 @@ async function handleRestoreOutcome(
  * is a legacy tab only while the writer is positively verified. Unowned drafts
  * and stopped editors remain controlling and usable without a release ceremony.
  */
-function presentRestoreOutcome(
+export function presentRestoreOutcome(
   index: SessionIndex,
   tabId: string,
   outcome: Exclude<RestoreOutcome, { readonly status: "restored" | "attached" | "skipped" }>,
@@ -4436,7 +4453,7 @@ function presentConflict(index: SessionIndex, tabId: string, detail: string): vo
  * touching the process, and renders the read-only view with its note. What stays here: forget what this window
  * remembered of the run, repaint, and tell the user which window asked.
  */
-async function handOverSession(
+export async function handOverSession(
   index: SessionIndex,
   request: { readonly tabId: string; readonly incarnation: string; readonly binding: string | null },
   asker: string,
@@ -4673,7 +4690,7 @@ function bridgeChatPage(bridge: NonNullable<TabState["bridge"]>, documentId: str
  * a route that is already the current one is left alone unless `force` says the page asked
  * (`omp:ready`) — a reloaded document has an empty model and needs the snapshot again.
  */
-function attachChatRoute(slot: string, force = false): void {
+export function attachChatRoute(slot: string, force = false): void {
   const s = windowState();
   const state = s.tabs.get(slot);
   if (state === undefined || state.tabId === null) return;
@@ -4719,7 +4736,7 @@ function attachChatRoutes(tabId: string, force = false): void {
  * same DTO the panel route would have received, so the page applies one contract
  * whichever route carried it.
  */
-function handleBridgeRequest(
+export function handleBridgeRequest(
   editorId: string,
   documentId: string,
   session: BridgeSession,
@@ -5050,7 +5067,7 @@ function forgetTerminalCopy(state: TabState): void {
   s.terminalCopyRequests.delete(state);
 }
 
-function copyActiveTerminalScreen(): void {
+export function copyActiveTerminalScreen(): void {
   const s = windowState();
   const state = activePanelTab();
   if (state === null || state.mode !== "terminal" || state.document?.kind !== "guest" || state.pipeline === null) {
@@ -5130,7 +5147,7 @@ function actionTargetTab(index: SessionIndex): { tabId: string; panel: vscode.We
  * Send button would refuse, or stop a turn that has already ended. Nothing here
  * starts a host, opens a claim or writes to a session.
  */
-function postPanelAction(action: GuestPanelAction): void {
+export function postPanelAction(action: GuestPanelAction): void {
   const target = activePanelTab();
   // A non-controlling editor must not be able to send a prompt or stop a turn
   // through this extension either — including through its own keybinding.
@@ -5210,7 +5227,7 @@ function reportMaintenance(result: CommandResult<string>, notDone: string): void
  * VS Code's own UI (an InputBox, a save dialog, a modal confirmation); cycling is one explicit keypress, as in
  * the TUI. Outcomes are reported here; progress shows in the conversation itself.
  */
-async function runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void> {
+export async function runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void> {
   const s = windowState();
   if (command === "provider-login") {
     const entry = index.get(tabId);
@@ -5725,7 +5742,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
  * revision names the version it is (decision 10 of the quote design, `src/wiring/quote-source.ts`).
  * In a diff editor, with nothing selected and the caret on a changed line, the whole hunk is quoted instead (decision 11, `wiring/quote-hunk.ts`).
  */
-async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
+export async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
   const preview = activePreview();
   if (preview !== null) {
     await quotePreviewSelectionToSession(context, index, preview);
@@ -5926,7 +5943,7 @@ async function deliverInsertion(
  * across a Webview reload, another panel reporting at the same time, or the same
  * state being reported twice.
  */
-function notifierFor(index: SessionIndex): TurnNotifier {
+export function notifierFor(index: SessionIndex): TurnNotifier {
   const s = windowState();
   if (s.turnNotifier === undefined || s.turnNotifier.index !== index) {
     s.turnNotifier = {
@@ -6115,7 +6132,7 @@ function applyTurnActivity(index: SessionIndex, tabId: string, observed: TurnAct
 }
 
 /** Drop everything this window remembered about a conversation that is gone. */
-function forgetTurnActivity(index: SessionIndex, tabId: string): void {
+export function forgetTurnActivity(index: SessionIndex, tabId: string): void {
   const s = windowState();
   stopSubagentWatch(null, tabId);
   s.turnActivities.delete(tabId);
@@ -6148,7 +6165,7 @@ function linkRules(): LinkRuleSource {
 }
 
 /** These are editor presentation preferences, never OMP commands. */
-function readChatDisplayPreferences(): ChatDisplayPreferences {
+export function readChatDisplayPreferences(): ChatDisplayPreferences {
   const s = windowState();
   return {
     toolCallDetail: vscode.workspace.getConfiguration("ompDesk").get<string>("toolCallDetail", "overview") === "detailed" ? "detailed" : "overview",
@@ -6186,7 +6203,7 @@ async function toggleToolsMode(key: ToolsModeKey): Promise<void> {
   s.sessionRuntime.conversations.refreshDisplayPreferences();
 }
 
-function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
+export function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
   const s = windowState();
   if (event.affectsConfiguration("ompDesk.chatHtmlPages")) {
     // On binds the frame server (a document built earlier names no port, so its pages say so until the window is reloaded); off closes it.
@@ -6237,7 +6254,7 @@ function sessionTitleDeps(context: vscode.ExtensionContext, index: SessionIndex)
  * activity and diagnostics for a model change, the redraw and readiness for a phase, the
  * lifecycle for an exit, and the identity binding for a learned session file.
  */
-function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
+export function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
   const s = windowState();
   switch (event.type) {
     case "catalogue": {
@@ -6396,7 +6413,7 @@ interface GuestResponder {
 }
 
 /** The responder of one bound panel. */
-function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: unknown): GuestResponder {
+export function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: unknown): GuestResponder {
   const state = stateOf(tabId);
   const runtime = hostOf(state) ?? null;
   const live = (): boolean => {
@@ -6448,7 +6465,7 @@ function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: un
  * `set_thinking_level`), answered by the process that serves it; what the page is shown
  * afterwards is read back from the host-owned chat model.
  */
-async function handleGuestControlRequest(
+export async function handleGuestControlRequest(
   index: SessionIndex,
   tabId: string,
   request: GuestControlRequestMessage,
@@ -6689,7 +6706,7 @@ function noteUsageFailure(binding: object, stage: string, error: unknown): void 
 }
 
 /** Cache only a successful default-profile catalogue; unresolved OMP adds no onboarding UI. */
-function refreshDefaultProviderModels(reason: "credentials" | "discovery" = "credentials"): Promise<void> {
+export function refreshDefaultProviderModels(reason: "credentials" | "discovery" = "credentials"): Promise<void> {
   const s = windowState();
   // A credential change repeats a read that is already running (it may have started before the change); a discovery asked for
   // by a session's first look or by activation joins whatever read is queued or running and starts one only when there is none.
@@ -6756,7 +6773,7 @@ function refreshProviderModelsEverywhere(index: SessionIndex): void {
  * Activation, a finished provider login or logout, and the close of the explicit `omp login` terminal are the
  * window-wide discovery triggers. Closing the window ends a login still running.
  */
-function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: SessionIndex): void {
+export function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: SessionIndex): void {
   const s = windowState();
   context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
     const ownedLoginClosed = terminal === s.providerLoginTerminal;
@@ -6767,7 +6784,7 @@ function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: 
   void refreshDefaultProviderModels("discovery");
 }
 
-function recordSessionModels(index: SessionIndex, tabId: string, available: boolean): void {
+export function recordSessionModels(index: SessionIndex, tabId: string, available: boolean): void {
   const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
@@ -6782,7 +6799,7 @@ function recordSessionModels(index: SessionIndex, tabId: string, available: bool
 }
 
 /** Read this conversation's own profile through RPC, never a per-session CLI. */
-function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void> {
+export function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void> {
   const s = windowState();
   const pending = s.sessionModelReads.get(tabId);
   if (pending) return pending;
@@ -7014,7 +7031,7 @@ function openProviderLoginTerminalFor(executable: OmpCommand, env: Record<string
 }
 
 /** A session-scoped entry (Chat's model picker, its footer): log in within that session's own profile and directory. */
-async function openProviderLogin(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
+export async function openProviderLogin(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
   await runProviderAuth(index, async () => ({ runtime, profile, cwd }), (deps, { flow }) => flow.runProviderLogin(deps));
 }
 
@@ -7051,7 +7068,7 @@ async function paletteProviderAuthScope(index: SessionIndex, title: string, plac
  * `providerId` OMP lists as available skips the provider pick. The directory is never taken from the caller (the first
  * workspace folder, else the home directory); anything else in the argument is ignored.
  */
-async function loginProviderFromPalette(index: SessionIndex, argument?: unknown): Promise<string> {
+export async function loginProviderFromPalette(index: SessionIndex, argument?: unknown): Promise<string> {
   const given = typeof argument === "object" && argument !== null ? argument as Record<string, unknown> : {};
   const text = (key: string): string | undefined => typeof given[key] === "string" && (given[key] as string).length > 0 ? given[key] as string : undefined;
   const known = new Set<string>([DEFAULT_OMP_PROFILE, ...index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE)]);
@@ -7069,12 +7086,12 @@ async function loginProviderFromPalette(index: SessionIndex, argument?: unknown)
  * The in-process sign-in the Models and Agents pages use (ADR-0070 amendment): the same flow, window guard and credential refresh as
  * `ompDesk.loginProvider`, but in the exact profile and directory of the editor that asks, which the public command's restricted argument cannot name.
  */
-async function signInProvider(index: SessionIndex, request: { readonly providerId: string; readonly profile: string; readonly cwd: string }): Promise<string> {
+export async function signInProvider(index: SessionIndex, request: { readonly providerId: string; readonly profile: string; readonly cwd: string }): Promise<string> {
   return await runProviderAuth(index, async () => ({ runtime: null, profile: request.profile, cwd: request.cwd }), (deps, { flow }) => flow.runProviderLogin(deps, { providerId: request.providerId }));
 }
 
 /** `ompDesk.logoutProvider`. */
-async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
+export async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
   await runProviderAuth(index, () => paletteProviderAuthScope(index, "Log Out of Provider", "OMP profile to log out of"), (deps, { flow }) => flow.runProviderLogout(deps));
 }
 
@@ -7428,7 +7445,7 @@ async function applyChatTabAppearance(context: vscode.ExtensionContext, index: S
 }
 
 /** Build the empty record of one slot. */
-function newTabState(slotId: string): TabState {
+export function newTabState(slotId: string): TabState {
   return {
     slotId,
     tabId: isPanelTabId(slotId) ? slotId : null,
@@ -7460,7 +7477,7 @@ function newTabState(slotId: string): TabState {
  * authorities. Only a key no editor owns yet creates a record — and for a
  * conversation that record is moved under its editor's key as soon as one binds.
  */
-function tabState(key: string): TabState {
+export function tabState(key: string): TabState {
   const s = windowState();
   const existing = stateOf(key);
   if (existing !== undefined) return existing;
@@ -7557,7 +7574,7 @@ function passiveReasonOf(key: string): string | null {
  * This is the check every credential path takes: the bridge route's eligibility, the
  * terminal pane's input authority and the chat delivery all resolve through here.
  */
-function passiveReasonForSlot(slot: string): string | null {
+export function passiveReasonForSlot(slot: string): string | null {
   const s = windowState();
   const entry = s.editorSlots.get(slot);
   const local = entry === null || entry.role === "controlling" ? null : (entry.passiveReason ?? PASSIVE_REASON_DEFAULT);
@@ -7668,7 +7685,7 @@ function applySlotAuthority(slot: string): void {
  * session files. The welcome content follows the folder list, because a launcher
  * with no folder has nothing to group and must say how to add one.
  */
-function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
+export function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   const s = windowState();
   if (s.indexForBridge !== null) settleViewedSession(s.indexForBridge);
   void vscode.commands.executeCommand("setContext", SESSIONS_LAYOUT_CONTEXT, sessionsGrouping());
@@ -7697,7 +7714,7 @@ function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
  * Open) and consumed by the reveal that answers it, so a collapse the user makes while
  * staying on the same tab is left alone.
  */
-function requestSessionRowExpand(tabId: string): void {
+export function requestSessionRowExpand(tabId: string): void {
   const s = windowState();
   s.launcherExpandFor = tabId;
 }
@@ -7711,7 +7728,7 @@ function requestSessionRowExpand(tabId: string): void {
  * reveal that answers the user activating that session ({@link requestSessionRowExpand});
  * any other refresh leaves the collapse the registry recorded as it is.
  */
-function revealActiveSession(index: SessionIndex): Promise<void> {
+export function revealActiveSession(index: SessionIndex): Promise<void> {
   const s = windowState();
   s.launcherRevealRequested = true;
   if (s.launcherRevealInFlight !== null) return s.launcherRevealInFlight;
@@ -7760,7 +7777,7 @@ function selectionRestsOnOtherWindow(target: string): boolean {
 }
 
 /** Put the selection back on this window's own session when it rests on a row another window runs. */
-function releaseSelectionFromOtherWindow(index: SessionIndex): void {
+export function releaseSelectionFromOtherWindow(index: SessionIndex): void {
   const s = windowState();
   const target = pinnedSessionTab(index) ?? sessionsViewActiveTab(index);
   if (target === null || s.launcherProvider?.sessionRowsShown() !== true || !selectionRestsOnOtherWindow(target)) return;
@@ -7885,7 +7902,7 @@ function launcherRuntimeIdentity(tabId: string): string | null {
 }
 
 /** What only this window knows about a tab: its panel, its host, its last outcome. */
-function launcherFacts(tabId: string): SessionLauncherFacts {
+export function launcherFacts(tabId: string): SessionLauncherFacts {
   const s = windowState();
   const state = stateOf(tabId) ?? null;
   // A row is open when this window is actually serving its editor: through a panel
@@ -7947,7 +7964,7 @@ function launcherFacts(tabId: string): SessionLauncherFacts {
  * both start PowerShell processes that compete with the restore (`startupRestoreOver`). Until then the row reads
  * "Restoring" or "Checking". A row another live window holds needs neither, so its claim read is not deferred.
  */
-async function launcherOwnershipFacts(index: SessionIndex, tabId: string, options: { readonly fresh?: boolean } = {}): Promise<SessionOwnershipFacts> {
+export async function launcherOwnershipFacts(index: SessionIndex, tabId: string, options: { readonly fresh?: boolean } = {}): Promise<SessionOwnershipFacts> {
   const s = windowState();
   const observed = await index.observeOwnership(tabId);
   const claim = observed.ok ? observed.claim : null;
@@ -7998,7 +8015,7 @@ async function confirmOpenAnyway(): Promise<boolean> {
  * observation the view always uses, so a burst of claim writes costs the rows it names and
  * nothing else. An empty set means the watcher could not say which claims changed.
  */
-function refreshRowsForClaims(index: SessionIndex, claimFiles: ReadonlySet<string>): void {
+export function refreshRowsForClaims(index: SessionIndex, claimFiles: ReadonlySet<string>): void {
   const s = windowState();
   const provider = s.launcherProvider;
   if (provider === undefined) return;
@@ -9540,7 +9557,7 @@ function dispatchSlotMessage(index: SessionIndex, slot: string, panel: vscode.We
  * over a running writer. Prompts, aborts, approvals and control reads are refused here
  * and by the fences the host applies when the slot is demoted.
  */
-async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel, message: unknown): Promise<void> {
+export async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel, message: unknown): Promise<void> {
   const s = windowState();
   const state = s.tabs.get(slot);
   if (state?.panel !== panel || state.tabId === null) return;
@@ -9768,7 +9785,7 @@ function terminalFontResource(state: TabState): vscode.Uri | undefined {
   return cwd === undefined ? undefined : vscode.Uri.file(cwd);
 }
 
-function terminalFontMessage(resource?: vscode.Uri): GuestTerminalFontMessage {
+export function terminalFontMessage(resource?: vscode.Uri): GuestTerminalFontMessage {
   const s = windowState();
   const terminal = vscode.workspace.getConfiguration("terminal.integrated", resource);
   const editor = vscode.workspace.getConfiguration("editor", resource);
@@ -9921,7 +9938,7 @@ async function openFileLinkFromMenu(argument: unknown, action: FileLinkAction | 
  * pipeline says this page owns input for the current generation, and the seen
  * report is only accepted from the visible, focused owner.
  */
-async function handleTerminalGuestMessage(
+export async function handleTerminalGuestMessage(
   tabId: string,
   parsed: { readonly type: string },
   payload: Record<string, unknown>,
@@ -10486,7 +10503,7 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
  * authorizes termination, Keep Running recreates the editor and reattaches the same
  * broker, and a confirm that cannot be verified as a stop keeps the slot.
  */
-async function handleShellEditorClosed(
+export async function handleShellEditorClosed(
   context: vscode.ExtensionContext,
   index: SessionIndex,
   slot: string,
@@ -10911,7 +10928,7 @@ async function renameStoppedSession(
  * manager runs under this extension's own claim ({@link renameStoppedSession}); a direct
  * title-slot rewrite is forbidden, so nothing else edits the file.
  */
-async function renameSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+export async function renameSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
     showWarning("Select an OMP session to rename.");
@@ -11006,7 +11023,7 @@ async function renameSessionChecked(context: vscode.ExtensionContext, index: Ses
  * broker closes the child's stdin, OMP aborts the turn, persists it and exits — and only
  * when that does not finish in time may the user explicitly force it.
  */
-async function closeSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+export async function closeSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
     showWarning("Select an OMP session to close.");
@@ -11127,7 +11144,7 @@ async function confirmAndStopRuntime(
  * persisted and are never resent. A draft with no file has nothing to resume, so it
  * is refused rather than being turned into an implicit Resume.
  */
-async function reloadSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+export async function reloadSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) { showWarning("Select an OMP session to reload."); return; }
     if (target.entry.sessionFile === null) { showWarning("This session has not been saved yet. Choose Chat or Terminal to change its view."); return; }

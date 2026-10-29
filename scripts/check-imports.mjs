@@ -114,8 +114,12 @@ function vscodeLineOf(text) {
   return first === Infinity ? null : lineOf(text, first);
 }
 
+// `src/extension-harness.ts` is the one file directly under `src/` besides `extension.ts` that is not a test file by name: the entry
+// `src/extension-lifecycle.test.ts` bundles in place of `extension.ts` (it imports `extension.ts`, which no layer file may). It is
+// exempt from the layer rule exactly like a test file; every other file directly under `src/` stays a finding.
+const TEST_ENTRY = "src/extension-harness.ts";
 // `test-stub` must start a name segment: `vscode-test-stub.ts` and `test-stub.ts` are stubs, `latest-stub.ts` is not.
-const isTestFile = (rel) => /\.test\.tsx?$/.test(rel) || /(?:^|[/-])test-stub[^/]*\.tsx?$/.test(rel);
+const isTestFile = (rel) => rel === TEST_ENTRY || /\.test\.tsx?$/.test(rel) || /(?:^|[/-])test-stub[^/]*\.tsx?$/.test(rel);
 
 // layer of a file: a ALLOWED key, "extension" for src/extension.ts, "root" for another file
 // directly under src/, "outside" for a file outside src/ (test/**), "unknown" otherwise.
@@ -183,6 +187,15 @@ for (const rel of nodes) {
     } else if (!allowed.includes(target)) {
       findings.push(`${rel}:${line} imports ${to}: ${layer} may not import ${target}`);
     }
+  }
+}
+
+// R-harness-1: the test entry is bundled by its test alone. Nothing but a test file imports it, so no production module
+// can come to depend on a module that exists only to expose `extension.ts` internals.
+for (const rel of nodes) {
+  if (isTestFile(rel)) continue;
+  for (const { to, line } of graph.get(rel)) {
+    if (to === TEST_ENTRY) findings.push(`${rel}:${line} imports ${to}: the test entry is bundled by its test only`);
   }
 }
 
