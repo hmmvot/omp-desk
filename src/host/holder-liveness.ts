@@ -3,10 +3,11 @@
  *
  * A window is proven alive by its own record in the window registry (a fresh lease and an
  * extension-host process that still exists, ADR-0056), which costs no process spawn. Only a holder the
- * registry does not know falls back to {@link claimHolderSeemsAlive}, whose start-time reading is a
- * PowerShell command: seconds on a busy machine, and a reading that times out says "not alive", which
- * turned every row another window runs into a plain "Running" row with no mark, and made a click wait
- * for the command before it chose between switching and launching.
+ * registry does not know falls back to {@link claimHolderSeemsAlive}: an in-process Win32 reading of the
+ * holder's start time (ADR-0076; it was a PowerShell command), asynchronous and kept for a while. It is
+ * still the slower path, and a reading that fails says "not alive", which turned every row another window
+ * runs into a plain "Running" row with no mark, and made a click wait for the reading before it chose
+ * between switching and launching.
  *
  * Display and navigation only. A launch, a stop or a deletion keeps asking {@link claimHolderMayBeAlive}.
  */
