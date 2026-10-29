@@ -172,7 +172,12 @@ const fixtureContext = undefined as never;
 let fixtureChat = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
-  closeSession, presentRestoreOutcome, handOverSession, openTab, handleChatEvent, restoreTabs,
+  closeSession, presentRestoreOutcome, handOverSession, handleChatEvent, restoreTabs,
+  // The session flows live in the window's sessionFlows handle (wiring/session-flows.ts); these adapters keep the cases' argument shapes.
+  openTab: (...args) => fixtureWindow().sessionFlows.openTab(...args),
+  switchSessionMode: (...args) => fixtureWindow().sessionFlows.switchSessionMode(...args),
+  restartChat: (...args) => fixtureWindow().sessionFlows.restartChat(...args),
+  openSessionInMode: (...args) => fixtureWindow().sessionFlows.openSessionInMode(...args),
   // The process services live in the runtime (cut 5); these adapters keep the cases' argument shapes.
   connectHostControl: (context, _index, tabId, owner, runtime, prepared) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.connect(tabId, owner, runtime, prepared); },
   reconnectHostControl: (context, _index, tabId, owner, runtime) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.reconnect(tabId, owner, runtime); },
@@ -184,7 +189,7 @@ export const harness = {
   /** The runtime's record of the conversation an editor shows: its process, control channel, fence and failure. */
   record: recordFor,
   handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
-  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
+  defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   resumeWorkspaceFolder, newSessionInPlace, deleteSessionInPlace,
   panelFactory(handler) {
     const w = fixtureWindow(), previous = w.editorPanels;
