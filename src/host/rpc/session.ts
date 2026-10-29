@@ -3444,11 +3444,13 @@ export class RpcSession {
 
 	/** Put a snapshot of the session file into the model: its window, its cursor, its branches. */
 	#applyDiskHistory(history: HistorySnapshot): void {
-		this.#cursor = history.legacyIds ? null : history.lastId;
-		this.#todoHudHistory = history.todoHud;
-		this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
-		this.#todoHud.historyChanged();
-		if (this.#live) this.#publish();
+		meterWork("chat history apply", () => {
+			this.#cursor = history.legacyIds ? null : history.lastId;
+			this.#todoHudHistory = history.todoHud;
+			this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
+			this.#todoHud.historyChanged();
+			if (this.#live) this.#publish();
+		});
 	}
 
 	/** Whether a read of the whole transcript should come from the session file: it is large, and the file can serve. */
@@ -3954,20 +3956,25 @@ export class RpcSession {
 
 	/** Publish an authoritative snapshot (epoch + 1): live transition, failure, stop, rewrite. */
 	#publish(baseline = false): void {
-		this.#todoHud.sync();
-		this.#epochCounter += 1;
-		this.#model = { ...this.#model, epoch: this.epoch };
-		this.#emitState();
-		this.#emit({ type: "snapshot", payload: snapshotOf(this.#model, this.epoch), baseline });
-		this.#emitModel();
-		this.#syncHeld();
+		// The whole transcript is serialized for every page here: the one step whose size grows with the conversation, not with a frame.
+		meterWork("chat publish", () => {
+			this.#todoHud.sync();
+			this.#epochCounter += 1;
+			this.#model = { ...this.#model, epoch: this.epoch };
+			this.#emitState();
+			this.#emit({ type: "snapshot", payload: snapshotOf(this.#model, this.epoch), baseline });
+			this.#emitModel();
+			this.#syncHeld();
+		});
 	}
 
 	/** The disk-paint snapshot: history visible while the child is still starting. */
 	#emitSnapshot(): void {
-		this.#epochCounter += 1;
-		this.#model = { ...this.#model, epoch: this.epoch };
-		this.#emit({ type: "snapshot", payload: snapshotOf(this.#model, this.epoch), baseline: false });
+		meterWork("chat publish", () => {
+			this.#epochCounter += 1;
+			this.#model = { ...this.#model, epoch: this.epoch };
+			this.#emit({ type: "snapshot", payload: snapshotOf(this.#model, this.epoch), baseline: false });
+		});
 	}
 
 	#emitState(): void {

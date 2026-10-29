@@ -42,9 +42,10 @@ const WRITE_PACE_BYTES = 2 * 1024 * 1024;
 const IDENTITY_POLL_MS = 250;
 
 /**
- * How long one in-place reconnect may take: the dial's own handshake bound (10 s), the identity checks around it and a status
- * round trip fit inside. A reconnect is one shared flight (see {@link RpcHandle.reconnect}); without this bound a dial that never
- * settled would leave every later attach joined to it for ever.
+ * How long the dial of one in-place reconnect may take: the dial's own handshake bound (10 s, 20 s when this process was not
+ * running) and the identity checks around it fit inside. The status round trip that follows the dial keeps the handle's own request
+ * bound (15 s). A reconnect is one shared flight (see {@link RpcHandle.reconnect}); without this bound a dial that never settled
+ * would leave every later attach joined to it for ever.
  */
 const RECONNECT_TIMEOUT_MS = 30_000;
 
