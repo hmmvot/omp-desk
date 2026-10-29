@@ -478,8 +478,11 @@ export interface SessionIndexRefresh {
 	readonly adopted: readonly string[];
 	/** Rows the shared record no longer names; they were dropped from this window. */
 	readonly removed: readonly string[];
-	/** Rows left exactly as they were: this window's own lifecycle holds them. */
 	readonly kept: readonly string[];
+	/** Rows whose state in this window this pass touched (added, dropped, re-read, or a held row's reply identity moved). */
+	readonly touched: readonly string[];
+	/** Whether the committed editor-slot bindings differ from the ones this window held; always `true` when every row was read. */
+	readonly bindingsChanged: boolean;
 }
 
 export interface SessionIndexOptions {
@@ -937,13 +940,19 @@ export class SessionIndex {
 	 * It starts nothing, stops nothing, takes and releases no claim, and never
 	 * changes a row's run intent — adopting another window's rows is visibility, not
 	 * ownership.
+	 *
+	 * `changedOnly` is the key-aware pass: the caller knows the session record changed and wants only what differs from the
+	 * merge base (the record this window last adopted or committed) read, so the rows and bindings that did not change are not
+	 * cloned, composed or reported. The default reads every row, which is what a caller that does not know what changed needs.
 	 */
-	async refreshFromStore(): Promise<SessionIndexRefresh> {
+	async refreshFromStore(options: { readonly changedOnly?: boolean } = {}): Promise<SessionIndexRefresh> {
 		const adopted: string[] = [];
 		const removed: string[] = [];
 		const kept: string[] = [];
 		let markersAhead = false;
 		let sweptBindings = false;
+		let bindingsChanged = false;
+		const touched = new Set<string>();
 		this.#persistChain = this.#persistChain.then(() => {
 			let raw: unknown;
 			try {
@@ -953,16 +962,26 @@ export class SessionIndex {
 			}
 			if (raw === undefined || raw === null || !isPersistedSnapshot(raw)) return;
 			const present = new Set<string>();
+			const base = options.changedOnly === true && isPersistedSnapshot(this.#sharedBase) ? this.#sharedBase : null;
+			const baseRows = base === null ? null : new Map(base.entries.map(entry => [entry.tabId, entry]));
+			const knownBindings = base === null ? null : base.bindings;
 			// The rows this refresh made equal to the committed record, and the ones it dropped with it: the merge base follows them.
 			const followed = new Map<string, SharedEntry>();
 			const dropped = new Set<string>();
 			for (const candidate of raw.entries) {
+				present.add(candidate.tabId);
+				const existing = this.#entries.get(candidate.tabId);
+				// A key-aware pass leaves a row exactly as it is when the committed row is the one the merge base already
+				// holds: nothing about it changed, so there is nothing to read, compose or report.
+				if (baseRows !== null && existing !== undefined) {
+					const known = baseRows.get(candidate.tabId);
+					if (known !== undefined && sameSharedRow(known, candidate)) continue;
+				}
 				const shared = cloneSharedEntry(candidate);
-				present.add(shared.tabId);
-				const existing = this.#entries.get(shared.tabId);
 				if (existing === undefined) {
 					this.#entries.set(shared.tabId, composeEntry(shared, undefined));
 					adopted.push(shared.tabId);
+					touched.add(shared.tabId);
 					followed.set(shared.tabId, candidate);
 					continue;
 				}
@@ -974,6 +993,7 @@ export class SessionIndex {
 					const seen = laterReplyMarker(null, existing.lastSeenReplyId, shared.lastSeenReplyId);
 					if (compareReplyMarkers(existing.lastCompletedReplyId, shared.lastCompletedReplyId)! > 0 ||
 						compareReplyMarkers(existing.lastSeenReplyId, shared.lastSeenReplyId)! > 0) markersAhead = true;
+					if (completed !== existing.lastCompletedReplyId || seen !== existing.lastSeenReplyId) touched.add(shared.tabId);
 					existing.lastCompletedReplyId = completed;
 					existing.lastSeenReplyId = seen;
 					continue;
@@ -983,6 +1003,7 @@ export class SessionIndex {
 				composed.lastCompletedReplyId = laterReplyMarker(existing.lastCompletedReplyId, existing.lastCompletedReplyId, shared.lastCompletedReplyId) ?? null;
 				composed.lastSeenReplyId = laterReplyMarker(existing.lastSeenReplyId, existing.lastSeenReplyId, shared.lastSeenReplyId) ?? null;
 				this.#entries.set(shared.tabId, composed);
+				touched.add(shared.tabId);
 				followed.set(shared.tabId, candidate);
 			}
 			for (const tabId of [...this.#entries.keys()]) {
@@ -993,14 +1014,18 @@ export class SessionIndex {
 				}
 				this.#entries.delete(tabId);
 				removed.push(tabId);
+				touched.add(tabId);
 				dropped.add(tabId);
 			}
 			const bindings = persistedBindings(raw.bindings);
-			const bound = new Set(bindings.map(binding => binding.slotId));
-			for (const binding of bindings) this.#bindings.set(binding.slotId, binding);
-			for (const slotId of [...this.#bindings.keys()]) {
-				if (bound.has(slotId)) continue;
-				this.#bindings.delete(slotId);
+			bindingsChanged = knownBindings === null || JSON.stringify(knownBindings) !== JSON.stringify(raw.bindings);
+			if (bindingsChanged) {
+				const bound = new Set(bindings.map(binding => binding.slotId));
+				for (const binding of bindings) this.#bindings.set(binding.slotId, binding);
+				for (const slotId of [...this.#bindings.keys()]) {
+					if (bound.has(slotId)) continue;
+					this.#bindings.delete(slotId);
+				}
 			}
 			// Adopting a higher ordinal keeps a later row from this window out of an
 			// order another window already used.
@@ -1013,7 +1038,7 @@ export class SessionIndex {
 		// A reply identity this window holds and the catalog lost (a stale copy of the row was written over it) is
 		// written back, so the other windows show what the user saw here.
 		if (markersAhead || sweptBindings) await this.#persist();
-		return { adopted, removed, kept };
+		return { adopted, removed, kept, touched: [...touched], bindingsChanged };
 	}
 
 	/**
@@ -4127,6 +4152,20 @@ function cloneSharedEntry(entry: SharedEntry): SharedEntry {
 /** The shared part of one in-memory row, ready to commit. */
 function sharedEntryOf(entry: MutableEntry): SharedEntry {
 	return cloneSharedEntry(entry);
+}
+
+/**
+ * Whether two committed copies of one row say the same. Rows the catalog holds are written in one canonical shape, so the
+ * serialized text decides almost always; a row that differs only in the order of its keys (an older writer) is compared in the
+ * normalised shape, and a row that cannot be normalised is read as changed.
+ */
+function sameSharedRow(left: SharedEntry, right: SharedEntry): boolean {
+	if (JSON.stringify(left) === JSON.stringify(right)) return true;
+	try {
+		return JSON.stringify(cloneSharedEntry(left)) === JSON.stringify(cloneSharedEntry(right));
+	} catch {
+		return false;
+	}
 }
 
 /**

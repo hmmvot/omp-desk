@@ -4674,6 +4674,81 @@ describe("reply identities across windows", () => {
 	});
 });
 
+// The key-aware pass of the refresh (`changedOnly`) is what an adoption of one changed record runs: it reads the rows whose
+// committed copy differs from the one the window last adopted, and nothing else.
+
+describe("a key-aware refresh reads only the rows that changed", () => {
+	async function windowPair(rows: number) {
+		const workspace = await tempWorkspace();
+		const open = async () => {
+			const store = await createCatalogStore({ paths: catalogPaths(workspace.cwd), mergers: {
+				[SESSION_INDEX_STORAGE_KEY]: mergeSessionIndexRecords, [BROKER_SLOTS_KEY]: mergeBrokerSlotRecords,
+			} });
+			return { store, index: indexFor(store, workspace.claimDir) };
+		};
+		const writer = await open();
+		const tabs: string[] = [];
+		for (let at = 0; at < rows; at++) tabs.push((await writer.index.createDraft({ cwd: workspace.cwd })).tabId);
+		// The reader loads the committed rows when it opens, as a window does at activation.
+		const reader = await open();
+		return { workspace, writer, reader, tabs };
+	}
+	const adopt = async (reader: { store: CatalogStore; index: SessionIndex }, options?: { changedOnly?: boolean }) => {
+		await reader.store.refresh();
+		return await reader.index.refreshFromStore(options);
+	};
+
+	it("reports nothing when nothing changed, and reads every row when asked to", async () => {
+		const f = await windowPair(4);
+		assert.deepEqual((await adopt(f.reader, { changedOnly: true })).touched, []);
+		const full = await adopt(f.reader);
+		assert.equal(full.touched.length, 4, "a pass that was not told what changed reads every row ...");
+		assert.equal(full.bindingsChanged, true, "... and the bindings");
+		assert.equal((await adopt(f.reader, { changedOnly: true })).bindingsChanged, false);
+	});
+
+	it("takes a reply-marker-only commit as one touched row and no other change", async () => {
+		const f = await windowPair(4);
+		await f.writer.index.recordConversationState(f.tabs[1]!, { lastCompletedReplyId: "event-m1" });
+		const refresh = await adopt(f.reader, { changedOnly: true });
+		assert.deepEqual(refresh.touched, [f.tabs[1]]);
+		assert.deepEqual([refresh.adopted, refresh.removed, refresh.bindingsChanged], [[], [], false]);
+		assert.equal(f.reader.index.get(f.tabs[1]!)?.lastCompletedReplyId, "event-m1");
+		assert.equal(f.reader.index.get(f.tabs[0]!)?.lastCompletedReplyId, null);
+		assert.deepEqual((await adopt(f.reader, { changedOnly: true })).touched, [], "the row is now the one the window holds");
+	});
+
+	it("takes a change of one row's own fact as that row only", async () => {
+		const f = await windowPair(4);
+		await f.writer.index.setRunIntent(f.tabs[2]!, "running");
+		const refresh = await adopt(f.reader, { changedOnly: true });
+		assert.deepEqual(refresh.touched, [f.tabs[2]]);
+		assert.equal(f.reader.index.get(f.tabs[2]!)?.runIntent, "running");
+	});
+
+	it("adopts a row another window added and drops one it removed, and nothing else", async () => {
+		const f = await windowPair(3);
+		const added = (await f.writer.index.createDraft({ cwd: f.workspace.cwd })).tabId;
+		const first = await adopt(f.reader, { changedOnly: true });
+		assert.deepEqual([first.adopted, first.removed, first.touched], [[added], [], [added]]);
+		assert.ok(f.reader.index.get(added) !== null);
+		await f.writer.index.remove(f.tabs[0]!);
+		const second = await adopt(f.reader, { changedOnly: true });
+		assert.deepEqual([second.adopted, second.removed, second.touched], [[], [f.tabs[0]], [f.tabs[0]]]);
+		assert.equal(f.reader.index.get(f.tabs[0]!), null);
+	});
+
+	it("keeps the window's own change that the other window's commit merged around", async () => {
+		const f = await windowPair(3);
+		await f.reader.index.setRunIntent(f.tabs[0]!, "running");
+		await f.writer.index.recordConversationState(f.tabs[1]!, { lastSeenReplyId: "event-m1" });
+		const refresh = await adopt(f.reader, { changedOnly: true });
+		assert.ok(refresh.touched.includes(f.tabs[1]!));
+		assert.equal(f.reader.index.get(f.tabs[0]!)?.runIntent, "running", "this window's own commit stays");
+		assert.equal(f.reader.index.get(f.tabs[1]!)?.lastSeenReplyId, "event-m1");
+	});
+});
+
 // A window's merge base is what it last saw of the shared record. A refresh that adopts another window's commit has to
 // move it, or the window's next write reads every row the other window changed as its own edit.
 

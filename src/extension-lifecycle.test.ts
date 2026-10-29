@@ -195,6 +195,12 @@ export const harness = {
   // The fixture's helper scheduler has no restore to wait for and no cross-window slots: a helper run starts as soon as it is asked for.
   installWindow(next) { window?.pendingDisplay.dispose(); window?.pending.dispose(); window?.helpers?.dispose(); next.helpers ??= new HelperScheduler({ log, backgroundGate: Promise.resolve(), backgroundSettleMs: 0 }); window = next; },
   window: () => windowState(),
+  holdStartupRestore() {
+    const w = fixtureWindow(), over = Promise.withResolvers();
+    let pending = true;
+    w.catalogAdoption = { ...w.catalogAdoption, startupRestoreOver: () => pending ? over.promise : null };
+    return { end() { pending = false; over.resolve(); } };
+  },
   createWindowState,
   localLauncher: (context, index) => localLauncher(context, index, fixtureChat), handleTerminalGuestMessage,
   startConversation: (index, tabId, runtime, file, replay) => localLauncher(fixtureWindow().context, index, fixtureChat).startConversation(tabId, runtime, file, replay),
@@ -343,7 +349,9 @@ export const harness = {
     harness.installWindow(createWindowState(fixtureContext));
     const w = fixtureWindow();
     fixtureChat = conversation;
-    w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation); w.startupRestorePending = false;
+    w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation);
+    // The fixture's window has no startup restore to wait for: the pass is over and covers no row.
+    w.catalogAdoption = { ...w.catalogAdoption, startupRestoreSettled: () => true, startupRestoreOver: () => null, startupRestore: () => null, restoreCovers: () => false, startupCovers: () => false };
     w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, openMermaid() {}, log() {} });
     fixtureVscode.window.errors.length = 0;
     fixtureVscode.env.clipboard.writes.length = 0;
@@ -488,6 +496,8 @@ interface Harness {
   providerAuthFixture: { starts: { scope: { env: Record<string, string>; cwd: string } }[]; spawned: FakeOmp[]; peer: () => FakeOmp };
   storedRenameFixture: { enabled: boolean; root: string; requests: Parameters<typeof renameStoppedSessionTitle>[0][]; rename: ((input: Parameters<typeof renameStoppedSessionTitle>[0]) => ReturnType<typeof renameStoppedSessionTitle>) | null };
   restoreTabs(...args: unknown[]): Promise<void>;
+  /** Make the window's startup restore pending until `end()`: display-only ownership reads wait for it. */
+  holdStartupRestore(): { end(): void };
   editorLifecycle(): () => void;
   createPanel(): LifecyclePanel;
   startConversation(...args: unknown[]): Promise<void>;
@@ -2450,8 +2460,7 @@ describe("verified-owned-writer policy fixtures", () => {
     const f = await legacyFixture("restore-defers-display", false, true);
     let leaseAsked = 0;
     harness.window().externalLeases = { holds: async () => { leaseAsked++; return true; } };
-    const over = Promise.withResolvers<void>();
-    Object.assign(harness.window(), { startupRestorePending: true, startupRestoreOver: over });
+    const hold = harness.holdStartupRestore();
     try {
       let settled = false;
       const display = harness.launcherOwnershipFacts(f.index, TAB).then(facts => { settled = true; return facts; });
@@ -2460,8 +2469,7 @@ describe("verified-owned-writer policy fixtures", () => {
       assert.equal(explicit.externalOmp, true);
       assert.equal(leaseAsked, 1, "only the explicit read asked the lease");
       assert.equal(settled, false, "the display read is still waiting for the restore");
-      Object.assign(harness.window(), { startupRestorePending: false });
-      over.resolve();
+      hold.end();
       const facts = await display;
       assert.equal(facts.externalOmp, true);
       assert.equal(leaseAsked, 2, "the display read ran once the restore was over");
@@ -2479,7 +2487,7 @@ describe("verified-owned-writer policy fixtures", () => {
     const row = await index.trackSession({ sessionFile: file, cwd: root });
     const rival = await harness.acquireClaim(path.join(root, "claims-restore"), file, "remote-window-owner", harness.createClaimHolder());
     harness.reset(index, { stateOf: () => null });
-    Object.assign(harness.window(), { startupRestorePending: true, startupRestoreOver: Promise.withResolvers<void>() });
+    harness.holdStartupRestore();
     try {
       assert.equal((await harness.launcherOwnershipFacts(index, row.tabId)).heldElsewhere, true, "answered while the restore is still pending");
     } finally { await rival.release(); }
@@ -3476,7 +3484,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 						launch: async () => { throw new Error("Reopening must not replace the surviving writer"); },
 					}, {});
 					restores.push(harness.editorLifecycle());
-					await harness.restoreTabs(f.saved.context, index, new Set([f.row.tabId]));
+					await harness.restoreTabs(index, new Set([f.row.tabId]));
 					if (mode === "chat") await chat.sessionOf(f.row.tabId)!.start();
 					assert.equal(harness.state(f.row.tabId).panel, null, "reload must leave a closed editor closed");
 				}

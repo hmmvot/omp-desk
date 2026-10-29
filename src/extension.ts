@@ -49,7 +49,6 @@ import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from 
 import { useSynchronousLocalFs } from "./host/local-fs";
 import { synchronousLocalPaths } from "./host/private-storage";
 import { acquireClaim, claimsDirectory, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
-import { CoalescedRun } from "./host/coalesced-run";
 import { startFsTurnaroundProbe } from "./host/fs-turnaround";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
 import type { OmpBinary, OmpCommand, OmpPackageRoot } from "./host/native-terminal";
@@ -59,7 +58,6 @@ import {
   SESSION_INDEX_STORAGE_KEY,
   mergeSessionIndexRecords,
   SessionIndex,
-  homeAllows,
 } from "./host/session-index";
 import { isManagedHost } from "./host/session-model";
 import { normalizeSessionIdentityKey, readSessionFileHeader } from "./host/session-files";
@@ -85,7 +83,7 @@ import type { KillWindow } from "./runtime/local-kill";
 import type { NativeWatchWindow } from "./runtime/local-native-watch";
 import type { RuntimeRecord } from "./runtime/runtime-record";
 import { createRuntimeStaging } from "./runtime/runtime-entries";
-import { describeRestorePhases, timedStep } from "./host/session-restore-trace";
+import { timedStep } from "./host/session-restore-trace";
 import type { RestorePassPhases } from "./host/session-restore-trace";
 import { runNativeStage } from "./runtime/native-stage-client";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
@@ -228,7 +226,6 @@ import { ChatRuntime } from "./host/chat-runtime";
 import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, stopRpcHost } from "./host/rpc-launch";
-import { ParkedRpcConnections } from "./host/rpc-parked";
 import { PendingForks } from "./host/pending-forks";
 import { FORK_REFUSAL_SENTENCES } from "./chat/fork";
 import { attachNativeHost, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "./host/native-session";
@@ -328,6 +325,8 @@ import type { CatalogStore } from "./host/profile-catalog";
 import { openProfileCatalog } from "./wiring/catalog-recovery";
 import type { CatalogRecoveryHandle, OpenedCatalog } from "./wiring/catalog-recovery";
 import { importPredecessorFolders } from "./wiring/predecessor-import";
+import { registerCatalogAdoption } from "./wiring/catalog-adoption";
+import type { CatalogAdoption, CatalogAdoptionDeps } from "./wiring/catalog-adoption";
 import { migrateLegacySettings } from "./wiring/legacy-settings";
 import { migrateSessionFolderSettings } from "./wiring/session-folder-settings";
 import { editorProjectFolder } from "./host/session-folder-setting";
@@ -621,22 +620,16 @@ interface WindowState {
   /** The private backup and loss report of the catalog (ADR-0081); set with the catalog. */
   catalogRecovery: CatalogRecoveryHandle | undefined;
   /**
-   * Runs this window's catalog adoptions one at a time, folding every trigger that arrives meanwhile (a commit of this window,
-   * a peer's change, focus, visibility, an explicit refresh) into one follow-up: a reload of several windows fires dozens of
-   * triggers within seconds, and an adoption per trigger ran in parallel, each waiting on the same index write queue and then
-   * re-reading and re-publishing everything at once.
-   */
-  catalogAdoption: CoalescedRun<CatalogAdoptionRequest> | undefined;
-  /**
-   * Resolves once the catalog has been read and the one-time import of the predecessor
-   * build's folder list has settled.
+   * Reads the catalog at activation, adopts what the catalog's commits change (this window's and a peer's, by record key),
+   * runs the startup restore pass over the rows this window is responsible for, and owns the state of that pass (the
+   * pending flag, the pass and its kept broker connections, the deferral display-only reads wait on). See
+   * `src/wiring/catalog-adoption.ts`.
    *
-   * Editor restoration and commands consult it: VS Code may hand this window a restored
-   * editor (or a command may arrive) before the catalog has been read, and resolving a
-   * row against a not-yet-read catalog would report a stored session as gone. It
-   * resolves even when the import failed, so nothing waits forever.
+   * Editor restoration and commands consult `ready()`: VS Code may hand this window a restored editor (or a command may
+   * arrive) before the catalog has been read, and resolving a row against a not-yet-read catalog would report a stored
+   * session as gone.
    */
-  catalogReady: Promise<void>;
+  readonly catalogAdoption: CatalogAdoption;
   /** The session-lease observer of this window (ADR-0046); `null` where there is no probe. */
   externalLeases: ExternalLeaseObserver | null;
   /** Claim file name per row target, resolved once: the name needs the filesystem, and a watch batch asks for every row. */
@@ -945,43 +938,11 @@ interface WindowState {
   readonly pendingDisplay: PendingDisplay;
   /** What a failed save of the session index tells the user: contention is only logged, a fault is shown once per cause. */
   readonly persistFailures: PersistFailureReporter;
-  /**
-   * The activation restore pass, while it is still running.
-   *
-   * Activation reconciles and launches every indexed row before it publishes any
-   * panel, so a click on one of those rows that arrives during that window would
-   * otherwise open a tab the pass is already restoring: the index refuses it as a
-   * duplicate and the session the user asked for never appears.
-   *
-   * `cohort` is captured before the pass starts: the rows activation is responsible
-   * for. `settled` resolves only after the pass has restored them *and* published
-   * every panel and the final focus, so a click can wait for what the pass is about
-   * to publish instead of racing it. `null` once the pass is over — after which a
-   * click only has to read the panels it left behind.
-   */
-  startupRestore: { readonly settled: Promise<void>; readonly cohort: ReadonlySet<string> } | null;
-  /** The startup pass's kept broker connections while it runs (see `ParkedRpcConnections`); `null` outside the pass. */
-  restoreParking: ParkedRpcConnections | null;
-  /**
-   * `true` from activation until the startup pass has captured its cohort. The catalog is adopted
-   * (and the launcher first built) before the pass starts, and a row this window is going to
-   * re-adopt must not read "Blocked" for that stretch: it is derived from the same membership
-   * the cohort will use.
-   */
-  startupRestorePending: boolean;
-  /**
-   * Settles when the startup restore pass is over (or after {@link STARTUP_DEFER_CAP_MS}, so a pass that never settles cannot
-   * leave a display undetermined). What only paints Sessions (ownership observations, the Processes poll, the lease probe)
-   * waits for it through {@link startupRestoreOver}; an explicit action never does.
-   */
-  readonly startupRestoreOver: PromiseWithResolvers<void>;
   /** Settles when this window's move of the old `omp.*` settings ended (ADR-0068); never rejects. Awaited, bounded, by the first launch. */
   legacySettingsMoved: Promise<void>;
   legacySettingsLateLogged: boolean;
   /** Wall-clock time (`Date.now()`) the extension host activated; the startup timeline lines are relative to it. */
   activatedAt: number;
-  /** When the startup catalog adoption settled, or `null` before; read by the startup restore's timeline line. */
-  catalogAdoptedAt: number | null;
   /**
    * One window-wide counter numbering every editor event — an open/view request
    * and a panel close — so their order per tab is known (`TabState.lastOpenRequest`,
@@ -1074,16 +1035,13 @@ function windowRoutingDeps(): WindowRoutingDeps {
     requestSelections: () => windowState().requestSelections,
     packageStale: () => windowState().packageStale,
     unityChoices: () => windowState().context?.globalState,
-    startupRestoreCovers: tabId => {
-      const startup = windowState().startupRestore;
-      return startup !== null && startup.cohort.has(tabId);
-    },
+    startupRestoreCovers: tabId => windowState().catalogAdoption.restoreCovers(tabId),
     resolveSessionFolders: () => windowState().resolveSessionFolders(),
     packageChangedOnDisk,
-    ensureCatalogReady,
+    ensureCatalogReady: () => windowState().catalogAdoption.ready(),
     refreshCatalog: async index => {
       const folders = windowState().launcherFolders;
-      if (folders !== undefined) await adoptCatalogChanges(index, folders);
+      if (folders !== undefined) await windowState().catalogAdoption.adopt(index, folders);
     },
     sessionProcesses: () => windowState().sessionProcesses,
     launcherProvider: () => windowState().launcherProvider,
@@ -1133,7 +1091,7 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     pending: () => windowState().pending,
     setSessionProcesses: processes => { windowState().sessionProcesses = processes; },
     catalogLoaded: () => windowState().catalogStore !== undefined,
-    startupRestoreOver: () => startupRestoreOver(),
+    startupRestoreOver: () => windowState().catalogAdoption.startupRestoreOver(),
     tab: stateOf,
     tabs: () => windowState().tabs,
     detailTabs: () => windowState().detailTabs,
@@ -1162,8 +1120,8 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     forgetTurnActivity,
     brokerClient,
     attachBrokerClient,
-    ensureCatalogReady,
-    adoptCatalogChanges,
+    ensureCatalogReady: () => windowState().catalogAdoption.ready(),
+    adoptCatalogChanges: (index, folders, options) => windowState().catalogAdoption.adopt(index, folders, options),
     showWarningMessage: (message, options, ...items) => vscode.window.showWarningMessage(message, options, ...items),
     showQuickPick: (items, options) => vscode.window.showQuickPick(items, options),
     log,
@@ -1269,7 +1227,7 @@ function editorPanelsDeps(): EditorPanelsDeps<TabState> {
     sessionPanelColumns: () => windowState().sessionPanelColumns,
     panelBindWaiters: () => windowState().panelBindWaiters,
     draftRestores: () => windowState().draftRestores,
-    startupRestoreSettled: () => windowState().startupRestore === null && !windowState().startupRestorePending,
+    startupRestoreSettled: () => windowState().catalogAdoption.startupRestoreSettled(),
     guest: () => windowState().guestDispatcher,
     routing: () => windowState().routing,
     bridge: () => windowState().bridgeHost,
@@ -1295,7 +1253,7 @@ function editorPanelsDeps(): EditorPanelsDeps<TabState> {
     refreshLauncher: () => refreshLauncher(),
     setActiveTab,
     requestSessionRowExpand,
-    ensureCatalogReady,
+    ensureCatalogReady: () => windowState().catalogAdoption.ready(),
     log,
     info: showInfo,
     warn: showWarning,
@@ -1333,11 +1291,40 @@ function bridgeHostDeps(): BridgeHostDeps<TabState> {
   };
 }
 
+/** What the catalog adoption and the startup restore read of this window and call into. */
+function catalogAdoptionDeps(activatedAt: number): CatalogAdoptionDeps {
+  return {
+    log,
+    activatedAt,
+    catalog: () => windowState().catalogStore,
+    brokerSlots: () => windowState().brokerSlots,
+    shellSlots: () => windowState().shellSlots,
+    dropClaimFileNames: () => windowState().claimFileNames.clear(),
+    reconcileLocalRoles,
+    refreshLauncher: () => refreshLauncher(),
+    importPredecessorFolders: async store => {
+      const context = windowState().context;
+      if (context !== undefined) await importPredecessorFolders({ store, storageDir: context.globalStorageUri.fsPath, log });
+    },
+    catalogRead: () => vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, false),
+    watchCatalog: (paths, onSignal) => startCatalogWatch(paths, onSignal, { onError: detail => log.warn(detail) }),
+    subscribe: disposable => { windowState().context?.subscriptions.push(disposable); },
+    startBackup: () => windowState().catalogRecovery?.startBackup(),
+    restoreTabs,
+    hasLocalEditorFor,
+    owningWindow: () => owningWindowUri()?.toString() ?? null,
+    startRuntimeProof: () => { void windowState().ptyGate?.client(); },
+    reconciler: () => windowState().reconciler,
+    timing: windowTiming,
+  };
+}
+
 /** The initial state of one window: every collection empty, every handle not yet created. */
 function createWindowState(context: vscode.ExtensionContext): WindowState {
   const pending = new PendingOperations({ log: line => log.debug(line), launchReady: launchReadinessOf });
   const launchTimeline = new LaunchTimeline(Date.now, line => log.info(line));
   launchTimeline.observe(observeLaunchSteps(pending));
+  const activatedAt = Date.now();
   return {
     // Session index and claims
     reconciler: undefined as never, // assigned by `activate` before anything reads it
@@ -1345,8 +1332,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     indexForBridge: null,
     catalogStore: undefined,
     catalogRecovery: undefined,
-    catalogAdoption: undefined,
-    catalogReady: Promise.resolve(),
+    catalogAdoption: registerCatalogAdoption(catalogAdoptionDeps(activatedAt)),
     externalLeases: null,
     claimFileNames: new Map<string, string | null>(),
     // Window registry and routing
@@ -1445,14 +1431,9 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     pending,
     pendingDisplay: new PendingDisplay(pending, pendingDisplayShell({ provider: () => windowState().launcherProvider, sessionsViewId: SESSIONS_VIEW_ID })),
     persistFailures: new PersistFailureReporter({ warn: message => log.warn(message) }, message => showWarning(message)),
-    startupRestore: null,
-    restoreParking: null,
-    startupRestorePending: true,
-    startupRestoreOver: Promise.withResolvers<void>(),
     legacySettingsMoved: Promise.resolve(),
     legacySettingsLateLogged: false,
-    activatedAt: Date.now(),
-    catalogAdoptedAt: null,
+    activatedAt,
     editorEventSequence: 0,
     nextLauncherRuntimeId: 0,
     packageDrift: null,
@@ -1582,7 +1563,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // waits for the startup restore (the gate), runs one at a time and takes a cross-window slot; the window's disposal ends what it runs.
   s.helpers = new HelperScheduler({
     log,
-    backgroundGate: s.startupRestoreOver.promise,
+    backgroundGate: s.catalogAdoption.startupOver,
     slots: createHelperSlots({ storageDir: context.globalStorageUri.fsPath }),
   });
   setOmpBackgroundRunner((label, run) => s.helpers.run({ label, class: "background", run }));
@@ -1739,7 +1720,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     .catch(() => false)
     .then(() => ptyClientForIdentity.attachIdentity());
   const ptyClientForTreeCheck = s.ptyClient;
-  void s.startupRestoreOver.promise.then(() => {
+  void s.catalogAdoption.startupOver.then(() => {
     const check = setTimeout(() => { void ptyClientForTreeCheck.verifyPackagedTree().catch(() => undefined); }, PACKAGED_TREE_CHECK_DELAY_MS);
     check.unref();
   });
@@ -1752,10 +1733,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log,
     notify: message => { void vscode.window.showInformationMessage(`OMP Desk: ${message}`); },
   });
-  // The longest a display-only read waits for the startup restore (see `WindowState.startupRestoreOver`).
-  const startupDeferCap = setTimeout(() => s.startupRestoreOver.resolve(), STARTUP_DEFER_CAP_MS);
-  startupDeferCap.unref();
-  context.subscriptions.push({ dispose: () => clearTimeout(startupDeferCap) });
+  // The longest a display-only read waits for the startup restore (see `CatalogAdoption.startupRestoreOver`).
+  context.subscriptions.push(s.catalogAdoption.armDeferralCap());
   // The report's window timeline starts here: every window-level measurement is relative to
   // the extension host's own activation.
   s.diagnostics.beginSubject(WINDOW_DIAGNOSTIC_SUBJECT, { label: "window", kind: "window" });
@@ -1911,7 +1890,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const client = await timedStep(steps, "broker client", () => attachBrokerClient());
       if (client === null) return { kind: "unreachable", reason: "the PTY broker is not available in this window" };
       // The startup pass's rows keep the connection that proved their host for the attach that follows; every other caller closes it.
-      const parking = keepConnection === true ? windowState().restoreParking : null;
+      const parking = keepConnection === true ? windowState().catalogAdoption.restoreParking() : null;
       return await probeRpcHost({ client, slot, expected, ...(kind === undefined ? {} : { kind }), ...(steps === undefined ? {} : { steps }), ...(parking === null ? {} : { parking }) });
     },
     // A slot's running child is the only writer an unidentified attempt can still be caught
@@ -2234,7 +2213,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!event.visible) return;
       // A missed catalog notification is recovered here rather than leaving another
       // window's sessions or folders invisible until a restart.
-      void adoptCatalogChanges(index, folders).catch(error => log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
+      void s.catalogAdoption.adopt(index, folders).catch(error => log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
       s.routing.refresh();
     }),
@@ -2244,7 +2223,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const active = activePanelTab();
       if (active !== null) activateNativeEditor(active);
       // Focus is the recovery point for a notification this window missed.
-      void adoptCatalogChanges(index, folders).catch(error => log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
+      void s.catalogAdoption.adopt(index, folders).catch(error => log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
       // A row another window runs may have been left selected by a click that switched there; this window selects only its own session.
       releaseSelectionFromOtherWindow(index);
@@ -2440,7 +2419,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // only then does the activation restore pass run — pinned to the rows this window is
   // responsible for. An editor VS Code restores for a row this pass does not cover is
   // opened by its own serializer path, so it is never left unconnected.
-  startCatalogActivation(context, index, folders, catalog);
+  s.catalogAdoption.activate(index, folders, catalog);
   s.sessionActions.setupProcesses(context, index, folders);
   // Stage the entries children run from outside the installed extension folder
   // before anything can need them, so no process starts from a file inside a
@@ -3679,7 +3658,7 @@ async function openTab(
   // The folder list may still be receiving the predecessor build's folders, so every
   // explicit open waits for that one pass to settle before it resolves anything.
   windowState().pending.step(tabId, "waiting");
-  await ensureCatalogReady();
+  await s.catalogAdoption.ready();
   // A chat whose process ended shows the ended state before its exit cleanup is finished, and offers Resume at once. A click
   // in that gap would find the dead runtime still in place, take the session for one already running here and start nothing,
   // so every open waits for the cleanup of the runtime that ended, then for the tab's queued lifecycle work (src/host/runtime-settle.ts).
@@ -3776,7 +3755,7 @@ async function openTabOnce(
   // index refuses as a duplicate. No tab lifecycle is held while waiting — this
   // is only the pass's own completion — and ownership is still decided by the
   // index afterwards, exactly as for any other open.
-  const startup = s.startupRestore;
+  const startup = s.catalogAdoption.startupRestore();
   if (startup !== null && startup.cohort.has(tabId)) {
     s.pending.step(tabId, "waiting");
     await startup.settled;
@@ -4811,122 +4790,6 @@ function restartBinding(index: SessionIndex, tabId: string): BridgeNativeBinding
 // Restore
 
 /**
- * Run the activation restore pass as a handoff the launcher's clicks wait on.
- *
- * The rows activation is responsible for are captured before the pass starts, and
- * its completion is retained over the whole pass — every reconcile, launch and
- * attach, plus the result it projects into the editors VS Code restored. A pass
- * that threw would otherwise leave a promise nobody could settle and an unhandled
- * rejection behind, so an escaped failure is logged and settles the handoff:
- * clicks then re-read the rows and panels the pass left and open normally, and a
- * startup failure is never read as evidence about ownership.
- *
- * ## The local recovery cohort
- *
- * The index is profile-wide now, so a row in it may belong to another workspace this
- * window has nothing to do with. Activation therefore restores only the rows *this*
- * window is responsible for: the conversations whose editor VS Code restored here,
- * and the rows this window already runs. Every other row stays visible in the
- * launcher and inert — the user opens it explicitly, which is the one action that
- * starts or adopts it. A stopped or explicitly released row keeps its own refusal
- * either way: the cohort decides *whose* row may be restored, never whether a
- * stopped row may start.
- *
- * A restored editor whose tab was not in the cohort when the pass started is not
- * abandoned: its own serializer path opens that tab, so it is re-derived from
- * current facts exactly as an explicit click is.
- */
-function startStartupRestore(context: vscode.ExtensionContext, index: SessionIndex): void {
-  const s = windowState();
-  const cohort = localRecoveryCohort(index);
-  s.startupRestorePending = false;
-  const restoreStartedAt = Date.now();
-  const phases: RestorePassPhases = {};
-  // Connections the pass's reconciles keep for its attaches (`ParkedRpcConnections`); closed when the pass ends whatever happened.
-  const parking = new ParkedRpcConnections();
-  s.restoreParking = parking;
-  const settled = (async () => {
-    try {
-      await restoreTabs(context, index, cohort, phases);
-    } catch (error) {
-      log.error(`restore: the startup pass failed: ${messageOf(error)}`);
-    } finally {
-      parking.release();
-      if (s.restoreParking === parking) s.restoreParking = null;
-    }
-  })();
-  s.startupRestore = { settled, cohort };
-  // Rows the catalog adoption just published were derived before this pass existed, so a live
-  // row of this window's cohort would keep saying "Blocked" until some later event: re-derive
-  // them now, as "Restoring" for the length of the pass.
-  refreshLauncher();
-  void settled.then(() => {
-    const since = (at: number): string => `+${at - s.activatedAt} ms`;
-    const finishedAt = Date.now();
-    const phasesText = describeRestorePhases(phases, finishedAt);
-    windowTiming(
-      "startup restore timeline",
-      `activation → catalog adopted ${s.catalogAdoptedAt === null ? "unknown" : since(s.catalogAdoptedAt)} → restore started ${since(restoreStartedAt)} → restore finished ${since(finishedAt)} (${cohort.size} rows${phasesText === "" ? "" : `; ${phasesText}`})`,
-      "info",
-    );
-    // The pass can no longer publish anything, so a later click only has to read
-    // the panels it left behind.
-    if (s.startupRestore?.settled === settled) s.startupRestore = null;
-    // What only paints Sessions has been waiting for this moment (`startupRestoreOver`); its reads start now, after the
-    // restore's own PowerShell and not in competition with it.
-    s.startupRestoreOver.resolve();
-    // Rows that said "Restoring" for the length of the pass are re-derived now.
-    refreshLauncher();
-    // Start the full runtime proof now that the attach work is done, so the first terminal or fallback launch
-    // finds it ready (a Chat on Bun does not wait for it). It is a readiness check only: no broker, host or session starts.
-    void s.ptyGate?.client();
-    // Records a window that is gone left behind for rows no window here holds are settled once, after the restore and
-    // off its critical path: it starts nothing and never changes a run intent (`SessionIndex.sweepGoneRecords`).
-    const sweep = setTimeout(() => {
-      void index.sweepGoneRecords({
-        reconciler: s.reconciler,
-        ownedHere: tabId => cohort.has(tabId) || inLocalRecoveryCohort(index, tabId),
-      }).then(report => {
-        if (report.cleared.length > 0 || report.orphanClaims > 0) {
-          log.info(`records of ended processes: cleared the recorded process of ${report.cleared.length} row(s), deleted ${report.orphanClaims} unclaimed claim file(s)`);
-          if (report.cleared.length > 0) refreshLauncher();
-        }
-      }).catch(error => log.warn(`records of ended processes: the pass failed: ${messageOf(error)}`));
-    }, GONE_RECORD_SWEEP_DELAY_MS);
-    sweep.unref();
-  });
-}
-
-/**
- * The rows this window is responsible for restoring at activation.
- *
- * A row qualifies when this window already runs a host for it, or when VS Code handed this window an editor for its
- * conversation (`editorMembership`/the serializer path bound a panel for it) and the window is home for the row: a `running`
- * row returns to the window that last drove it, so a session moved to another window is not brought back here by the editor
- * the move left behind (ADR-0080, amendment of 2026-10-21). Everything else in the profile-wide index is another window's
- * or another workspace's row: visible, and deliberately inert until the user opens it.
- */
-function localRecoveryCohort(index: SessionIndex): ReadonlySet<string> {
-  const cohort = new Set<string>();
-  for (const entry of index.list()) {
-    if (inLocalRecoveryCohort(index, entry.tabId)) cohort.add(entry.tabId);
-  }
-  return cohort;
-}
-
-/**
- * Whether one row is this window's responsibility at activation (see {@link localRecoveryCohort}). The cohort, the
- * `restoring` fact of the launcher rows while the pass is pending and the gone-record sweep's `ownedHere` all use it, so a
- * row restored elsewhere is neither shown as restoring here nor swept as owned here.
- */
-function inLocalRecoveryCohort(index: SessionIndex, tabId: string): boolean {
-  if (index.hasLiveHost(tabId)) return true;
-  if (!hasLocalEditorFor(tabId)) return false;
-  const entry = index.get(tabId);
-  return entry === null || homeAllows(entry, owningWindowUri()?.toString() ?? null);
-}
-
-/**
  * Show the saved history of a restored editor of a session another window is home for, read-only, taking no claim and
  * starting nothing (ADR-0080, amendment of 2026-10-21).
  */
@@ -4942,27 +4805,8 @@ async function showRestoredOutsideHome(index: SessionIndex, tabId: string): Prom
   if (s.sessionRuntime.conversations.kindOf(tabId) === "view-only") attachChatRoutes(tabId, true);
 }
 
-/** How long display-only reads wait for the startup restore before they run anyway. */
-const STARTUP_DEFER_CAP_MS = 120_000;
-
 /** How long after the startup restore the installed broker tree is hashed to check the build's record of its digest. */
 const PACKAGED_TREE_CHECK_DELAY_MS = 10_000;
-
-/** How long after the startup restore the records of ended processes no window holds are settled. */
-const GONE_RECORD_SWEEP_DELAY_MS = 20_000;
-
-/**
- * `null` when the window's startup restore is over; otherwise a promise that settles when it is. Reads that only paint the
- * Sessions view (a row's ownership observation, the Processes poll, the session-lease probe) wait for it: each of them
- * starts PowerShell processes (identity readings, helper staging, the lease probe), and on a loaded machine those compete
- * with the very restore the user is waiting for (reload timing analysis, 2026-10-13). A row the restore covers reads
- * "Restoring" meanwhile and any other row "Checking". An explicit action (a click, an open, a stop, Kill All, Refresh)
- * never waits: it reads fresh facts itself.
- */
-function startupRestoreOver(): Promise<void> | null {
-  const s = windowState();
-  return s.startupRestorePending || s.startupRestore !== null ? s.startupRestoreOver.promise : null;
-}
 
 /**
  * `attachRpcHost` with the startup pass's kept broker connections, while the pass runs: a row whose reconcile kept the connection
@@ -4970,7 +4814,7 @@ function startupRestoreOver(): Promise<void> | null {
  * dials its own.
  */
 function attachRpcWithRestoreParking(input: Parameters<typeof attachRpcHost>[0]) {
-  const parking = windowState().restoreParking;
+  const parking = windowState().catalogAdoption.restoreParking();
   return attachRpcHost(parking === null ? input : { ...input, parking });
 }
 
@@ -5034,147 +4878,6 @@ function createProfileCatalog(context: vscode.ExtensionContext): Promise<OpenedC
 }
 
 /**
- * Import the predecessor build's folder list once, then let the shared catalog drive this window.
- *
- * The import runs before any startup restoration and before commands resolve their rows.
- * It reads the predecessor's catalog without touching it and commits only the registered
- * folder list together with a ledger entry ({@link importPredecessorFolders}).
- */
-function startCatalogActivation(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders, catalog: CatalogStore): void {
-  const s = windowState();
-  const settled = (async () => {
-    try {
-      await importPredecessorFolders({
-        store: catalog,
-        storageDir: context.globalStorageUri.fsPath,
-        log,
-      });
-    } catch (error) {
-      log.warn(`predecessor import: the pass failed and nothing was changed by it: ${messageOf(error)}`);
-    }
-    try {
-      await adoptCatalogChanges(index, folders, { startup: true });
-    } catch (error) {
-      log.warn(`catalog: the recovered records could not be adopted: ${messageOf(error)}`);
-    }
-    await vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, false);
-    // Staging is not awaited here. The restore re-adopts running sessions, and only the step that proves a Chat's
-    // host control needs the staged pipe helper: `LocalHostControl` waits for it itself (`stagedHelper`), so the
-    // catalog adoption, the restore start, the broker attach and the panel binding never queue behind the security
-    // reads staging performs.
-    // Only now is the index complete: the pass restores exactly the rows this window
-    // is responsible for, and a click on any other row is an explicit open.
-    s.catalogAdoptedAt = Date.now();
-    startStartupRestore(context, index);
-    // The private backup of the catalog starts with the restore: its first copy is seeded a few seconds later, after the restore.
-    s.catalogRecovery?.startBackup();
-    watchCatalogForWindow(index, folders);
-  })();
-  s.catalogReady = settled.then(
-    () => undefined,
-    () => undefined,
-  );
-}
-
-/**
- * Wait until the catalog has been read, so a row resolved during activation is
- * resolved against everything this window can recover.
- */
-async function ensureCatalogReady(): Promise<void> {
-  const s = windowState();
-  await s.catalogReady;
-}
-
-/** One request to adopt the newest catalog revision; requests folded into one run are merged. */
-interface CatalogAdoptionRequest {
-  readonly index: SessionIndex;
-  readonly folders: LauncherFolders;
-  readonly startup: boolean;
-}
-
-/**
- * Adopt whichever records another window committed since this window last read.
- *
- * The catalog's revision — not this window's cached projection — decides what
- * changed, so a missed watcher event costs a refresh rather than correctness. This
- * restores nothing and launches nothing: adopting another window's rows only makes
- * them visible here, and their ownership is proven exactly as before when the user
- * opens one.
- *
- * Adoptions never overlap: a request that arrives while one runs waits for a single follow-up that starts after it, so
- * the promise this returns always covers a read made after the call.
- */
-function adoptCatalogChanges(
-  index: SessionIndex,
-  folders: LauncherFolders,
-  options: { readonly startup?: boolean } = {},
-): Promise<void> {
-  const s = windowState();
-  s.catalogAdoption ??= new CoalescedRun<CatalogAdoptionRequest>(
-    request => trackOperation("catalog adoption", () => adoptCatalogChangesMarked(request.index, request.folders, { startup: request.startup })),
-    (pending, next) => ({ index: next.index, folders: next.folders, startup: pending.startup || next.startup }),
-  );
-  return s.catalogAdoption.request({ index, folders, startup: options.startup === true });
-}
-
-async function adoptCatalogChangesMarked(
-  index: SessionIndex,
-  folders: LauncherFolders,
-  options: { readonly startup?: boolean } = {},
-): Promise<void> {
-  const s = windowState();
-  const catalog = s.catalogStore;
-  if (catalog === undefined) return;
-  // A foreign revision is read from disk; this window's *own* commit already advanced the
-  // projection, and its consumers may still hold the snapshot their change was derived
-  // from. Adopting either way is what keeps a derived delta honest: a merged-in record
-  // must reach the consumer before that consumer's next write, or its next delta would
-  // read as a deliberate removal of the other window's row.
-  await catalog.refresh();
-  s.claimFileNames.clear();
-  // The small stores cache their own projection, so a foreign revision must drop it
-  // before the next read: a stale broker table would send an attach to a transport
-  // another window has already moved.
-  s.brokerSlots?.reload();
-  s.shellSlots?.reload();
-  const adopted = await index.refreshFromStore();
-  // A durable role is what authorizes this window's editor, so a demotion another window
-  // committed (or this window recorded for another slot) must reach the local registry
-  // and therefore the bridge/pipeline eligibility of the affected editor.
-  reconcileLocalRoles(index);
-  const foldersChanged = await folders.reload();
-  if (adopted.adopted.length > 0 || adopted.removed.length > 0 || foldersChanged || options.startup === true) {
-    log.info(
-      `catalog: adopted ${adopted.adopted.length} new row(s), dropped ${adopted.removed.length}, ` +
-        `kept ${adopted.kept.length} in use${foldersChanged ? ", and the folder list changed" : ""}`,
-    );
-  }
-  refreshLauncher();
-}
-
-/**
- * Watch the catalog so another window's write is visible here without a restart.
- *
- * The watcher is a hint: it never restores, launches, claims or stops anything, and a
- * failure to watch only costs a refresh on the next focus or explicit refresh.
- */
-function watchCatalogForWindow(index: SessionIndex, folders: LauncherFolders): void {
-  const s = windowState();
-  const catalog = s.catalogStore;
-  if (catalog === undefined) return;
-  const notify = (): void => {
-    void adoptCatalogChanges(index, folders).catch(error => log.warn(`catalog: another window's change could not be adopted: ${messageOf(error)}`));
-  };
-  // The watcher reports *other* windows' commits; this window's own commits publish the
-  // same signal through the store, so a record another window's change was merged into
-  // reaches the consumer that owns it before that consumer writes again.
-  const unsubscribe = catalog.onChange(notify);
-  s.context?.subscriptions.push({ dispose: unsubscribe });
-  const dispose = startCatalogWatch(catalog.paths, notify, { onError: detail => log.warn(detail) });
-  s.context?.subscriptions.push({ dispose });
-}
-
-/**
  * Reconcile, launch and publish every row the activation cohort covers.
  *
  * The pass is pinned to `cohort` rather than to whatever the index holds when it
@@ -5183,7 +4886,6 @@ function watchCatalogForWindow(index: SessionIndex, folders: LauncherFolders): v
  * sweeping it into the batch as well would put two restores on one row.
  */
 async function restoreTabs(
-  context: vscode.ExtensionContext,
   index: SessionIndex,
   cohort: ReadonlySet<string>,
   /** Filled as the pass goes, for the timeline line that closes it; a caller that does not report it passes none. */
@@ -5218,7 +4920,7 @@ async function restoreTabs(
     phases.beforeMs = passStartedAt - tabsStartedAt;
     report = await s.sessionRuntime.restore({ cohort });
     // Every row has attached or been refused: a connection a reconcile kept and no attach claimed is closed now, not at the pass's end.
-    const unclaimed = s.restoreParking?.release() ?? 0;
+    const unclaimed = s.catalogAdoption.restoreParking()?.release() ?? 0;
     if (unclaimed > 0) windowTiming("restore pass", `closed ${unclaimed} kept broker connection(s) no attach claimed`);
     phases.restoreAllMs = Date.now() - passStartedAt;
     phases.rowsMs = report.rowsMs;
@@ -8879,10 +8581,7 @@ function launcherFacts(tabId: string): SessionLauncherFacts {
     launching: s.indexForBridge?.isLaunching(tabId) ?? false,
     stopping: s.stoppingTabs.has(tabId),
     outcome: s.outcomes.get(tabId) ?? null,
-    restoring:
-      s.startupRestore !== null
-        ? s.startupRestore.cohort.has(tabId)
-        : s.startupRestorePending && s.indexForBridge !== null && inLocalRecoveryCohort(s.indexForBridge, tabId),
+    restoring: s.catalogAdoption.startupCovers(s.indexForBridge, tabId),
     activity:
       activity === null
         ? null
@@ -8924,7 +8623,7 @@ async function launcherOwnershipFacts(index: SessionIndex, tabId: string, option
   const heldElsewhere = claim !== null && claim.verifiable && claim.holderId !== null &&
     claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, s.routing.registry());
   const heldHere = claim !== null && claim.holderId === index.claimHolder.id && await claimHolderMayBeAlive(claim);
-  if (options.fresh !== true && !heldElsewhere) await startupRestoreOver();
+  if (options.fresh !== true && !heldElsewhere) await s.catalogAdoption.startupRestoreOver();
   const pid = await s.sessionRuntime.verifiedWriterPid(tabId, { display: true });
   const sessionFile = index.get(tabId)?.sessionFile ?? null;
   const externalOmp = !heldElsewhere && !heldHere && pid === null && sessionFile !== null && s.externalLeases !== null &&
@@ -11610,7 +11309,7 @@ function shellSerializerFor(context: vscode.ExtensionContext, index: SessionInde
  * retries a staging or self-check failure that a later attempt would not hit — latching it
  * for the window's lifetime would make a surviving broker look unavailable to every
  * ownership recheck after a full VS Code restart. The proof is started in the background
- * once the startup restore pass settles (see {@link startStartupRestore}), so a launch
+ * once the startup restore pass settles (see {@link CatalogAdoption.startRestore}), so a launch
  * seldom waits for it.
  */
 async function brokerClient(): Promise<PtyBrokerClient | null> {
