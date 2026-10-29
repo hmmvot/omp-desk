@@ -975,7 +975,10 @@ export class SessionIndex {
 				// holds: nothing about it changed, so there is nothing to read, compose or report.
 				if (baseRows !== null && existing !== undefined) {
 					const known = baseRows.get(candidate.tabId);
-					if (known !== undefined && sameSharedRow(known, candidate)) continue;
+					if (known !== undefined && sameSharedRow(known, candidate)) {
+						if (this.#lifecycle.busy(candidate.tabId) || this.#live.has(candidate.tabId)) kept.push(candidate.tabId);
+						continue;
+					}
 				}
 				const shared = cloneSharedEntry(candidate);
 				if (existing === undefined) {

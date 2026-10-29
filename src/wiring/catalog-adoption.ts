@@ -211,7 +211,7 @@ export function registerCatalogAdoption(deps: CatalogAdoptionDeps): CatalogAdopt
 			// A durable role is what authorizes this window's editor, so a demotion another window
 			// committed (or this window recorded for another slot) must reach the local registry
 			// and therefore the bridge/pipeline eligibility of the affected editor.
-			if (adopted !== null && (all || adopted.bindingsChanged)) deps.reconcileLocalRoles(index);
+			if (adopted !== null && adopted.bindingsChanged) deps.reconcileLocalRoles(index);
 			const foldersChanged = folderList ? await folders.reload() : false;
 			if (adopted !== null && (adopted.adopted.length > 0 || adopted.removed.length > 0) || foldersChanged || request.startup) {
 				log.info(

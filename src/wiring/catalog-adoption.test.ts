@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it, mock } from "node:test";
 import { setImmediate } from "node:timers/promises";
-import { BROKER_SLOTS_KEY, mergeBrokerSlotRecords } from "../host/broker-slots.ts";
+import { BROKER_SLOTS_KEY, createBrokerSlotStore, createHostSlotId, mergeBrokerSlotRecords } from "../host/broker-slots.ts";
 import { catalogPaths, createCatalogStore } from "../host/profile-catalog.ts";
 import type { CatalogRefresh, CatalogStore } from "../host/profile-catalog.ts";
 import { SESSION_INDEX_STORAGE_KEY, SessionIndex, mergeSessionIndexRecords } from "../host/session-index.ts";
@@ -51,6 +51,8 @@ async function world(rowCount: number) {
 
 	const store = await open();
 	const real = new SessionIndex({ store, claimStorageDir: claims });
+	/** This window's broker slot table over the real catalog, as the extension builds it. */
+	const broker = createBrokerSlotStore(store);
 	const count = { reads: 0, brokerReloads: 0, shellReloads: 0, folderReloads: 0, repaints: 0, roles: 0, claimDrops: 0 };
 	const sessionPasses: { options: { changedOnly?: boolean } | undefined; result: SessionIndexRefresh }[] = [];
 	let failNextSessionPass = false;
@@ -86,7 +88,7 @@ async function world(rowCount: number) {
 		log: recordingLogger(lines),
 		activatedAt: Date.now(),
 		catalog: () => catalog,
-		brokerSlots: () => ({ reload: () => { count.brokerReloads++; } }),
+		brokerSlots: () => ({ reload: () => { count.brokerReloads++; broker.reload(); } }),
 		shellSlots: () => ({ reload: () => { count.shellReloads++; } }),
 		dropClaimFileNames: () => { count.claimDrops++; },
 		reconcileLocalRoles: () => { count.roles++; },
@@ -115,7 +117,7 @@ async function world(rowCount: number) {
 	};
 	reset();
 	return {
-		adoption, index, folders, peer, peerStore, tabs, count, sessionPasses, lines, subscriptions, real, root, reset,
+		adoption, index, folders, peer, peerStore, tabs, count, sessionPasses, lines, subscriptions, real, broker, root, reset,
 		failNextSessionPass: () => { failNextSessionPass = true; },
 		/** What the watcher does on a signal of the catalog's files: read the document, and let the notification drive the adoption. */
 		async signal(): Promise<void> {
@@ -186,6 +188,34 @@ describe("adopting what a catalog commit changed", () => {
 		await w.signal();
 		assert.equal(w.count.reads, 1);
 		assert.deepEqual([w.count.repaints, w.count.brokerReloads, w.count.folderReloads, w.sessionPasses.length], [0, 0, 0, 0]);
+	});
+
+	it("shows this window the foreign row its own commit merged in", async () => {
+		const w = await world(4);
+		// Another window changes a row this window has not adopted; this window then commits something unrelated, and the
+		// transaction merges the other window's change into the committed record.
+		await w.peer.setRunIntent(w.tabs[0]!, "running");
+		await w.real.recordConversationState(w.tabs[1]!, { lastSeenReplyId: "event-z" });
+		await w.adoption.idle();
+		assert.equal(w.real.get(w.tabs[0]!)?.runIntent, "running", "the merged-in change reached this window's row");
+		assert.ok(w.sessionPasses.some(pass => pass.result.touched.includes(w.tabs[0]!)), "the key-aware pass read that row");
+		assert.equal(w.count.reads, 0, "and no document was read for it");
+	});
+
+	it("takes the committed broker table, not its own desired one, after an own broker commit that merged a foreign mapping", async () => {
+		const w = await world(4);
+		const foreign = createHostSlotId();
+		const own = createHostSlotId();
+		const peerBroker = createBrokerSlotStore(w.peerStore);
+		assert.equal(w.broker.forConversation(w.tabs[1]!), null, "this window loaded its table");
+		await peerBroker.record({ slot: foreign, editor: null, conversation: w.tabs[0]! });
+		// This window records its own host; the commit merges the other window's mapping in, and the store takes its desired table
+		// as its view only after the commit returns. The adoption must come after that.
+		assert.deepEqual(await w.broker.record({ slot: own, editor: null, conversation: w.tabs[1]! }), { ok: true });
+		await w.adoption.idle();
+		assert.equal(w.broker.forConversation(w.tabs[1]!), own);
+		assert.equal(w.broker.forConversation(w.tabs[0]!), foreign, "the foreign mapping is visible, so a repoint cannot overwrite it");
+		assert.equal(w.count.brokerReloads, 1);
 	});
 
 	it("adopts this window's own commit without reading the document again", async () => {
