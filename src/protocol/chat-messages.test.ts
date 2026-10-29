@@ -140,6 +140,7 @@ describe("parseChatHostMessage", () => {
 			{ id: "d1", method: "select", title: "Pick", options: [{ label: "a" }, { label: "b", description: "second" }] },
 			{ id: "d2", method: "confirm", title: "Sure?", message: "really" },
 			{ id: "d3", method: "input", title: "Name", placeholder: "x" },
+			{ id: "d3s", method: "input", title: "Token", placeholder: "paste it", secret: true },
 			{ id: "d4", method: "editor", title: "Edit", prefill: "text" },
 		];
 		for (const request of requests) {
@@ -152,6 +153,7 @@ describe("parseChatHostMessage", () => {
 			{ id: "d6", method: "select", title: "t", options: [{ label: 5 }] },
 			{ id: "d7", method: "select", title: "t", options: "a" },
 			{ id: "d8", method: "confirm", title: "t" },
+			{ id: "d9", method: "input", title: "t", secret: "yes" },
 		]) {
 			assert.equal(parseChatHostMessage({ type: "omp:chat-ui-request", epoch: EPOCH, request }), null, JSON.stringify(request));
 		}

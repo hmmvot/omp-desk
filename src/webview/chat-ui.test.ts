@@ -1764,6 +1764,26 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('[data-tool-name=\"ask\"] .codicon-loading, [data-tool-name=\"ask\"] .omp-chip')"), null);
 		});
 
+		await t.test("an input dialog OMP marks secret is a masked one-line field that Enter submits, and a plain input stays a text area", async () => {
+			await reset("secret-input");
+			await ui.evaluate("window.ui.push({working:true,settled:false,uiRequests:[{id:'token',method:'input',title:'API token',placeholder:'paste it',secret:true}]})");
+			await ui.wait("document.querySelector('.omp-ask input[type=password]')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask textarea')"), null, "no text area draws the typed value");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask input[type=password]').getAttribute('autocomplete')"), "off");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask input[type=password]').placeholder"), "paste it");
+			await ui.evaluate("document.querySelector('.omp-ask input[type=password]').focus()");
+			await ui.call("Input.insertText", { text: "hunter2" });
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask').textContent.includes('hunter2')"), false, "the typed value is never drawn as text");
+			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-ui-response')");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-ui-response').map(message=>message.response)"), [{ id: "token", value: "hunter2" }]);
+			await ui.evaluate("window.ui.push({working:true,settled:false,uiRequests:[{id:'name',method:'input',title:'Name'}]})");
+			await ui.wait("document.querySelector('.omp-ask textarea')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-ask input[type=password]')"), null, "an input that is not secret keeps the text area");
+			await ui.evaluate("window.ui.push({uiRequests:[],working:false,settled:true})");
+		});
+
 		await t.test("ask options give the label the whole row with the description below it; a multi-question ask has one tab per question, keeps answers across switches, switches by keyboard and submits every answer once", async () => {
 			await reset("ask-tabs");
 			const questions = `[

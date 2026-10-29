@@ -207,6 +207,8 @@ interface AskEditorProps {
 	prefill: string | undefined;
 	placeholder: string | undefined;
 	disabled: boolean;
+	/** An `input` dialog OMP marks `secret`: a masked one-line field, never a textarea, so the typed value is not drawn (OMP 18.13.2). */
+	secret?: boolean;
 	onSubmit(value: string): void;
 }
 
@@ -215,36 +217,58 @@ interface AskEditorProps {
  * fresh draft from `prefill` while a re-render never clobbers a half-typed one.
  * Submits verbatim — whitespace-only responses are intentional.
  */
-function AskEditor({ prefill, placeholder, disabled, onSubmit }: AskEditorProps): ReactNode {
+function AskEditor({ prefill, placeholder, disabled, secret = false, onSubmit }: AskEditorProps): ReactNode {
 	const [draft, setDraft] = useState(prefill ?? "");
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
 	const sendWith = useSendWith();
 
 	useLayoutEffect(() => {
-		autosize(textareaRef.current, 1);
-	}, [draft]);
+		if (!secret) autosize(textareaRef.current, 1);
+	}, [draft, secret]);
 
 	return (
 		<>
-			<textarea
-				ref={textareaRef}
-				className="omp-textarea"
-				value={draft}
-				onChange={event => setDraft(event.target.value)}
-				onKeyDown={event => {
-					if (isComposerSendKey(event.nativeEvent, composingRef.current, sendWith)) {
-						event.preventDefault();
-						onSubmit(draft);
-					}
-				}}
-				onCompositionStart={onCompositionStart}
-				onCompositionEnd={onCompositionEnd}
-				placeholder={placeholder ?? "Type your response"}
-				rows={1}
-				spellCheck={false}
-				disabled={disabled}
-			/>
+			{secret ? (
+				<input
+					type="password"
+					className="omp-input"
+					value={draft}
+					autoComplete="off"
+					spellCheck={false}
+					onChange={event => setDraft(event.target.value)}
+					onKeyDown={event => {
+						// One line: a plain Enter submits whatever the send-key setting says (it only decides how a textarea breaks lines).
+						if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !composingRef.current && !event.nativeEvent.isComposing) {
+							event.preventDefault();
+							onSubmit(draft);
+						}
+					}}
+					onCompositionStart={onCompositionStart}
+					onCompositionEnd={onCompositionEnd}
+					placeholder={placeholder ?? "Type your response"}
+					disabled={disabled}
+				/>
+			) : (
+				<textarea
+					ref={textareaRef}
+					className="omp-textarea"
+					value={draft}
+					onChange={event => setDraft(event.target.value)}
+					onKeyDown={event => {
+						if (isComposerSendKey(event.nativeEvent, composingRef.current, sendWith)) {
+							event.preventDefault();
+							onSubmit(draft);
+						}
+					}}
+					onCompositionStart={onCompositionStart}
+					onCompositionEnd={onCompositionEnd}
+					placeholder={placeholder ?? "Type your response"}
+					rows={1}
+					spellCheck={false}
+					disabled={disabled}
+				/>
+			)}
 			<div className="omp-composer-actions" style={{ marginTop: 6 }}>
 				<button type="button" className="omp-btn omp-btn--primary" disabled={disabled} onClick={() => onSubmit(draft)}>
 					Submit
@@ -302,6 +326,7 @@ function DialogBody({
 				<AskEditor
 					key={request.id}
 					prefill={undefined}
+					secret={request.secret === true}
 					placeholder={request.placeholder}
 					disabled={false}
 					onSubmit={value => onRespond({ id: request.id, value })}

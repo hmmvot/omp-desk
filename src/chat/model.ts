@@ -171,7 +171,7 @@ export interface ChatAskAnswer {
 export type ChatUiRequest =
 	| { id: string; method: "select"; title: string; options: readonly ChatUiOption[] }
 	| { id: string; method: "confirm"; title: string; message: string }
-	| { id: string; method: "input"; title: string; placeholder?: string }
+	| { id: string; method: "input"; title: string; placeholder?: string; secret?: true }
 	| { id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean }
 	| { id: string; method: "ask"; title: string; questions: readonly ChatAskQuestion[]; timeoutMs?: number; expiresAt?: number };
 
@@ -1504,10 +1504,13 @@ export function normalizeUiRequest(frame: Record<string, unknown>): ChatUiReques
 		}
 		case "confirm":
 			return { id, method: "confirm", title: cleanTitle, message: typeof frame.message === "string" ? clampText(frame.message, 16_000) : "" };
-		case "input":
-			return typeof frame.placeholder === "string"
+		case "input": {
+			const request: Extract<ChatUiRequest, { method: "input" }> = typeof frame.placeholder === "string"
 				? { id, method: "input", title: cleanTitle, placeholder: clampText(frame.placeholder, 500) }
 				: { id, method: "input", title: cleanTitle };
+			// OMP 18.13.2: `ctx.ui.input(..., { secret: true })` asks for a masked field; the typed value is never drawn.
+			return frame.secret === true ? { ...request, secret: true } : request;
+		}
 		case "editor": {
 			const request: ChatUiRequest = { id, method: "editor", title: cleanTitle };
 			if (typeof frame.prefill === "string") request.prefill = clampText(frame.prefill, 256 * 1024);

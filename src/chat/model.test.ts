@@ -316,6 +316,15 @@ describe("dialogs", () => {
 		});
 	});
 
+	it("keeps OMP's secret hint of an input dialog (18.13.2) and drops it for anything but `true`", () => {
+		assert.deepEqual(normalizeUiRequest({ id: "s", method: "input", title: "Token", placeholder: "p", secret: true }), { id: "s", method: "input", title: "Token", placeholder: "p", secret: true });
+		assert.deepEqual(normalizeUiRequest({ id: "s", method: "input", title: "Token", secret: true }), { id: "s", method: "input", title: "Token", secret: true });
+		for (const secret of [false, "true", 1, null, undefined]) {
+			assert.deepEqual(normalizeUiRequest({ id: "s", method: "input", title: "Token", secret }), { id: "s", method: "input", title: "Token" }, String(secret));
+		}
+		assert.deepEqual(normalizeUiRequest({ id: "e", method: "editor", title: "Edit", secret: true }), { id: "e", method: "editor", title: "Edit" }, "only an input dialog can be secret");
+	});
+
 	it("normalizes an ask frame into one request carrying every question and refuses keys it cannot answer faithfully", () => {
 		const frame = {
 			id: "a1",

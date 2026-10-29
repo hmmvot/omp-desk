@@ -771,7 +771,9 @@ export function parseChatUiRequest(value: unknown): ChatUiRequest | null {
 		case "input": {
 			const placeholder = optionalText(value.placeholder, 2_000);
 			if (placeholder === null) return null;
-			return placeholder === undefined ? { id, method: "input", title } : { id, method: "input", title, placeholder };
+			if (value.secret !== undefined && typeof value.secret !== "boolean") return null;
+			const request: Extract<ChatUiRequest, { method: "input" }> = placeholder === undefined ? { id, method: "input", title } : { id, method: "input", title, placeholder };
+			return value.secret === true ? { ...request, secret: true } : request;
 		}
 		case "editor": {
 			const prefill = optionalText(value.prefill, MAX_CHAT_UI_VALUE_LENGTH);
