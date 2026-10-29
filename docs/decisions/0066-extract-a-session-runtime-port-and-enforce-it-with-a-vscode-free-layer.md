@@ -49,6 +49,8 @@ Reasons: it is the smallest change that makes the extension's second shape check
 - [ADR-0015](0015-serialize-tab-lifecycle-through-one-gate.md), [ADR-0029](0029-report-uncontained-pty-tree-stops-as-unknown.md), [ADR-0035](0035-distinguish-a-recorded-process-from-a-later-occupant-of-its-pid.md), [ADR-0037](0037-stop-a-recorded-broker-owned-managed-child-without-a-chat-runtime.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0050](0050-retain-uncertain-input-and-confirm-exact-file-restart.md), [ADR-0055](0055-expose-vscode-capabilities-as-rpc-host-tools-run-by-the-owning-window.md), [ADR-0059](0059-clear-chat-in-place-through-a-desk-registered-omp-command.md), [ADR-0060](0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md): invariants kept.
 - [ADR-0030](0030-watch-the-verified-owning-vscode-process-for-shell-grace.md), [ADR-0056](0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md): decisions a daemon would later have to reverse in part; untouched here.
 
+The shared facts a session daemon would have to keep are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect

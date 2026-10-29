@@ -104,6 +104,8 @@ Behaviour tests in `runtime-assets.test.ts` (`verification passes`): a staging t
 - [ADR-0005: Preload the control key before OMP startup](0005-preload-control-key-before-omp-startup.md) — the launch shape whose module path is now a staged copy.
 - [Architecture](../architecture.md) — relay and host-control description updated with this change.
 
+The staged-runtime store is one of the shared facts indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect (independent, read-only; three passes) — evidence: the reviewer's final report, which records `package_id: ADR-0012`, `stage: final-review-after-attempt-5-convergence`, `recommendation: accept after corrections`, per-finding dispositions, the escalation items F3b's decision came from, and the SHA-256 of every file it reviewed — fingerprints as of that review, not of this revision, since those files have changed since (`docs/decisions/0012-…: a2e9c9e5…`, `src/runtime-assets.ts: de0f029d…`, `src/host/private-storage.ts: 21d6eab8…`, `src/relay/manager.ts: 52eca4c6…`, `src/relay/server.ts: 8c1f80ea…`, `src/host/control-client.ts: 3a0f410f…`, `src/extension.ts: 4e2ee3bc…`, `docs/architecture.md: e5467986…`). The later independent security pass is recorded below

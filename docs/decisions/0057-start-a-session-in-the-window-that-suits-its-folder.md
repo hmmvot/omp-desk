@@ -54,6 +54,8 @@ This record places a **launch**; it is unchanged. Where a *running* session retu
 - [Start a session in the window that suits its folder](../designs/2026-10-10-launch-in-folder-window.md)
 - [ADR-0056](0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md), [ADR-0045](0045-derive-window-folders-per-window-and-pin-with-identity-ids.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0034](0034-store-sessions-in-one-profile-catalog.md)
 
+Window requests are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect

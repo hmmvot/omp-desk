@@ -50,6 +50,8 @@ Amendments: ADR-0034 is amended in its treatment of a degraded catalog (a missin
 - [Design: the catalog survives a wipe of VS Code's extension storage](../designs/2026-10-21-catalog-survives-a-storage-wipe.md).
 - [ADR-0034](0034-store-sessions-in-one-profile-catalog.md), [ADR-0006](0006-host-generated-key-peer-verified-pipe.md), [ADR-0012](0012-run-child-process-entries-from-staged-copies.md), [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0060](0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md), [ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md).
 
+Backup and restore are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent reviewer agent (read-only; verified the claims against the code), 2026-10-21.

@@ -204,6 +204,8 @@ A real profile's catalog ledger held two records in which a retained `runIntent:
 [ADR-0031](0031-reattach-a-surviving-managed-host-through-its-broker.md),
 [ADR-0033](0033-release-stale-ownership-of-an-unidentified-launch-explicitly.md).
 
+Who writes each shared fact and under which rule is indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent architect (corrective review in round 2 and delta review in round 3).

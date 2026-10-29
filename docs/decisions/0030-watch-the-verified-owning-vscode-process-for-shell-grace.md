@@ -40,6 +40,8 @@ Installed isolated acceptance on 2026-10-08 armed the real staged helper under a
 
 [Sessions design](../designs/2026-09-26-sessions-and-in-tab-terminal.md), [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md), [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md), [ADR-0012](0012-run-child-process-entries-from-staged-copies.md).
 
+Shell slots are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent architect (initial and corrective passes).

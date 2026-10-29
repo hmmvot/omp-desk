@@ -53,6 +53,8 @@ The operation MUST NOT signal a numeric PID, infer descendants or whole-tree ter
 - [ADR-0031](0031-reattach-a-surviving-managed-host-through-its-broker.md) — recorded broker transport, authenticated attach and no fallback.
 - [ADR-0036](0036-release-an-unresolvable-launch-attempt-explicitly.md) — separate explicit release of unresolved ownership.
 
+Broker records are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent architect (v3 review, one corrective re-check and a final corrective confirmation).

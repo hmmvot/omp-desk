@@ -192,6 +192,8 @@ Status of this amendment: **accepted** after independent architecture review (20
 - [ADR-0033](0033-release-stale-ownership-of-an-unidentified-launch-explicitly.md) — the explicit-only
   mechanism this record's sibling extends.
 
+The shared facts whose liveness rests on this rule are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect (independent)

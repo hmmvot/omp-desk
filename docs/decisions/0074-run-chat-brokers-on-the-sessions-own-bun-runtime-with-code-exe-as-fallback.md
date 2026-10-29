@@ -70,6 +70,8 @@ Decision 4's pipe-only check first ran when a Chat started, inside that start. A
 - [Design: Chat brokers on the session's own Bun runtime](../designs/2026-10-14-chat-brokers-on-the-session-bun-runtime.md)
 - ADR-0006, ADR-0012, ADR-0024, ADR-0031, ADR-0032, ADR-0038, ADR-0054, ADR-0062
 
+The shared PTY check result is indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect (two independent read-only passes)

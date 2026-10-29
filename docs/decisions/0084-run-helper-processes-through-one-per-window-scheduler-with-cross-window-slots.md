@@ -32,6 +32,8 @@ One `HelperScheduler` per window, with two classes (`visible`: on screen now, bo
 
 [Design](../designs/2026-10-28-helper-process-scheduler.md); [ADR-0060](0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md) for the earlier use of the startup restore gate by display-only reads; [ADR-0047](0047-host-stats-in-the-existing-pty-broker.md) for the PTY slot lock's other user.
 
+The cross-window slots are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: `reviewer` agent (independent, read-only, one pass, covering this ADR and its design)

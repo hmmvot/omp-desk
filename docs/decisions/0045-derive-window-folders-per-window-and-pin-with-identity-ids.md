@@ -42,6 +42,8 @@ Derive per window; pin under the identity-derived id (first option). `windowFold
 - [Window folders, pinned folders and the "Open in another window" row state](../designs/2026-10-07-window-folders-and-other-window-state.md)
 - [ADR-0020](0020-separate-folder-navigation-from-session-ownership.md), [ADR-0025](0025-bind-editor-slots-to-current-conversations.md), [ADR-0034](0034-store-sessions-in-one-profile-catalog.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md)
 
+The claims and registry rows this record reads are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect

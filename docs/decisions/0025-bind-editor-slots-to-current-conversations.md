@@ -63,6 +63,8 @@ This replaces ADR-0020's **explicit-only folder and open-editor-only child proje
 
 [Sessions and in-tab terminal design](../designs/2026-09-26-sessions-and-in-tab-terminal.md); [ADR-0018](0018-resume-imported-history-under-extension-claims.md); [ADR-0019](0019-vscode-owns-omp-editor-persistence.md); [ADR-0020](0020-separate-folder-navigation-from-session-ownership.md); [ADR-0026](0026-best-effort-native-tui-switch-ownership.md).
 
+Editor-slot bindings, as one of the shared facts written by several windows, are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture review
 
 - Reviewer: independent architect (initial review, re-review and latest review).

@@ -56,6 +56,8 @@ Requirements: no PowerShell start on a recurring, restore or launch path (a fold
 - [Native Windows checks without PowerShell](../designs/2026-10-15-native-windows-checks-without-powershell.md)
 - [ADR-0012](0012-run-child-process-entries-from-staged-copies.md), [ADR-0054](0054-verify-private-windows-storage-with-security-identifiers.md), [ADR-0046](0046-probe-omp-session-lease-for-external-writers.md), [ADR-0035](0035-distinguish-a-recorded-process-from-a-later-occupant-of-its-pid.md), [ADR-0006](0006-host-generated-key-peer-verified-pipe.md), [ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md), [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md)
 
+The runtime store the module is staged in is indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect (`NativeChecksArchReview`), 2026-10-15. First verdict: accept with required changes (M1–M7 material, O1–O10 optional).

@@ -49,6 +49,8 @@ A recorded pid no process runs under (`process.kill(pid, 0)` answers `ESRCH`: no
 
 Supersedes ADR-0033 and ADR-0036 and the explicit-release mechanism in their recovery designs. Narrows ownership uncertainty and absence prerequisites in ADR-0011, 0018, 0021, 0025, 0027, 0031, 0034, 0035, 0037 and 0038, and the Sessions, broker-restart, post-reboot, workspace-independent and lost-room/RPC-UI designs. Their exact transport, stop truthfulness, file transaction and editor identity requirements survive. Product and implemented architecture link here rather than reinstating historical refusal clauses.
 
+Claims and the holder-alive verdicts are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: separate architect (independent)

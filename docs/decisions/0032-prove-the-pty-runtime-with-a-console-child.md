@@ -196,6 +196,8 @@ Status of this amendment: **accepted** (2026-10-28).
 [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md);
 [broker-aware restart recovery design](../designs/2026-09-27-broker-aware-restart-recovery.md).
 
+The shared PTY check result is indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect (read-only review of the draft ADR against the current source and the linked

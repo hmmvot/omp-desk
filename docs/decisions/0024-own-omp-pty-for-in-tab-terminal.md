@@ -51,6 +51,8 @@ Apply ADR-0012 to the new broker **and its entire native runtime load tree**: st
 
 [Sessions and in-tab terminal design](../designs/2026-09-26-sessions-and-in-tab-terminal.md); [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md); [ADR-0030](0030-watch-the-verified-owning-vscode-process-for-shell-grace.md); [ADR-0002](0002-local-collab-gui-native-omp.md); [ADR-0012](0012-run-child-process-entries-from-staged-copies.md); [ADR-0019](0019-vscode-owns-omp-editor-persistence.md); [ADR-0023](0023-reconnect-surviving-webviews-through-an-authenticated-bridge.md).
 
+Shell slots, broker records and the other shared facts this record touches are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture review
 
 - Reviewer: independent architect (initial review, re-review, shell-close review and corrective confirmation).

@@ -39,6 +39,8 @@ This is a **deliberate, user-approved gap**, not satisfaction of ADR-0024's posi
 
 [Sessions design](../designs/2026-09-26-sessions-and-in-tab-terminal.md), [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md), [ADR-0012](0012-run-child-process-entries-from-staged-copies.md).
 
+Shell slots and broker records are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent architect (initial review and three corrective passes).

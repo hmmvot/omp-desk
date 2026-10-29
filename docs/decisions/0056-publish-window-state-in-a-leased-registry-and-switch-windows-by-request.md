@@ -72,6 +72,8 @@ A switch that failed with "the window did not respond" came from one cause: the 
 - [One Sessions view across every window of the profile](../designs/2026-10-10-multi-window-sessions.md)
 - [ADR-0045](0045-derive-window-folders-per-window-and-pin-with-identity-ids.md), [ADR-0034](0034-store-sessions-in-one-profile-catalog.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md)
 
+The registry, the requests and the exact-run fence are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect

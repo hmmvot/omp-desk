@@ -59,6 +59,8 @@ The holder of a Move keeps a read-only editor for the session (above). At the ne
 - [Move a live session to this window](../designs/2026-10-20-move-session-to-this-window.md)
 - [ADR-0055](0055-expose-vscode-capabilities-as-rpc-host-tools-run-by-the-owning-window.md), [ADR-0066](0066-extract-a-session-runtime-port-and-enforce-it-with-a-vscode-free-layer.md), [ADR-0031](0031-reattach-a-surviving-managed-host-through-its-broker.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0056](0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md), [ADR-0057](0057-start-a-session-in-the-window-that-suits-its-folder.md), [ADR-0060](0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md)
 
+The three authorities a handover moves, and the run fence, are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: architect

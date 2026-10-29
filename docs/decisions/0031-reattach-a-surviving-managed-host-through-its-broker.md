@@ -113,6 +113,8 @@ At a full application restart a surviving managed host is re-adopted by **its ho
 [ADR-0025](0025-bind-editor-slots-to-current-conversations.md),
 [ADR-0030](0030-watch-the-verified-owning-vscode-process-for-shell-grace.md).
 
+Broker records, broker slots and the startup cohort are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent architect (broker-aware restart recovery design review).

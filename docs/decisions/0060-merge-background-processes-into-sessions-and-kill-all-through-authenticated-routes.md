@@ -83,6 +83,8 @@ The Terminals group may also hold rows Desk has no record for: a broker of this 
 - [Processes view design](../designs/2026-10-07-processes-view.md) (separate view, poll rule and "no stop-everything action" superseded)
 - [ADR-0015](0015-serialize-tab-lifecycle-through-one-gate.md), [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md), [ADR-0037](0037-stop-a-recorded-broker-owned-managed-child-without-a-chat-runtime.md), [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0056](0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md), [ADR-0057](0057-start-a-session-in-the-window-that-suits-its-folder.md)
 
+Broker records, window requests and the other shared facts this record touches are indexed in [Architecture: Cross-window invariants](../architecture.md#cross-window-invariants).
+
 ## Architecture Review
 
 - Reviewer: independent `architect` agent, six rounds (2026-10-11), read-only static review.
