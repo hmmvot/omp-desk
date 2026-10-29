@@ -111,7 +111,7 @@ test("reports a non-test file in a directory that is not a layer", () => {
       "src/other/o.test.ts": "export const t = 1;\n",
     },
     [
-      "src/other/o.ts:1 is in a directory that is not a layer (shared, chat, protocol, host, broker, omp, views, webview, runtime, wiring)",
+      "src/other/o.ts:1 is in a directory that is not a layer (shared, chat, protocol, wire, host, broker, omp, views, webview, runtime, wiring)",
     ],
   );
 });
@@ -180,6 +180,29 @@ test("exempts test stubs by name segment only", () => {
       "src/host/latest-stub.ts": 'import { y } from "../webview/y.ts";\nexport const d = y;\n',
     },
     ["src/host/latest-stub.ts:1 imports src/webview/y.ts: host may not import webview"],
+  );
+});
+
+test("the wire layer is the process-boundary contract: host, broker and omp import it, it imports none of them, and broker and omp do not import host", () => {
+  check(
+    {
+      "src/extension.ts": 'import { h } from "./host/h.ts";\nexport const e = h;\n',
+      "src/wire/w.ts": 'import { l } from "../host/leaf.ts";\nimport { m } from "../broker/leaf.ts";\nimport { n } from "../omp/leaf.ts";\nimport { p } from "../protocol/p.ts";\nexport const w = [l, m, n, p];\n',
+      "src/host/h.ts": 'import { w } from "../wire/w.ts";\nimport { b } from "../broker/b.ts";\nimport { o } from "../omp/o.ts";\nexport const h = [w, b, o];\n',
+      "src/broker/b.ts": 'import { l } from "../host/leaf.ts";\nimport { w } from "../wire/w.ts";\nexport const b = [l, w];\n',
+      "src/omp/o.ts": 'import { l } from "../host/leaf.ts";\nimport { w } from "../wire/w.ts";\nexport const o = [l, w];\n',
+      "src/host/leaf.ts": "export const l = 1;\n",
+      "src/broker/leaf.ts": "export const m = 1;\n",
+      "src/omp/leaf.ts": "export const n = 1;\n",
+      "src/protocol/p.ts": "export const p = 1;\n",
+    },
+    [
+      "src/broker/b.ts:1 imports src/host/leaf.ts: broker may not import host",
+      "src/omp/o.ts:1 imports src/host/leaf.ts: omp may not import host",
+      "src/wire/w.ts:1 imports src/host/leaf.ts: wire may not import host",
+      "src/wire/w.ts:2 imports src/broker/leaf.ts: wire may not import broker",
+      "src/wire/w.ts:3 imports src/omp/leaf.ts: wire may not import omp",
+    ],
   );
 });
 
