@@ -39,6 +39,19 @@ Amended 2026-10-12, after the implementation review: the table first let `src/ex
 
 Amended 2026-10-30: `src/extension-harness.ts` is the second non-test file allowed directly under `src/`. It is a test-only entry: `src/extension-lifecycle.test.ts` bundles it in place of `extension.ts` to reach the private functions of the entry (it replaces a string of access code that the test used to append to `extension.ts`'s source). It imports `extension.ts`, which no layer file may, so `scripts/check-imports.mjs` treats it as a test file for the layer rule (the cycle rule still applies) and adds one rule: no non-test file may import it, so no production module comes to depend on it directly. Any other non-test file directly under `src/` stays a violation.
 
+Amended 2026-10-30 (the `wire` layer): the table above is the table before this amendment; the table now in force is below. `host`, `broker` and `omp` could import each other, which hid that the contracts between the processes lived in `src/host/` (the audit of 2026-10-21, finding A10: twelve `broker`→`host` and seventeen `omp`→`host` module edges, among them into the PTY and control wire protocols, the IPC framing, the identity proofs, the Win32 binding and the OMP settings core). A new layer `src/wire/` now holds the process-boundary contracts and the `vscode`-free primitives they rest on (30 modules and the 26 tests beside them, moved with `git mv`: `pty-protocol`, `pty-ipc`, `pty-identity`, `pty-registry`, `pty-owner-watch`, `control-protocol`, `win32-native`, `win32-security`, `foreign-access`, `call-lane`, `windows-powershell`, `atomic-file`, `local-fs`, `private-storage`, `runtime-assets`, `native-file-observation`, `native-file-observation-storage`, `file-evidence-reader`, `native-activity`, `notifications`, `native-module-failure`, `loop-gauge`, `loop-lag`, `tool-spawn-trace`, `checkout-root`, `session-folder`, `omp-settings-core`, `omp-settings-worker`, `inventory/inventory-model`, `inventory/inventory-runtime`). The set is the closure of what `broker`, `omp` and their tests imported from `host`, plus what those modules import in turn; four of them (`checkout-root`, `session-folder`, `omp-settings-worker`, `inventory/inventory-runtime`) have only test importers in `broker` and `omp`, and moved so that those tests and the modules above keep reading one layer rather than reaching back into `host`. None of them refers to `vscode`. The check forbids `broker`→`host`, `omp`→`host` and every edge from `wire` into `host`, `broker` or `omp`.
+
+| Layer | May import (2026-10-30) |
+| --- | --- |
+| `src/wire/` | `protocol`, `chat`, `shared` |
+| `src/host/` | `wire`, `broker`, `omp`, `protocol`, `chat`, `shared` |
+| `src/broker/`, `src/omp/` | `wire`, each other, `protocol`, `chat`, `shared` (not `host`) |
+| `src/views/` | `wire`, `host`, `protocol`, `chat`, `shared` |
+| `src/runtime/` | `wire`, `host`, `broker`, `omp`, `protocol`, `chat`, `shared` |
+| `src/wiring/` | `wire`, `host`, `views`, `runtime`, `protocol`, `chat`, `shared` |
+
+`shared`, `chat`, `protocol`, `webview` and `extension.ts` are unchanged (`extension.ts` may import `wire`). The checker's test suite has a case that rejects a `broker`→`host` and an `omp`→`host` import and every `wire` import of a process layer. Records and designs that name `src/host/<module>` for one of the moved modules were true on their date and are not rewritten (`docs/architecture.md` and the designs' path mentions follow the move): read `src/wire/<module>` for them.
+
 Reasons: the check lives where the build already fails and costs nothing to run; the rule is small enough to read in the script; moving a module to the lowest layer both sides may see is the one remedy for every violation, so the fix is never a configuration exception.
 
 ### Consequences
@@ -62,3 +75,9 @@ Reasons: the check lives where the build already fails and costs nothing to run;
 - Reviewer: reviewer (independent, read-only, 2026-10-30; a separate agent that did not write the amendment)
 - Outcome: accepted with three minor changes, all applied: the layer-table row names the harness, the wording says "non-test" file, and the containment claim says "directly" because the rule checks direct edges only
 - Notes: no functional finding; the checker matched the amendment, and the harness is in neither the extension bundle nor the VSIX (`esbuild.mjs` names only `src/extension.ts`, `.vscodeignore` excludes `src/**`)
+
+### Amendment 2026-10-30 (wire layer)
+
+- Reviewer: reviewer (independent, read-only, 2026-10-30; a separate agent that did not write the amendment)
+- Outcome: accepted with four required changes, all applied: the closure statement counts the importing tests and names the four modules that have only test importers, the architecture module lists name `src/wire/` for the moved modules, "the table above" is the table before this amendment, and the test count is 26 for 30 modules; the A10 evidence is qualified as "module edges, among them"
+- Notes: the amendment's table matched `ALLOWED` row by row; the 30 modules match the renames of the move commit; no moved module imports `vscode` or, outside tests, `host`, `broker` or `omp`; no other record's body changed. The wire layer's `vscode`-freedom is verified by inspection, not by the checker

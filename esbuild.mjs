@@ -311,7 +311,7 @@ function ptyPrebuildDirectories() {
  */
 async function copyPtyRuntime() {
   const helpers = ["pty-owner-watch.ps1"];
-  const sources = helpers.map(name => ({ name, path: path.join("src", "host", name) }));
+  const sources = helpers.map(name => ({ name, path: path.join("src", "wire", name) }));
   const destination = path.join("out", "pty");
   const packageRoot = path.join("node_modules", "node-pty");
   const packageTarget = path.join(destination, "node_modules", "node-pty");
