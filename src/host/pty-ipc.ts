@@ -52,12 +52,20 @@ import {
 } from "./pty-protocol.ts";
 import type { RpcChannelTraffic } from "../protocol/rpc.ts";
 import { startLoopLagGauge } from "./loop-gauge.ts";
+import { meterMs } from "./loop-lag.ts";
 
 /** Host the broker binds and the client dials. Nothing else is reachable. */
 export const PTY_LOOPBACK_HOST = "127.0.0.1";
 
 /** Default bound for the opening handshake. */
 export const PTY_HANDSHAKE_TIMEOUT_MS = 10_000;
+
+/**
+ * A handshake deadline whose timer fires this much later than it was due proves that this process did not run for that long
+ * (a blocked event loop runs its due timers before it reads a socket), not that the broker was silent: the broker's answer may
+ * already wait in the socket. The dial is then given one fresh bound.
+ */
+const HANDSHAKE_LOOP_BLOCKED_MS = 250;
 
 /** Largest queue of unflushed frame bytes one connection may accumulate. */
 export const PTY_MAX_SEND_QUEUE_BYTES = 8 * 1024 * 1024;
@@ -393,6 +401,7 @@ function pumpFrames(state: ConnectionState): void {
 			const chunkMs = performance.now() - chunkStart;
 			meter.busyMs += chunkMs;
 			if (chunkMs > meter.maxChunkMs) meter.maxChunkMs = chunkMs;
+			meterMs("broker socket read", chunkMs);
 		}
 	});
 	state.socket.on("error", error => closeConnection(state, `socket error: ${error.message}`));
@@ -652,11 +661,23 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 	socket.once("error", error => failure.reject(new PtyProtocolError(`the broker socket failed: ${error.message}`)));
 	socket.once("close", () => failure.reject(new PtyProtocolError("the broker closed the connection before the handshake")));
 	const timeoutMs = options.timeoutMs ?? PTY_HANDSHAKE_TIMEOUT_MS;
-	const timer = setTimeout(() => {
-		socket.destroy();
-		failure.reject(new PtyProtocolError(`the broker did not complete the handshake within ${timeoutMs}ms`));
-	}, timeoutMs);
-	timer.unref();
+	let timer: NodeJS.Timeout | undefined;
+	let blockedForMs = 0;
+	const armDeadline = (): void => {
+		const dueAt = performance.now() + timeoutMs;
+		timer = setTimeout(() => {
+			const lateMs = performance.now() - dueAt;
+			if (blockedForMs === 0 && lateMs >= HANDSHAKE_LOOP_BLOCKED_MS) {
+				blockedForMs = Math.round(lateMs);
+				armDeadline();
+				return;
+			}
+			socket.destroy();
+			failure.reject(new PtyProtocolError(`the broker did not complete the handshake within ${timeoutMs}ms${blockedForMs === 0 ? "" : ` (this process's event loop had been blocked for ${blockedForMs} ms)`}`));
+		}, timeoutMs);
+		timer.unref();
+	};
+	armDeadline();
 	try {
 		await Promise.race([ready.promise, failure.promise]);
 		const hello: PtyHello = {
@@ -732,7 +753,9 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 			answer.resolve(helloOk);
 		};
 		socket.on("data", onAnswer);
-		const helloOk = await answer.promise;
+		// The failure is raced here too: a deadline that expires or a socket that closes after the hello is sent rejects only
+		// `failure`, and waiting on the answer alone would leave this dial (and whoever awaits it) pending for ever.
+		const helloOk = await Promise.race([answer.promise, failure.promise]);
 		const key = derivePtySessionKey(options.token, clientNonce, helloOk.serverNonce);
 		const leftover = reader.take();
 		const state: ConnectionState = {
@@ -769,6 +792,8 @@ export async function connectPtyBroker(options: PtyConnectOptions): Promise<PtyC
 		return makeConnection<PtyBrokerFrame>(state, timings);
 	} catch (error) {
 		lag.stop();
+		// A failed dial leaves no socket behind (the deadline and a peer's close already ended theirs).
+		socket.destroy();
 		throw error;
 	} finally {
 		clearTimeout(timer);

@@ -64,6 +64,8 @@ export class FakeRpcChannel implements RpcChannel {
 	childStderrTail: string | undefined;
 	writeError: RpcWriteErrorCode | null = null;
 	attachError = false;
+	/** How many of the next attaches never settle, as one whose dial or request was never answered does. */
+	attachHangs = 0;
 	autoRespond = true;
 	disconnects = 0;
 	/** The attach answer's `hostToolRetention`: `false` models a broker from an earlier build. */
@@ -155,6 +157,10 @@ export class FakeRpcChannel implements RpcChannel {
 	async attach(request: { sinceSeq: number; reclaimInput?: InputReclaim }): Promise<RpcAttachResult> {
 		this.attachRequests.push(request.sinceSeq);
 		this.reclaimRequests.push(request.reclaimInput);
+		if (this.attachHangs > 0) {
+			this.attachHangs -= 1;
+			return await new Promise<RpcAttachResult>(() => undefined);
+		}
 		if (this.attachError) throw new Error("attach refused");
 		this.#attached = true;
 		let owned = false;

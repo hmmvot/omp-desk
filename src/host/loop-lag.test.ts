@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { type LoggedLine, recordingLogger } from "../shared/logger.ts";
-import { EventLoopLagMonitor, startLoopLagMonitor, trackOperation } from "./loop-lag.ts";
+import { EventLoopLagMonitor, meterMs, meterWork, startLoopLagMonitor, trackOperation } from "./loop-lag.ts";
 
 /** A monitor on a clock the test moves: `tick(ms)` is "the timer fired `ms` after the previous sample". */
 function monitor(options: { thresholdMs?: number; tickMs?: number } = {}) {
@@ -168,5 +168,70 @@ describe("event loop lag monitor", () => {
 
 	it("runs an unmarked operation untouched when no monitor is started", () => {
 		assert.equal(trackOperation("nothing watching", () => 7), 7);
+	});
+
+	it("runs metered work untouched and records nothing when no monitor is started", () => {
+		assert.equal(meterWork("nothing watching", () => 7), 7);
+		meterMs("nothing watching", 5);
+		assert.throws(() => meterWork("nothing watching", () => { throw new Error("boom"); }), /boom/);
+	});
+
+	describe("metered work too frequent to mark", () => {
+		it("totals each name over the stall: how many times, how long in all, the longest", () => {
+			const m = monitor();
+			for (const ms of [300, 400, 200]) m.instance.meter("broker socket read", ms);
+			m.instance.meter("chat output delivery", 50);
+			m.tick(100 + 900);
+			assert.match(m.lines[0]!, /no marked Desk operation was running; metered Desk work in that time: broker socket read 3 times, 900 ms in all, longest 400 ms; chat output delivery 1 times, 50 ms in all, longest 50 ms/);
+			assert.match(m.lines[0]!, /what they do not cover ran outside Desk's metered work/);
+		});
+
+		it("sits next to the marked operations of the stall", () => {
+			const m = monitor();
+			m.instance.begin("still running");
+			m.instance.meter("chat reply flush", 120);
+			m.tick(100 + 900);
+			assert.match(m.lines[0]!, /marked Desk operations in that time: still running \(running 1000 ms\); metered Desk work in that time: chat reply flush 1 times, 120 ms in all, longest 120 ms/);
+		});
+
+		it("counts only the stretch before the sample: work from an earlier, quiet stretch is not blamed for the next stall", () => {
+			const m = monitor();
+			m.instance.meter("broker socket read", 40);
+			m.tick(100);
+			m.instance.meter("chat output delivery", 10);
+			m.tick(100 + 900);
+			assert.doesNotMatch(m.lines[0]!, /broker socket read/);
+			assert.match(m.lines[0]!, /chat output delivery 1 times, 10 ms in all/);
+		});
+
+		it("adds nothing to a stall in which no metered work ran", () => {
+			const m = monitor();
+			m.tick(100 + 800);
+			assert.doesNotMatch(m.lines[0]!, /metered Desk work/);
+		});
+
+		// On the platform's real timer, like the stall test above: the metered callback's own duration reaches the line.
+		it("measures a synchronous callback on the host-wide monitor, also one that throws", async () => {
+			const lines: string[] = [];
+			const stalled = Promise.withResolvers<void>();
+			const record = (line: string): void => {
+				lines.push(line);
+				if (line.startsWith("event loop blocked")) stalled.resolve();
+			};
+			const stop = startLoopLagMonitor({ error: record, warn: record, info: record, debug: record, trace: record });
+			try {
+				const hold = (): void => {
+					const until = Date.now() + 350;
+					while (Date.now() < until) { /* hold the thread */ }
+				};
+				assert.equal(meterWork("busy metered", () => { hold(); return 3; }), 3);
+				assert.throws(() => meterWork("busy metered", () => { hold(); throw new Error("boom"); }), /boom/);
+				await stalled.promise;
+			} finally {
+				stop();
+			}
+			const line = lines.find(text => text.startsWith("event loop blocked"));
+			assert.match(line ?? "", /busy metered 2 times, (?:69\d|7\d\d|8\d\d) ms in all, longest (?:34\d|3[5-9]\d|4\d\d) ms/, lines.join("\n"));
+		});
 	});
 });

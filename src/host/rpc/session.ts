@@ -147,6 +147,7 @@ import {
 	type HistorySnapshot,
 } from "./history-reader.ts";
 import { proveContinuation, type ContinuationProof } from "../session-chain.ts";
+import { meterWork } from "../loop-lag.ts";
 
 /** Time and timers; injectable so the state machine is deterministic in tests. */
 export interface RpcSessionTimers {
@@ -213,6 +214,10 @@ export interface RpcSessionOptions {
 	reconcileAttempts?: number;
 	/** Delays between reattach attempts after a broker link drop; the list length is the attempt budget. */
 	reattachDelaysMs?: readonly number[];
+	/** How long one attach may take before the attempt is abandoned and retried (default 45 s); a channel that never answers must not hold the session. */
+	attachTimeoutMs?: number;
+	/** How long a reattach may keep trying before the tab shows the failure and its Reconnect (default 120 s). */
+	reattachBudgetMs?: number;
 	/** Delays between background retries of a failed (recoverable) session; the list length is the retry budget. */
 	autoRecoveryDelaysMs?: readonly number[];
 	/** How often the liveness watchdog looks at the silence of a live connection. */
@@ -580,6 +585,13 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const DEFAULT_RECONCILE_INTERVAL_MS = 500;
 const DEFAULT_RECONCILE_ATTEMPTS = 3;
 const DEFAULT_REATTACH_DELAYS_MS: readonly number[] = [250, 500, 1_000, 2_000, 4_000, 5_000, 5_000, 5_000, 5_000, 5_000];
+/**
+ * The channel's attach (its own dial is bounded at 10 s, its reconnect at 30 s and each request at 15 s) is abandoned after this long, so
+ * a channel that never answers ends the attempt into a retry instead of leaving the tab on "Connecting" with no line in the log.
+ */
+const DEFAULT_ATTACH_TIMEOUT_MS = 45_000;
+/** A reattach whose attempts have taken this long ends in the failed state (with Reconnect) whatever the attempt list still holds. */
+const DEFAULT_REATTACH_BUDGET_MS = 120_000;
 /** After the reattach budget is spent: slower background retries of a recoverable failure, then the page's Reconnect is the only way. */
 const DEFAULT_AUTO_RECOVERY_DELAYS_MS: readonly number[] = [3_000, 10_000, 30_000, 60_000, 60_000, 60_000];
 const DEFAULT_WATCHDOG_INTERVAL_MS = 15_000;
@@ -622,13 +634,15 @@ const MESSAGE_ID_TAIL = /,"messageId":"([^"\\]{1,64})"\}$/;
  */
 export const MESSAGE_UPDATE_PACE_MS = 33;
 
-/** A failure that ends the establish sequence with a bounded code. */
+/** A failure that ends the establish sequence with a bounded code; `detail` is for the log only, never for a page. */
 class SessionFailure extends Error {
 	readonly code: RpcErrorCode;
-	constructor(code: RpcErrorCode) {
+	readonly detail: string | undefined;
+	constructor(code: RpcErrorCode, detail?: string) {
 		super(code);
 		this.name = "SessionFailure";
 		this.code = code;
+		this.detail = detail;
 	}
 }
 
@@ -876,6 +890,8 @@ export class RpcSession {
 	#linesSinceAttach = 0;
 	/** The broker connection ended on its own: the reattach log says so. */
 	#lossyAttach = false;
+	/** The attach being established found the broker's ring past this window's cursor: lines between the two are gone. */
+	#ringGap = false;
 	/** While the link is stalled: the timer that re-reads the session file so the reply shows. */
 	#fileFollowTimer: unknown = null;
 	#offPathFromFileLogged = false;
@@ -2274,7 +2290,9 @@ export class RpcSession {
 			await this.#establish("start");
 		} catch (error) {
 			await this.#paint;
-			this.#fail(error instanceof SessionFailure ? error.code : "attach-failed");
+			const code = error instanceof SessionFailure ? error.code : "attach-failed";
+			this.#options.log?.warn(`the first attach failed: ${code}${error instanceof SessionFailure && error.detail !== undefined ? ` (${error.detail})` : ""}`);
+			this.#fail(code);
 		} finally {
 			this.#establishing = false;
 		}
@@ -2313,6 +2331,28 @@ export class RpcSession {
 		}
 	}
 
+	/** The channel's attach, ended after {@link DEFAULT_ATTACH_TIMEOUT_MS}: a channel that never answers fails the attempt, not the session's progress. */
+	#attachWithinDeadline(request: { readonly sinceSeq: number; readonly reclaimInput?: InputReclaim }): Promise<RpcAttachResult> {
+		const limit = this.#options.attachTimeoutMs ?? DEFAULT_ATTACH_TIMEOUT_MS;
+		const { promise, resolve, reject } = Promise.withResolvers<RpcAttachResult>();
+		let expired = false;
+		const timer = this.#timers.setTimeout(() => {
+			expired = true;
+			reject(new Error(`the broker did not complete the attach within ${limit} ms`));
+		}, limit);
+		this.#channel.attach(request).then(
+			result => {
+				this.#timers.clearTimeout(timer);
+				if (!expired) resolve(result);
+			},
+			(error: unknown) => {
+				this.#timers.clearTimeout(timer);
+				if (!expired) reject(error);
+			},
+		);
+		return promise;
+	}
+
 	async #establish(kind: "start" | "reattach"): Promise<void> {
 		this.#flushUpdates();
 		this.#frames.reset();
@@ -2320,17 +2360,21 @@ export class RpcSession {
 		this.#linesSinceAttach = 0;
 		this.#setPhase(kind === "start" ? "starting" : "attaching", null);
 		let result: RpcAttachResult;
+		this.#ringGap = false;
 		try {
-			result = await this.#channel.attach({ sinceSeq: this.#lastSeq, ...(kind === "start" && this.#options.reclaimInput !== undefined ? { reclaimInput: this.#options.reclaimInput } : {}) });
-		} catch {
-			throw new SessionFailure("attach-failed");
+			result = await this.#attachWithinDeadline({ sinceSeq: this.#lastSeq, ...(kind === "start" && this.#options.reclaimInput !== undefined ? { reclaimInput: this.#options.reclaimInput } : {}) });
+		} catch (error) {
+			throw new SessionFailure("attach-failed", error instanceof Error ? error.message : undefined);
 		}
 		if (this.#disposed) return;
 		this.#hostRetention = result.hostToolRetention;
 		this.#hostAttach += 1;
 		this.#hostCalls?.attached(result.latestSeq);
 		if (result.hostCallOverflow) this.#options.log?.warn("The broker holds more unanswered host tool calls than its soft limit; none was dropped.");
-		if (result.truncated) this.#agentLiveness.forgetLast();
+		if (result.truncated) {
+			this.#agentLiveness.forgetLast();
+			if (kind === "reattach") this.#ringGap = true;
+		}
 		const forced = result.lastForcedClose;
 		this.#lossyAttach = false;
 		if (kind === "reattach" || result.truncated) {
@@ -2405,7 +2449,7 @@ export class RpcSession {
 		const liveAgents = this.#agentLiveness.last;
 		if (liveAgents !== null && !this.#disposed && !this.#ended) this.#applyLocal({ type: "agents_liveness", agents: liveAgents });
 		await askDialogPromise;
-		await this.#reconcileEntries();
+		await this.#reconcileAfterAttach();
 		if (this.#disposed || this.#ended) return;
 		this.#model = setChatPhase(this.#model, "live", null, this.#options.reclaimInput !== undefined && !this.#channel.inputOwned ? INPUT_HELD_ELSEWHERE : null);
 		this.#autoRecoveryAttempt = 0;
@@ -2419,6 +2463,26 @@ export class RpcSession {
 		// The first baseline reads OMP's side-question history once (the session is new after an extension-host restart, OMP's history is not);
 		// a later resync reads it again only to repair a question that was answering. A failure leaves the channel unread.
 		if (!this.#btw.loaded || this.#btw.running) void this.#btw.history();
+	}
+
+	/**
+	 * The entries a (re)attach owes the model. After a ring gap (the broker no longer holds the lines between this window's cursor
+	 * and its oldest) OMP wrote an unknown number of entries meanwhile, each with its tool output: asking OMP for them as one
+	 * `get_entries` answer queues them through the consumer the broker just closed as too slow and parses them in one turn on the
+	 * thread that was too slow. The session file already holds them: the window is re-read from it, and OMP is asked only for what
+	 * the file trails by.
+	 */
+	async #reconcileAfterAttach(): Promise<void> {
+		const gap = this.#ringGap;
+		this.#ringGap = false;
+		if (gap) {
+			const fromFile = await this.#rebuildFromDisk();
+			if (this.#disposed || this.#ended) return;
+			this.#options.log?.info(fromFile
+				? `the broker's lines in between are gone: the transcript was re-read from the session file (last entry ${this.#cursor ?? "unknown"})`
+				: "the broker's lines in between are gone and the session file could not serve the transcript: OMP is asked for the entries after the cursor instead");
+		}
+		await this.#reconcileEntries();
 	}
 
 	/**
@@ -2706,7 +2770,7 @@ export class RpcSession {
 					const wait = Math.max(0, MESSAGE_UPDATE_PACE_MS - (this.#timers.now() - this.#updatesFlushedAt));
 					this.#updateTimer = this.#timers.setTimeout(() => {
 						this.#updateTimer = null;
-						this.#flushUpdates();
+						meterWork("chat reply flush", () => this.#flushUpdates());
 					}, wait);
 				}
 				return;
@@ -3284,7 +3348,7 @@ export class RpcSession {
 		const leafId = typeof data.leafId === "string" ? data.leafId : null;
 		this.#needFull = false;
 		if (since === null) {
-			this.#applyFull(raw, leafId);
+			meterWork("chat transcript rebuild", () => this.#applyFull(raw, leafId));
 			return;
 		}
 		const live = { leafId, lastId: typeof raw.at(-1)?.id === "string" ? raw.at(-1)!.id as string : since };
@@ -3928,6 +3992,11 @@ export class RpcSession {
 	}
 
 	#emit(output: RpcSessionOutput): void {
+		// Handing the output to the chat runtime also posts it to every page: that is where a large frame's serialization lands.
+		meterWork("chat output delivery", () => this.#deliver(output));
+	}
+
+	#deliver(output: RpcSessionOutput): void {
 		for (const listener of [...this.#listeners]) {
 			try {
 				listener(output);
@@ -4075,20 +4144,27 @@ export class RpcSession {
 		this.#failAllCommands("unconfirmed");
 		this.#clearReconcileTimer();
 		const delays = this.#options.reattachDelaysMs ?? DEFAULT_REATTACH_DELAYS_MS;
+		const budgetMs = this.#options.reattachBudgetMs ?? DEFAULT_REATTACH_BUDGET_MS;
 		try {
 			for (let attempt = 0; attempt <= delays.length; attempt += 1) {
 				if (this.#ended || this.#disposed) return;
 				this.#establishing = true;
+				const attemptStartedAt = this.#timers.now();
 				try {
 					await this.#establish("reattach");
 					this.#options.log?.info(`reattach finished in ${this.#timers.now() - startedAt} ms after ${attempt + 1} attempt${attempt === 0 ? "" : "s"}: last seq ${fromSeq} to ${this.#lastSeq}, ${this.#linesSinceAttach} lines received, phase ${this.#model.phase}`);
 					return;
 				} catch (error) {
-					if (!(error instanceof SessionFailure) || error.code !== "attach-failed" || attempt === delays.length) {
-						this.#options.log?.warn(`reattach failed after ${this.#timers.now() - startedAt} ms and ${attempt + 1} attempt${attempt === 0 ? "" : "s"}: ${error instanceof SessionFailure ? error.code : "attach-failed"}`);
-						this.#fail(error instanceof SessionFailure ? error.code : "attach-failed");
+					const code: RpcErrorCode = error instanceof SessionFailure ? error.code : "attach-failed";
+					const cause = error instanceof SessionFailure ? error.detail : error instanceof Error ? error.message : undefined;
+					const spent = this.#timers.now() - startedAt;
+					const attempts = `${attempt + 1} attempt${attempt === 0 ? "" : "s"}`;
+					if (!(error instanceof SessionFailure) || code !== "attach-failed" || attempt === delays.length || spent >= budgetMs) {
+						this.#options.log?.warn(`reattach failed after ${spent} ms and ${attempts}: ${code}${cause === undefined ? "" : ` (${cause})`}`);
+						this.#fail(code);
 						return;
 					}
+					this.#options.log?.info(`reattach attempt ${attempt + 1} failed after ${this.#timers.now() - attemptStartedAt} ms${cause === undefined ? "" : ` (${cause})`}; trying again in ${delays[attempt]} ms`);
 				} finally {
 					this.#establishing = false;
 				}

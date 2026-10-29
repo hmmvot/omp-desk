@@ -8,9 +8,12 @@
  *
  * What was running is answered from operation marks. {@link EventLoopLagMonitor.run} wraps an entry point (a command, a
  * catalog refresh) and records how long its *synchronous* part took before its first `await`, which is the part that
- * blocks; the late timer then reports every mark that overlapped the stall. A stall with no overlapping mark is itself an
- * answer: it was not Desk code that carries a mark (another extension, VS Code, or the machine being starved of CPU, which the
- * reported process CPU time tells apart). Nothing here imports `vscode`.
+ * blocks; the late timer then reports every mark that overlapped the stall. Work that runs thousands of times a second (a read
+ * of the broker socket, a reply's coalesced update) cannot be marked one by one: {@link EventLoopLagMonitor.meter} adds its
+ * duration to a total per name, and the late timer reports those totals for the stretch it was late, so a stall made of many
+ * short callbacks names the path and says how much of the stall it covers. A stall with no overlapping mark and no metered work
+ * is itself an answer: it was not Desk code that carries a mark (another extension, VS Code, or the machine being starved of CPU,
+ * which the reported process CPU time tells apart). Nothing here imports `vscode`.
  */
 import { performance } from "node:perf_hooks";
 import type { Logger } from "../shared/logger";
@@ -62,6 +65,13 @@ interface Mark {
 	syncMs: number | null;
 }
 
+/** What one metered name has used since the previous sample. */
+interface Metered {
+	count: number;
+	totalMs: number;
+	maxMs: number;
+}
+
 /** A gap this long is the machine sleeping, not the thread being busy. */
 const SUSPEND_MS = 10 * 60_000;
 /** Finished marks are kept this long, to name an operation that ended inside a stall. */
@@ -82,6 +92,7 @@ export class EventLoopLagMonitor {
 	#lastSplit: CpuSplit | null;
 	readonly #active = new Set<Mark>();
 	readonly #finished: Mark[] = [];
+	readonly #metered = new Map<string, Metered>();
 	#lastTick: number;
 	#lastCpu: number;
 
@@ -147,6 +158,21 @@ export class EventLoopLagMonitor {
 		return result;
 	}
 
+	/**
+	 * Add `ms` of work to the total of `name` for the stretch before the next sample. For a path too frequent to mark: the
+	 * caller measures its own duration (the work is inclusive of anything it calls, so two names can overlap).
+	 */
+	meter(name: string, ms: number): void {
+		const entry = this.#metered.get(name);
+		if (entry === undefined) {
+			this.#metered.set(name, { count: 1, totalMs: ms, maxMs: ms });
+			return;
+		}
+		entry.count += 1;
+		entry.totalMs += ms;
+		if (ms > entry.maxMs) entry.maxMs = ms;
+	}
+
 	/** The timer's body: report when it fired later than a busy-free thread would have. Exposed for tests. */
 	sample(): void {
 		const at = this.#now();
@@ -159,11 +185,13 @@ export class EventLoopLagMonitor {
 		const before = this.#lastSplit;
 		this.#lastSplit = split;
 		const lag = at - from - this.#tickMs;
+		const metered = [...this.#metered];
+		this.#metered.clear();
 		if (lag < this.#thresholdMs || lag > SUSPEND_MS) return;
 		const modes = split === null || before === null
 			? ""
 			: `; user ${Math.round(split.userMs - before.userMs)} ms, system ${Math.round(split.systemMs - before.systemMs)} ms, page faults ${Math.round(split.pageFaults - before.pageFaults)}`;
-		const text = `event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms${modes}): ${this.#describe(from, at)}`;
+		const text = `event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms${modes}): ${this.#describe(from, at, metered)}`;
 		if (lag >= LOOP_LAG_WARN_MS) this.#log.warn(text);
 		else this.#log.debug(text);
 	}
@@ -190,11 +218,15 @@ export class EventLoopLagMonitor {
 		}
 	}
 
-	#describe(from: number, at: number): string {
+	#describe(from: number, at: number, metered: ReadonlyArray<readonly [string, Metered]>): string {
 		const cutoff = at - KEEP_FINISHED_MS;
 		while (this.#finished.length > 0 && (this.#finished[0]?.end ?? 0) < cutoff) this.#finished.shift();
 		const overlapping = [...this.#finished.filter(mark => (mark.end ?? 0) >= from), ...this.#active];
+		const work = metered.length === 0
+			? ""
+			: `metered Desk work in that time: ${metered.map(([name, entry]) => `${name} ${entry.count} times, ${Math.round(entry.totalMs)} ms in all, longest ${Math.round(entry.maxMs)} ms`).join("; ")}`;
 		if (overlapping.length === 0) {
+			if (work.length > 0) return `no marked Desk operation was running; ${work}; what they do not cover ran outside Desk's metered work`;
 			return "no marked Desk operation was running, so the time went to code outside Desk or to the machine";
 		}
 		const named = overlapping.slice(-NAMED_MAX).map(mark => {
@@ -203,7 +235,7 @@ export class EventLoopLagMonitor {
 			return `${mark.name} (${running}${sync})`;
 		});
 		const more = overlapping.length > NAMED_MAX ? ` and ${overlapping.length - NAMED_MAX} more` : "";
-		return `marked Desk operations in that time: ${named.join("; ")}${more}`;
+		return `marked Desk operations in that time: ${named.join("; ")}${more}${work.length === 0 ? "" : `; ${work}`}`;
 	}
 }
 
@@ -229,4 +261,20 @@ export function startLoopLagMonitor(log: Logger): () => void {
 /** Run `work` as a named operation of the host-wide monitor; with none started it is just `work()`. */
 export function trackOperation<T>(name: string, work: () => T): T {
 	return shared === null ? work() : shared.run(name, work);
+}
+
+/** Add already measured `ms` of work to `name`'s total in the host-wide monitor (see {@link EventLoopLagMonitor.meter}); with none started it does nothing. */
+export function meterMs(name: string, ms: number): void {
+	shared?.meter(name, ms);
+}
+
+/** Run synchronous `work` and meter its duration under `name`; with no monitor started it is just `work()`. */
+export function meterWork<T>(name: string, work: () => T): T {
+	if (shared === null) return work();
+	const started = performance.now();
+	try {
+		return work();
+	} finally {
+		shared.meter(name, performance.now() - started);
+	}
 }

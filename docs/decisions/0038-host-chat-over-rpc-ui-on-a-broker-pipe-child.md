@@ -19,6 +19,8 @@ date: 2026-09-29
 
 > §1 narrowly amended 2026-10-24 by the [stream-stall design](../designs/2026-10-24-chat-stream-stall-is-visible-and-ends-fast.md): a consumer whose socket stays at the pacing bound for 10 s (`--rpc-paced-close-ms`, 200 ms to 10 min) is closed by the broker with its own reason, like one whose cursor the ring evicted, and the next `rpc-attached` carries the additive optional `lastForcedClose: { reason: "fell-behind" | "paced", ageMs }` so the reattaching host can log why (the field is diagnostic; nothing acts on it). No protocol version changes; a host or broker without the field behaves as before.
 
+> §4 narrowly amended 2026-10-29 by the [stream-stall design's amendment](../designs/2026-10-24-chat-stream-stall-is-visible-and-ends-fast.md) ("a reattach always ends, and a gap in the ring is read from the file"): every wait of a reattach is bounded (the broker handshake and an in-place reconnect, one attach attempt at 45 s, the whole reattach at 120 s), after which the session shows the failed state with Reconnect as before, and every failed attempt is logged with its cause; and when the broker's ring no longer holds the lines after the window's cursor, the window re-reads its transcript from the session file and asks OMP only for the entries the file trails by (disk-first, as in §4) instead of one full `get_entries` through the consumer the broker just closed as too slow. Attach identity, the re-proof of the broker and of the session, and re-adoption are unchanged.
+
 ## Context and Problem Statement
 
 The chat editor is a Collab guest ([ADR-0002](0002-local-collab-gui-native-omp.md)): a loopback relay sidecar, a room and bearer link

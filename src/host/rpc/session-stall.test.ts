@@ -13,7 +13,7 @@ import type { Logger } from "../../shared/logger.ts";
 import { toChatEventFrame } from "../../protocol/rpc.ts";
 import { FakeRpcChannel } from "./fake-channel.ts";
 import { RpcSession, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
-import { ManualTimers, ScratchDir, assistantMessage, messageEntry, sessionFileText, tick, userMessage, waitUntil } from "./test-support.ts";
+import { ManualTimers, ScratchDir, assistantMessage, jsonl, messageEntry, sessionFileText, tick, userMessage, waitUntil } from "./test-support.ts";
 
 const scratches: ScratchDir[] = [];
 const sessions: RpcSession[] = [];
@@ -289,6 +289,138 @@ describe("a reattach after the broker closed the consumer", () => {
 		channel.closeLink("disconnected", "the peer closed the connection");
 		await waitUntil(() => log.has(/reattach finished/));
 		assert.ok(log.has(/the broker connection closed: the peer closed the connection; .*read 311 frames in 40 reads/));
+	});
+});
+
+describe("a reattach whose attach never gets an answer", () => {
+	/** One reattach attempt's whole life on the manual clock: it waits out the attach deadline, then the backoff. */
+	const settings = { attachTimeoutMs: 1_000, reattachDelaysMs: [10, 10], autoRecoveryDelaysMs: [] as number[] };
+
+	it("abandons the attempt at the attach deadline, says so with its reason, tries again and goes live", async () => {
+		const { channel, session, timers, log } = await boot({ session: settings });
+		channel.forcedClose = { reason: "paced", ageMs: 100 };
+		channel.attachHangs = 1;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		await waitUntil(() => channel.attachRequests.length === 2);
+		assert.equal(session.phase, "attaching", "the tab shows that it is connecting while the attempt waits");
+		timers.advance(1_000);
+		await waitUntil(() => log.has(/reattach attempt 1 failed after 1000 ms \(the broker did not complete the attach within 1000 ms\); trying again in 10 ms/));
+		timers.advance(10);
+		await waitUntil(() => log.has(/reattach finished in \d+ ms after 2 attempts/));
+		assert.equal(session.phase, "live");
+		assert.ok(log.has(/info reattached:/), "the attach that finally answered is logged as before");
+	});
+
+	it("ends in the failed state with its reason in the log, so the tab offers Reconnect, and Reconnect recovers", async () => {
+		const { channel, session, timers, log } = await boot({ session: settings });
+		channel.attachHangs = 99;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		for (let round = 0; round < 3; round += 1) {
+			await waitUntil(() => channel.attachRequests.length === round + 2);
+			timers.advance(1_000);
+			await tick();
+			timers.advance(10);
+		}
+		await waitUntil(() => session.phase === "failed");
+		assert.equal(session.model.code, "attach-failed");
+		assert.ok(log.has(/warn reattach failed after \d+ ms and 3 attempts: attach-failed \(the broker did not complete the attach within 1000 ms\)/));
+		channel.attachHangs = 0;
+		assert.equal(session.reconnect(), "started");
+		await waitUntil(() => session.phase === "live");
+		assert.equal(session.phase, "live");
+	});
+
+	it("gives up when its budget is spent, before the attempt list is", async () => {
+		const { channel, session, timers, log } = await boot({ session: { ...settings, reattachBudgetMs: 1_500, reattachDelaysMs: [10, 10, 10, 10, 10] } });
+		channel.attachHangs = 99;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		for (let round = 0; round < 2; round += 1) {
+			await waitUntil(() => channel.attachRequests.length === round + 2);
+			timers.advance(1_000);
+			await tick();
+			timers.advance(10);
+		}
+		await waitUntil(() => session.phase === "failed");
+		assert.ok(log.has(/warn reattach failed after 2\d{3} ms and 2 attempts: attach-failed/), "two attempts and no third: the budget ended it");
+		assert.equal(channel.attachRequests.length, 3, "the boot's attach and two reattaches");
+	});
+
+	it("names the broker's refusal on every attempt, not only on the last", async () => {
+		const { channel, session, timers, log } = await boot({ session: settings });
+		channel.attachError = true;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		await waitUntil(() => log.has(/reattach attempt 1 failed after \d+ ms \(attach refused\); trying again in 10 ms/));
+		timers.advance(10);
+		await waitUntil(() => log.has(/reattach attempt 2 failed/));
+		timers.advance(10);
+		await waitUntil(() => session.phase === "failed");
+		assert.ok(log.has(/warn reattach failed after \d+ ms and 3 attempts: attach-failed \(attach refused\)/));
+	});
+
+	it("logs a first attach that fails with its reason too", async () => {
+		const scratch = await ScratchDir.create();
+		scratches.push(scratch);
+		const file = await scratch.file("s.jsonl", sessionFileText({ id: "sess-1", entries: [u1, a1] }));
+		const channel = new FakeRpcChannel({ sessionFile: file, entries: [u1, a1] as never, leafId: "a1" });
+		channel.attachError = true;
+		const log = new Lines();
+		const session = new RpcSession({ channel, sessionFile: file, cwd: "D:\\scratch", hostNonce: "host-a", timers: new ManualTimers(), fileExists: async () => true, log, autoRecoveryDelaysMs: [] });
+		sessions.push(session);
+		await session.start();
+		await waitUntil(() => session.phase === "failed");
+		assert.ok(log.has(/warn the first attach failed: attach-failed \(attach refused\)/));
+	});
+});
+
+describe("a reattach after the broker's ring dropped the lines past the cursor", () => {
+	const u2 = messageEntry("u2", "a1", userMessage("work", 3000));
+	const a2 = messageEntry("a2", "u2", assistantMessage("done", 4000));
+	const sinceOf = (channel: FakeRpcChannel): unknown[] => channel.commandsOfType("get_entries").map(command => command.since);
+
+	/** The turn went on while the window could not read: OMP and the session file hold two more entries. */
+	async function grown(rig: Rig): Promise<void> {
+		rig.channel.child.entries = [u1, a1, u2, a2] as never;
+		rig.channel.child.leafId = "a2";
+		await appendFile(rig.file, jsonl([u2, a2]));
+	}
+
+	it("re-reads the transcript from the session file, asks OMP only for what the file trails by, and says so", async () => {
+		const rig = await boot();
+		const { channel, session, log } = rig;
+		await grown(rig);
+		const asked = sinceOf(channel).length;
+		channel.forcedClose = { reason: "paced", ageMs: 100 };
+		channel.truncatedAttach = true;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		await waitUntil(() => log.has(/reattach finished/));
+		assert.equal(session.phase, "live");
+		assert.ok(log.has(/the broker's lines in between are gone: the transcript was re-read from the session file \(last entry a2\)/));
+		assert.deepEqual(session.model.entries.map(entry => entry.id), ["u1", "a1", "u2", "a2"]);
+		assert.deepEqual(sinceOf(channel).slice(asked), ["a2"], "OMP is asked for the entries after the file's last one, not after the stale cursor");
+	});
+
+	it("keeps asking OMP for the delta after its cursor when the ring still holds every line", async () => {
+		const rig = await boot();
+		const { channel, session, log } = rig;
+		await grown(rig);
+		const asked = sinceOf(channel).length;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		await waitUntil(() => log.has(/reattach finished/));
+		assert.deepEqual(sinceOf(channel).slice(asked), ["a1"]);
+		assert.equal(log.has(/re-read from the session file/), false);
+		assert.deepEqual(session.model.entries.map(entry => entry.id), ["u1", "a1", "u2", "a2"]);
+	});
+
+	it("asks OMP for the entries after the cursor when the session file cannot serve, and says that", async () => {
+		const rig = await boot({ session: { openHistory: async () => { throw new Error("no file"); } } });
+		const { channel, session, log } = rig;
+		channel.child.entries = [u1, a1, u2, a2] as never;
+		channel.child.leafId = "a2";
+		channel.truncatedAttach = true;
+		channel.closeLink("disconnected", "the peer closed the connection");
+		await waitUntil(() => log.has(/reattach finished/));
+		assert.ok(log.has(/the session file could not serve the transcript: OMP is asked for the entries after the cursor instead/));
+		assert.deepEqual(session.model.entries.map(entry => entry.id), ["u1", "a1", "u2", "a2"]);
 	});
 });
 

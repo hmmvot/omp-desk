@@ -41,6 +41,13 @@ const WRITE_PACE_BYTES = 2 * 1024 * 1024;
 /** How long to wait between reads of the child's identity. */
 const IDENTITY_POLL_MS = 250;
 
+/**
+ * How long one in-place reconnect may take: the dial's own handshake bound (10 s), the identity checks around it and a status
+ * round trip fit inside. A reconnect is one shared flight (see {@link RpcHandle.reconnect}); without this bound a dial that never
+ * settled would leave every later attach joined to it for ever.
+ */
+const RECONNECT_TIMEOUT_MS = 30_000;
+
 /** Opens a fresh, verified connection to the same broker; supplied by the client that made this handle. */
 export type RpcReconnect = () => Promise<PtyClientSideConnection>;
 
@@ -69,6 +76,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 	/** Names this frontend as the input owner; unique per handle. */
 	readonly frontendId = `rpc:${randomBytes(9).toString("base64url")}`;
 	private readonly reconnectConnection: RpcReconnect;
+	private readonly reconnectTimeoutMs: number;
 	private readonly channelListeners: Array<(event: RpcChannelEvent) => void> = [];
 	private readonly assembler = new PtyRpcFragmentAssembler(16 * 1024 * 1024);
 	private readonly drainWaiters: Array<() => void> = [];
@@ -89,9 +97,11 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		adopted: boolean,
 		buildMatches: boolean,
 		reconnect: RpcReconnect,
+		reconnectTimeoutMs = RECONNECT_TIMEOUT_MS,
 	) {
 		super(connection, record, adopted, buildMatches);
 		this.reconnectConnection = reconnect;
+		this.reconnectTimeoutMs = reconnectTimeoutMs;
 	}
 
 	/** Whether this handle holds broker input right now (live: see the module comment). */
@@ -345,10 +355,15 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		this.emitChannel({ type: "input-owner", owned, generation: this.ownerCounter });
 	}
 
+	/**
+	 * Replace a closed connection with a fresh, identity-checked one. One flight serves every caller that asks while it runs, and
+	 * it always ends: a dial that has not answered within {@link RECONNECT_TIMEOUT_MS} fails the flight (the caller retries with a
+	 * new one), and a connection that arrives after that is closed, never adopted.
+	 */
 	private reconnect(): Promise<void> {
 		this.reconnecting ??= (async () => {
 			try {
-				const connection = await this.reconnectConnection();
+				const connection = await this.dialWithinDeadline();
 				this.connection = connection;
 				this.closedReason = null;
 				this.assembler.reset();
@@ -359,6 +374,28 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 			}
 		})();
 		return this.reconnecting;
+	}
+
+	private dialWithinDeadline(): Promise<PtyClientSideConnection> {
+		const { promise, resolve, reject } = Promise.withResolvers<PtyClientSideConnection>();
+		let expired = false;
+		const timer = setTimeout(() => {
+			expired = true;
+			reject(new Error(`the broker did not reconnect within ${this.reconnectTimeoutMs}ms`));
+		}, this.reconnectTimeoutMs);
+		timer.unref();
+		this.reconnectConnection().then(
+			connection => {
+				clearTimeout(timer);
+				if (expired) connection.close("a reconnect that finished after its deadline");
+				else resolve(connection);
+			},
+			(error: unknown) => {
+				clearTimeout(timer);
+				if (!expired) reject(error);
+			},
+		);
+		return promise;
 	}
 
 	private async sendLine(bytes: Buffer): Promise<void> {

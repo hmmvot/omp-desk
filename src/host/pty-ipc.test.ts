@@ -16,7 +16,7 @@
  */
 
 import assert from "node:assert/strict";
-import { connect } from "node:net";
+import { connect, createServer, type AddressInfo, type Socket } from "node:net";
 import { after, describe, it } from "node:test";
 import {
 	PTY_LOOPBACK_HOST,
@@ -26,6 +26,7 @@ import {
 	type PtyBrokerServer,
 	type PtyBrokerSideConnection,
 } from "./pty-ipc.ts";
+import { startLoopLagMonitor } from "./loop-lag.ts";
 import {
 	PTY_MAX_FRAME_BYTES,
 	PTY_PROTOCOL_VERSION,
@@ -392,6 +393,97 @@ describe("handshake", () => {
 	});
 });
 
+describe("a handshake that never gets its answer", () => {
+	/** A listener that accepts connections and lets the test decide what each one does after the client's hello. */
+	async function listen(onHello: (socket: Socket) => void): Promise<{ port: number; close(): Promise<void> }> {
+		const sockets = new Set<Socket>();
+		const server = createServer(socket => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
+			socket.on("error", () => undefined);
+			socket.once("data", () => onHello(socket));
+		});
+		await new Promise<void>(resolve => server.listen(0, PTY_LOOPBACK_HOST, resolve));
+		const port = (server.address() as AddressInfo).port;
+		return {
+			port,
+			async close() {
+				for (const socket of sockets) socket.destroy();
+				await new Promise<void>(resolve => server.close(() => resolve()));
+			},
+		};
+	}
+
+	/** How a dial that has not settled by `ms` is told from one that has: a hung dial must fail the test, not the suite. */
+	async function settledWithin(dial: Promise<unknown>, ms: number): Promise<"settled" | "hung"> {
+		const guard = Promise.withResolvers<"hung">();
+		const timer = setTimeout(() => guard.resolve("hung"), ms);
+		try {
+			return await Promise.race([dial.then(() => "settled" as const, () => "settled" as const), guard.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	const dial = (port: number, timeoutMs: number) => connectPtyBroker({
+		token: createPtyToken(),
+		brokerId: IDENTITY.brokerId,
+		generation: createPtyGeneration(),
+		port,
+		timeoutMs,
+	});
+
+	it("fails within its bound when the broker takes the connection and never answers the hello", async () => {
+		const peer = await listen(() => undefined);
+		try {
+			const attempt = dial(peer.port, 150);
+			attempt.catch(() => undefined);
+			assert.equal(await settledWithin(attempt, 3_000), "settled", "the dial must settle: a caller waits on it for ever otherwise");
+			await assert.rejects(attempt, /did not complete the handshake within 150ms/);
+		} finally {
+			await peer.close();
+		}
+	});
+
+	it("fails at once when the broker closes the socket after the hello without answering", async () => {
+		const peer = await listen(socket => socket.destroy());
+		try {
+			// A long bound: the answer must come from the closed socket, not from the deadline.
+			const attempt = dial(peer.port, 60_000);
+			attempt.catch(() => undefined);
+			assert.equal(await settledWithin(attempt, 3_000), "settled");
+			await assert.rejects(attempt, /closed the connection before the handshake/);
+		} finally {
+			await peer.close();
+		}
+	});
+
+	it("does not count against the broker a stretch in which this process did not run: an answer already waiting in the socket is read", async () => {
+		const harness = await start();
+		// The broker answers at once and then this (shared) loop is held for longer than the dial's bound, so the dial's
+		// deadline timer comes due before the socket is read, as it does in an extension host that was blocked.
+		harness.server.onConnection(() => {
+			const until = performance.now() + 800;
+			while (performance.now() < until) { /* the host's event loop, blocked */ }
+		});
+		const attempt = connectPtyBroker({
+			token: harness.token,
+			brokerId: IDENTITY.brokerId,
+			generation: harness.generation,
+			port: harness.server.port,
+			timeoutMs: 200,
+		});
+		attempt.catch(() => undefined);
+		assert.equal(await settledWithin(attempt, 5_000), "settled");
+		const connection = await attempt;
+		try {
+			assert.equal(connection.hello.slot, "tab:1");
+		} finally {
+			connection.close();
+		}
+	});
+});
+
 describe("a frame listener that throws", () => {
 	it("closes the connection instead of silently abandoning the frames behind it", async () => {
 		const harness = await start();
@@ -444,6 +536,36 @@ describe("the read-side traffic meter", () => {
 		assert.ok((after?.busyMs ?? 0) >= 59, "the three frames took at least their listeners' time");
 		assert.ok((after?.lastFrameAt ?? 0) > 0);
 		assert.equal(accepted.traffic?.().frames, 0, "the broker side has read nothing the client sent");
+	});
+
+	it("lets the host's stall report name a slow read of the broker socket", async () => {
+		const harness = await start();
+		const connection = await connectPtyBroker({
+			token: harness.token,
+			brokerId: IDENTITY.brokerId,
+			generation: harness.generation,
+			port: harness.server.port,
+		});
+		const lines: string[] = [];
+		const stalled = Promise.withResolvers<void>();
+		const record = (line: string): void => {
+			lines.push(line);
+			if (line.startsWith("event loop blocked")) stalled.resolve();
+		};
+		const stop = startLoopLagMonitor({ error: record, warn: record, info: record, debug: record, trace: record });
+		try {
+			connection.onFrame(() => {
+				const until = performance.now() + 700;
+				while (performance.now() < until) { /* one frame the consumer is slow on */ }
+			});
+			const accepted = await harness.nextConnection();
+			accepted.send({ v: PTY_PROTOCOL_VERSION, t: "state", status: statusPayload() });
+			await stalled.promise;
+		} finally {
+			stop();
+		}
+		const line = lines.find(text => text.startsWith("event loop blocked"));
+		assert.match(line ?? "", /metered Desk work in that time: broker socket read 1 times, \d+ ms in all/, lines.join("\n"));
 	});
 });
 
