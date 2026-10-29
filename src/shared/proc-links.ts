@@ -1,5 +1,5 @@
 /**
- * OMP's `proc://` addresses of background jobs (`proc-protocol.ts` of OMP 18.12.6): `proc://` lists them, `proc://<id>` reads one,
+ * OMP's `proc://` addresses of background jobs (`proc-protocol.ts` of OMP 18.13.3): `proc://` lists them, `proc://<id>` reads one,
  * `proc://<id>/streams` lists a bash job's pipes and `proc://<id>/streams/<n>` reads one (new in OMP 18.12.3), `proc://<id>/kill`
  * is a write that cancels it, `proc://<id>/mode` sets a service's lifetime. An id is a job id (`bg_30`), the name of a task's agent
  * or of a launched service.

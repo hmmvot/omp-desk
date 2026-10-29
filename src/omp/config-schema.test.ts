@@ -142,6 +142,9 @@ test("visibility conditions: OMP's rules, unknown rules read-only, terminal rule
   assert.equal(entry(projectSnapshot(fakeSchema(recording, { platform: "darwin" })), "spelling.autocorrect").visible, true);
   const projectList = projectSnapshot(fakeSchema(recording, { otherProject: { contextFiles: { extra: ["a.md"] } } }));
   assert.equal(entry(projectList, "contextFiles.extra").visible, false, "a project-supplied list is not promoted to global");
+  const projectFolders = projectSnapshot(fakeSchema(recording, { otherProject: { tools: { restrictedFolders: ["secrets"] } } }));
+  assert.equal(entry(projectFolders, "tools.restrictedFolders").visible, false, "a project-supplied restricted-folder list is not promoted to global");
+  assert.equal(entry(projectSnapshot(fakeSchema(recording)), "tools.restrictedFolders").visible, true);
   const mutated = fakeSchema(recording);
   const first = mutated.settings.find(setting => setting.ui?.condition === "advisorEnabled")!;
   (first as { ui: { condition: string } }).ui = { ...first.ui!, condition: "someFutureCondition" };
@@ -182,7 +185,7 @@ test("baselines hold only registered, non-credential values", () => {
 
 test("a setting the installed OMP no longer has is not shown, whatever the user's files still hold for it", () => {
   const stale = { providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["read"] } } };
-  assert.ok(!recording.settings.some(setting => setting.id.startsWith("providers.openai-codex.codeMode")), "the recorded OMP (18.12.6) lacks these settings (18.11.1 dropped them)");
+  assert.ok(!recording.settings.some(setting => setting.id.startsWith("providers.openai-codex.codeMode")), "the recorded OMP lacks these settings (18.11.1 dropped them)");
   const clean = projectSnapshot(fakeSchema(recording));
   const snapshot = projectSnapshot(fakeSchema(recording, { global: stale, project: stale, otherProject: stale, lowerProject: stale }));
   assert.deepEqual(snapshot.entries.map(item => item.id), clean.entries.map(item => item.id), "no entry appears for a key only the files hold");

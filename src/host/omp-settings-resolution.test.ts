@@ -37,7 +37,7 @@ async function fixture(globalYaml: string, projectYaml: string) {
   const agents = path.join(agentDir, "agents");
   await fs.writeFile(path.join(agents, "follower.md"), agent("follower", "model: \"@smol\"\n"));
   await fs.writeFile(path.join(agents, "pinned.md"), agent("pinned", "model: fx-ok/big:high\nthinking-level: low\n"));
-  await fs.writeFile(path.join(agents, "locked-agent.md"), agent("locked-agent", "model: anthropic/claude-3-haiku-20240307\n"));
+  await fs.writeFile(path.join(agents, "locked-agent.md"), agent("locked-agent", "model: anthropic/claude-haiku-4-5\n"));
   await fs.writeFile(path.join(agents, "bare.md"), agent("bare", ""));
   await fs.writeFile(path.join(agents, "shielded.md"), agent("shielded", "model: \"@slow\"\nthinking-level: medium\n"));
   const call = (request: ConfigRecord, env: NodeJS.ProcessEnv = {}) => runSettingsWorker({ packageRoot, bunPath, helperPath, cwd, profile: "default", request,
@@ -53,7 +53,7 @@ defaultThinkingLevel: medium
 modelRoles:
   default: fx-ok/fast
   slow: fx-ok/big:high
-  vision: anthropic/claude-3-haiku-20240307
+  vision: anthropic/claude-haiku-4-5
 task:
   agentModelOverrides:
     shielded: fx-ok/big
@@ -86,7 +86,7 @@ test("roles resolve through OMP's own functions: layers, followed roles, built-i
     assert.equal(role(snapshot, "commit").resolution.source, "none"); assert.equal(role(snapshot, "commit").resolution.model.status, "none");
     assert.equal(role(snapshot, "plan").resolution.source, "none");
     const vision = role(snapshot, "vision").resolution;
-    assert.deepEqual([vision.model.status, vision.model.provider, vision.model.wanted], ["login", "anthropic", "anthropic/claude-3-haiku-20240307"]);
+    assert.deepEqual([vision.model.status, vision.model.provider, vision.model.wanted], ["login", "anthropic", "anthropic/claude-haiku-4-5"]);
     const judge = role(snapshot, "judge").resolution;
     assert.equal(judge.source, "builtin"); assert.ok(role(snapshot, "judge").defaults.length > 0);
     assert.equal(role(snapshot, "image").resolution.source, "builtin");
@@ -167,10 +167,10 @@ test("agent overrides are written to the project layer, reset by removing the ke
     await assert.rejects(write([{ path: ["task", "agentModelOverrides", "follower"], value: "fx-ok/does-not-exist" }]), /No available model/);
     assert.equal(await fs.readFile(f.projectFile, "utf8"), before);
     // An ordered list override in the project file is read as OMP reads it and survives an unrelated project write.
-    await fs.writeFile(f.projectFile, `${before}\ntask:\n  agentModelOverrides:\n    follower:\n      - anthropic/claude-3-haiku-20240307\n      - fx-ok/big\n`);
+    await fs.writeFile(f.projectFile, `${before}\ntask:\n  agentModelOverrides:\n    follower:\n      - anthropic/claude-haiku-4-5\n      - fx-ok/big\n`);
     receipt = await f.read();
     assert.equal(agentOf(receipt.snapshot, "follower").resolution.model.model, "fx-ok/big", "the first usable entry of the list runs");
-    assert.equal(agentOf(receipt.snapshot, "follower").resolution.overrides.project, "anthropic/claude-3-haiku-20240307,fx-ok/big");
+    assert.equal(agentOf(receipt.snapshot, "follower").resolution.overrides.project, "anthropic/claude-haiku-4-5,fx-ok/big");
     await write([{ path: ["task", "agentModelOverrides", "pinned"], value: "fx-ok/fast" }]);
     assert.match(await fs.readFile(f.projectFile, "utf8"), /pinned: fx-ok\/fast/);
     assert.match(await fs.readFile(f.projectFile, "utf8"), /follower:\s+- anthropic/);
@@ -183,7 +183,7 @@ test("agent overrides are written to the project layer, reset by removing the ke
 });
 
 test("a role that tools resolve as a chain continues down its retry fallback chain when its own model cannot be used", { skip, timeout: 180_000 }, async () => {
-  const f = await fixture(`${GLOBAL.replace("modelRoles:\n", "modelRoles:\n  memory: anthropic/claude-3-haiku-20240307\n")}retry:\n  fallbackChains:\n    memory:\n      - fx-ok/big\n`, PROJECT);
+  const f = await fixture(`${GLOBAL.replace("modelRoles:\n", "modelRoles:\n  memory: anthropic/claude-haiku-4-5\n")}retry:\n  fallbackChains:\n    memory:\n      - fx-ok/big\n`, PROJECT);
   try {
     const { snapshot } = await f.read();
     const memory = role(snapshot, "memory").resolution;

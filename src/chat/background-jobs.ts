@@ -1,7 +1,7 @@
 /**
  * OMP's background jobs as Chat can know them.
  *
- * OMP 18.12.6 (as 18.11.1) reports background work over RPC as one boolean (`get_state.hasPendingAsyncWork`); there is no job list, no job
+ * OMP 18.13.3 (as 18.11.1) reports background work over RPC as one boolean (`get_state.hasPendingAsyncWork`); there is no job list, no job
  * event and no RPC command to cancel one. What Chat can read is what the session writes and streams:
  * - a started job is a tool result with `details.async = { state, jobId, type }` (bash, eval, task);
  * - a `job`/`wait` poll lists `details.jobs[] = { id, type, status, label, durationMs }`, and a cancel lists

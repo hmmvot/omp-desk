@@ -9,7 +9,7 @@
  * uses is known and gives OMP's own answers for a sweep of settings (`config-conditions-probe.ts`, which does use
  * an in-memory init), and an unknown name at run time makes that one setting read-only (`condition-unknown`) instead
  * of guessing its visibility. Residual risk: a rule whose meaning changes under an unchanged name is only caught by the
- * live test, and the sweep does not exercise the project branch of `contextFilesExtraNotProject` or environment inputs.
+ * live test, and the sweep does not exercise the project branch of `contextFilesExtraNotProject` or `restrictedFoldersNotProject`, or environment inputs.
  */
 export interface ConditionReader {
   /** The value OMP reads for `id` (environment included), as `Setting.get` returns it. */
@@ -38,12 +38,13 @@ const RULES: Record<string, Rule> = {
   planModeEnabled: { test: read => read.value("plan.enabled") === true, note: "Shown while plan mode is enabled." },
   planAutosaveEnabled: { test: read => read.value("plan.enabled") === true && read.value("plan.autosave") === true, note: "Shown while plan mode and plan autosave are enabled." },
   contextFilesExtraNotProject: { test: read => read.provenance("contextFiles.extra") !== "project", note: "Hidden while a project layer supplies the list, so it is never promoted to the global layer." },
+  restrictedFoldersNotProject: { test: read => read.provenance("tools.restrictedFolders") !== "project", note: "Hidden while a project layer supplies the list, so it is never promoted to the global layer." },
 };
 
 /** The settings ids the rules read: each must exist in the installed OMP (checked by the live test). */
 export const CONDITION_INPUTS: readonly string[] = [
   "advisor.enabled", "tui.vimMode", "memory.backend", "autolearn.enabled", "defaultThinkingLevel",
-  "retry.usageAwareFallback", "plan.enabled", "plan.autosave", "contextFiles.extra",
+  "retry.usageAwareFallback", "plan.enabled", "plan.autosave", "contextFiles.extra", "tools.restrictedFolders",
 ];
 export const KNOWN_CONDITIONS: readonly string[] = Object.keys(RULES);
 
