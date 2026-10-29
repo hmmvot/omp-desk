@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A visible Sessions view does much less background work.** Every 15 seconds each window that showed Sessions looked at every session row again: two claim reads, a check whether the window holding the row is alive, a probe of the row's broker and a check for an outside OMP, for all rows (48 of these a minute for 12 rows, in each window). A row is now looked at again when something that decides what it shows changed: its claim (another window starting, stopping or moving the session), the set of open windows, or its own record in the catalog, and a burst of such changes costs one look per row. Every 15 seconds only the rows whose end nothing announces are checked again (an OMP started in a terminal, a session under a broker no window runs, a check that failed: 8 a minute for 12 rows with two of that kind), and every row is looked at once in 3 minutes as a safety net for a change the system dropped. Showing the view or switching to the window still looks at every row at once, and a hidden view does nothing on the timer.
 
+### Fixed
+
+- **Chat: closing Find no longer takes the focus back from a click made a moment later.** The retry that gives the composer the focus ran once more 100 ms after Find closed even when the first attempt had worked, and moved the focus back to the composer after a click on the transcript background in that time.
+
 ## [0.4.13] - 2026-10-29
 
 ### Changed

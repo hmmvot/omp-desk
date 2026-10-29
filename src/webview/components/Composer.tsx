@@ -964,7 +964,12 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				"focus-composer": () => {
 					focusWhenPossible({
 						element: () => surfaceRef.current,
-						active: () => document.activeElement,
+						// `element` is the surface, not its field: the focus has arrived when the field is the active element, or the retry would
+						// run once more 100 ms later and take the focus back from a page that has gone idle since.
+						active: () => {
+							const surface = surfaceRef.current;
+							return surface !== null && document.activeElement === surface.element ? surface : document.activeElement;
+						},
 						idle: active => active === null || active === document.body,
 						schedule: (callback, delayMs) => { window.setTimeout(callback, delayMs); },
 					});

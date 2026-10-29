@@ -3766,6 +3766,37 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// Closing Find gives the focus back to the composer through the page's focus action. That action retries every 100 ms while the page is
+		// idle and the composer does not hold the focus (`focusWhenPossible`), so once the composer has it no retry may be left: one that ran
+		// would take the focus back from a page the reader had since left idle. The retry is a real 100 ms timer that a test cannot place
+		// reliably, so the page's 100 ms timers are held and run by the test after the blur, which is where the retry used to land.
+		await t.test("a composer blurred right after Find closes stays blurred", async () => {
+			await reset("find-close-blur");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1000,content:'hello'}),row('a1',{role:'assistant',model:'m',timestamp:1001,stopReason:'stop',content:[{type:'text',text:'Reply text'}]})],working:false,settled:true});
+			})()`);
+			await ui.wait("document.body.textContent.includes('Reply text')");
+			await ui.evaluate(`(()=>{
+			 const schedule=window.setTimeout;window.heldTimers=[];
+			 window.setTimeout=(fn,ms,...args)=>ms===100?(window.heldTimers.push(()=>fn(...args)),-1):schedule(fn,ms,...args);
+			})()`);
+			// With nothing focused when Find opens, closing it hands the focus to the composer.
+			await ui.evaluate("document.activeElement.blur()");
+			await press("f", "KeyF", 70, { modifiers: 2 });
+			await ui.wait("document.querySelector('.omp-find-input')");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+			assert.equal(await ui.evaluate("window.composer.focused()"), true, "closing Find focuses the composer");
+			await ui.evaluate("window.composer.blur()");
+			assert.equal(await ui.evaluate("document.activeElement===document.body"), true);
+			// The 100 ms of a retry have gone by: whatever the page armed for then runs now.
+			await ui.evaluate("window.heldTimers.splice(0).forEach(run=>run())");
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.activeElement===document.body"), true, "nothing took the focus back for the composer");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the context popover and the slash picker follow the same outside-press rule, and Escape closes only the newest layer", async () => {
 			await reset("layers-dismiss");
 			await ui.evaluate("document.querySelector('.omp-context-trigger').click()");
