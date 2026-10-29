@@ -31,11 +31,13 @@ Proposed: the script. The layers and the rule it enforces:
 | `src/views/` | `host`, `protocol`, `chat`, `shared` |
 | `src/webview/` | `protocol`, `chat`, `shared` |
 | `src/wiring/` | `host`, `views`, `protocol`, `chat`, `shared` |
-| `src/extension.ts` | every layer except `webview`; the only file directly under `src/` (any other root module is a violation and belongs to a layer) |
+| `src/extension.ts` | every layer except `webview`; the only non-test file directly under `src/`, with `src/extension-harness.ts` (a test-only entry, see the 2026-10-30 amendment) as the one other file allowed there (any other non-test root module is a violation and belongs to a layer) |
 
 A module may always import its own layer. `import type` counts as an import: a type-only edge is a dependency of the reader and the cycle it closes is real. Any import cycle fails the check, inside a layer too. Test files (`*.test.ts`, `*.test.tsx`), the test stubs and `test/**` are exempt from the layer rule (a host test may use a page parser as a fixture) but not from the cycle rule. The script fails with one line per violation naming both files and the rule broken, and `npm run typecheck` runs it after `tsc`.
 
 Amended 2026-10-12, after the implementation review: the table first let `src/extension.ts` import everything, which left the host bundle's own entry able to import page code and contradicted the first consequence below; three page modules it imported (`prompt-history.ts`, `rewind-mode.ts`, `terminal-theme.ts`) moved to `src/chat/` and `src/shared/`, and the row now excludes `webview`.
+
+Amended 2026-10-30: `src/extension-harness.ts` is the second non-test file allowed directly under `src/`. It is a test-only entry: `src/extension-lifecycle.test.ts` bundles it in place of `extension.ts` to reach the private functions of the entry (it replaces a string of access code that the test used to append to `extension.ts`'s source). It imports `extension.ts`, which no layer file may, so `scripts/check-imports.mjs` treats it as a test file for the layer rule (the cycle rule still applies) and adds one rule: no non-test file may import it, so no production module comes to depend on it directly. Any other non-test file directly under `src/` stays a violation.
 
 Reasons: the check lives where the build already fails and costs nothing to run; the rule is small enough to read in the script; moving a module to the lowest layer both sides may see is the one remedy for every violation, so the fix is never a configuration exception.
 
@@ -54,3 +56,9 @@ Reasons: the check lives where the build already fails and costs nothing to run;
 - Reviewer: architect (independent, read-only, 2026-10-12; a separate agent that did not write the record)
 - Outcome: accepted with one change, applied
 - Notes: the record and the design's tables were found consistent and the options fairly stated; the one material finding was the missing policy for modules directly under `src/` (`guards.ts`, `runtime-assets.ts`, `bridge-protocol.ts`, `bridge-fragments.ts`, `bridge-identity.ts`), which the table now covers: only `extension.ts` may live there.
+
+### Amendment 2026-10-30 (test entry)
+
+- Reviewer: reviewer (independent, read-only, 2026-10-30; a separate agent that did not write the amendment)
+- Outcome: accepted with three minor changes, all applied: the layer-table row names the harness, the wording says "non-test" file, and the containment claim says "directly" because the rule checks direct edges only
+- Notes: no functional finding; the checker matched the amendment, and the harness is in neither the extension bundle nor the VSIX (`esbuild.mjs` names only `src/extension.ts`, `.vscodeignore` excludes `src/**`)
