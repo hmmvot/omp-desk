@@ -14,12 +14,14 @@
  * one honest `occupied` answer instead of a lost update. The record carries the
  * slot it claims, so a name is never the only identity.
  *
- * A record is only removed by the broker that owns it (on a clean shutdown after
- * its child is gone), or by a caller that has *proved* that broker process is gone
- * and that the bytes it retires are still that broker's (`retirePtyRecord`). An
- * unreadable record is never treated as absent: it could belong to a live broker
- * whose protocol version this build cannot parse, and starting a second writer over
- * it is exactly the failure this file exists to prevent.
+ * A record is not removed when its broker ends: a clean shutdown, a signal and the retention timer all leave
+ * it in place as recovery metadata (which slot was held, by which broker, with an uncertain outcome), and
+ * broker absence alone never frees the slot. The one removal in production is the owning broker retiring its
+ * own record when its child was never spawned (`PtyBroker.finish` with `retire`, through `retirePtyRecord`).
+ * `retirePtyRecord` also serves a caller that has *proved* the recorded broker process is gone and that the
+ * bytes it retires are still that broker's. An unreadable record is never treated as absent: it could belong
+ * to a live broker whose protocol version this build cannot parse, and starting a second writer over it is
+ * exactly the failure this file exists to prevent.
  *
  * Access is the private-storage convention of [ADR-0012](../../docs/decisions/0012-run-child-process-entries-from-staged-copies.md):
  * the state directory and every record in it must be writable only by this account,

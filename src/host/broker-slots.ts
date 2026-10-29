@@ -28,7 +28,7 @@ import { randomUUID } from "node:crypto";
 import { mergeKeyedMap } from "./catalog-merge.ts";
 import type { RecordConflictDraft } from "./catalog-merge.ts";
 
-/** The key this table owns in workspace state. */
+/** The key of this table in the profile catalog (ADR-0034; merged by {@link mergeBrokerSlotRecords}), not in workspace state. */
 export const BROKER_SLOTS_KEY = "omp.brokerSlots.v1";
 
 /**
