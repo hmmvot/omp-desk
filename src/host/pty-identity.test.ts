@@ -13,6 +13,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { after, before, describe, it } from "node:test";
 import {
 	isPtyProcessAlive,
@@ -20,15 +21,24 @@ import {
 	queryPtyProcessTree,
 	waitForPtyProcessGone,
 } from "./pty-identity.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { loadWin32Native, setWin32NativeForTest, type ProcessTableEntry, type Win32Native } from "./win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 
 const children: ChildProcess[] = [];
+/** Processes started by an exited parent: they outlive the test unless it ends them. */
+const orphans: number[] = [];
 
 after(() => {
 	for (const child of children) {
 		try {
 			child.kill();
+		} catch {
+			// already gone
+		}
+	}
+	for (const pid of orphans) {
+		try {
+			process.kill(pid);
 		} catch {
 			// already gone
 		}
@@ -41,6 +51,20 @@ function holdingChild(): ChildProcess {
 	const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
 	children.push(child);
 	return child;
+}
+
+/** A process that started a long-lived one of its own and exited: the survivor keeps a parent link to the exited process's id. */
+async function orphaned(): Promise<{ readonly parent: number; readonly orphan: number }> {
+	const script = "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true, windowsHide: true }); c.unref(); process.stdout.write(c.pid + '\\n');";
+	const parent = spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+	assert.ok(parent.pid !== undefined && parent.stdout !== null);
+	const reported = Promise.withResolvers<string>();
+	parent.stdout.once("data", chunk => reported.resolve(String(chunk)));
+	const orphan = Number.parseInt(await reported.promise, 10);
+	assert.ok(orphan > 0);
+	orphans.push(orphan);
+	if (parent.exitCode === null) await once(parent, "exit");
+	return { parent: parent.pid, orphan };
 }
 
 /** Milliseconds between the FILETIME epoch (1601) and the Unix epoch. */
@@ -124,6 +148,111 @@ describe("with the real native module", windowsOnly, () => {
 				assert.deepEqual(await queryPtyProcessTree(leaf), { kind: "found", pids: [] });
 			}
 		});
+
+		it("keeps a real child of a live process when that process's creation time is given", async () => {
+			const own = await queryPtyProcessIdentity(process.pid);
+			assert.equal(own.kind, "found");
+			const child = holdingChild();
+			assert.ok(child.pid !== undefined);
+			const reading = await queryPtyProcessTree(process.pid, own.kind === "found" ? own.creationTime : null);
+			assert.equal(reading.kind, "found");
+			assert.ok(reading.kind === "found" && reading.pids.includes(child.pid as number), "a child is never older than the process that started it");
+		});
+
+		it("drops a process older than the root: the table keeps an exited parent's id on the processes it left running", async () => {
+			const { parent, orphan } = await orphaned();
+			// By id alone the survivor still reads as a descendant of the exited parent, which is what a later process
+			// that is given that id would be told.
+			const byId = await queryPtyProcessTree(parent);
+			assert.ok(byId.kind === "found" && byId.pids.includes(orphan), `expected ${orphan} in ${JSON.stringify(byId)}`);
+			// Such a process starts after the survivor, so a root created a second after it cannot have started it.
+			const created = await queryPtyProcessIdentity(orphan);
+			assert.ok(created.kind === "found", JSON.stringify(created));
+			const filtered = await queryPtyProcessTree(parent, String(BigInt(created.creationTime) + 10_000_000n));
+			assert.ok(filtered.kind === "found" && !filtered.pids.includes(orphan), `the orphan is older than the root and is no descendant of it: ${JSON.stringify(filtered)}`);
+		});
+	});
+});
+
+/** One row of a fixed process table: its parent, and what a creation-time read of it answers (seconds after an arbitrary base). */
+type FixedRow = readonly [pid: number, parentPid: number, created: number | "gone" | "unreadable" | "malformed"];
+
+const FIXED_BASE = 134_000_000_000_000_000n;
+const filetime = (seconds: number): string => String(FIXED_BASE + BigInt(seconds) * 10_000_000n);
+
+/** A native module whose process table and creation times are fixed, so a walk is decided by the rows and not by which ids the machine reuses. */
+function fixedProcesses(rows: readonly FixedRow[]): Win32Native & { readonly reads: { table: number; descendants: number } } {
+	const reads = { table: 0, descendants: 0 };
+	const unused = (): never => { throw new Error("not read by a process tree test"); };
+	return {
+		reads,
+		mutexState: unused,
+		processCreation: pid => {
+			const created = rows.find(row => row[0] === pid)?.[2];
+			if (created === undefined || created === "gone") return { kind: "gone" };
+			if (created === "unreadable") return { kind: "unknown", detail: "access denied" };
+			return { kind: "found", filetime: created === "malformed" ? "not-a-filetime" : filetime(created) };
+		},
+		processDescendants: () => { reads.descendants += 1; return { kind: "found", pids: [999] }; },
+		processTable: () => {
+			reads.table += 1;
+			return { kind: "found", entries: rows.map((row): ProcessTableEntry => ({ pid: row[0], parentPid: row[1], exe: "fixture.exe" })) };
+		},
+		processCommandLine: unused,
+		openPipeClient: unused,
+		volumeOf: unused,
+		readSecuritySync: unused,
+		readSecurity: unused,
+		lookupAccountNames: unused,
+	};
+}
+
+describe("with a fixed process table", windowsOnly, () => {
+	/** The stopped child, created at 100 s. Its own row names one of its grandchildren as parent, which makes the table cyclic. */
+	const rows: readonly FixedRow[] = [
+		[100, 301, 100],
+		// An old process whose creator had the child's id: older than the child, so not its descendant, and nothing below it is walked.
+		[200, 100, 50],
+		[201, 200, 120],
+		// Genuine descendants, each created after the parent it names.
+		[300, 100, 110],
+		[301, 300, 130],
+		// Created after the child but before the parent it names: the intermediate id was reused, so it is not that parent's.
+		[302, 300, 105],
+		// Created at the child's own instant: not ruled out.
+		[700, 100, 100],
+		// A creation time that cannot be read cannot be ruled out; what is below it is held to the nearest time that was read.
+		[400, 100, "unreadable"],
+		[401, 400, 90],
+		[402, 400, 140],
+		[600, 100, "malformed"],
+		// Gone since the snapshot: no survivor itself, but what names it is still walked, under the bound that was read.
+		[500, 100, "gone"],
+		[501, 500, 150],
+		[502, 500, 90],
+	];
+
+	it("keeps the processes the child can have started, and drops the rest with everything below them", async () => {
+		const native = fixedProcesses(rows);
+		setWin32NativeForTest(native);
+		const reading = await queryPtyProcessTree(100, filetime(100));
+		assert.equal(reading.kind, "found");
+		assert.deepEqual(reading.kind === "found" ? [...reading.pids].sort((a, b) => a - b) : [], [300, 301, 400, 402, 501, 600, 700]);
+		assert.deepEqual(native.reads, { table: 1, descendants: 0 }, "one snapshot, and no walk by id alone");
+	});
+
+	it("walks by id alone when the child's creation time was never read", async () => {
+		const native = fixedProcesses(rows);
+		setWin32NativeForTest(native);
+		assert.deepEqual(await queryPtyProcessTree(100, null), { kind: "found", pids: [999] });
+		assert.deepEqual(await queryPtyProcessTree(100), { kind: "found", pids: [999] });
+		assert.deepEqual(native.reads, { table: 0, descendants: 2 });
+	});
+
+	it("reads a failed snapshot as unknown, whatever the creation time", async () => {
+		const failing = { ...fixedProcesses(rows), processTable: () => ({ kind: "unknown", detail: "snapshot failed" }) as const };
+		setWin32NativeForTest(failing);
+		assert.deepEqual(await queryPtyProcessTree(100, filetime(100)), { kind: "unknown", detail: "snapshot failed" });
 	});
 });
 

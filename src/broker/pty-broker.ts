@@ -1348,17 +1348,20 @@ export class PtyBroker {
 		let tree: PtyTreeVerdict = "unknown";
 		let checked: number[] = [];
 		let treeEvidence: PtyTreeEvidence = "unavailable";
-		const reading = await queryPtyProcessTree(pid);
+		const reading = await queryPtyProcessTree(pid, this.nativeCreationTime);
 		if (reading.kind === "found") {
 			checked = [...reading.pids];
 			// A live-table walk only reaches a child whose parent link still leads back
 			// to this pid: a descendant whose intermediary already exited is invisible to
 			// it, so an empty answer is *not* proof of an empty tree and is never reported
-			// as one. Survivors it did see are reported as such.
+			// as one. Survivors it did see are reported as such. A row created before the
+			// child cannot be its descendant (the pid's earlier holder started it, and the
+			// table keeps that link), so the walk drops it: an unrelated old process is no
+			// survivor of this stop (ADR-0029, amendment 2026-10-30).
 			tree = checked.length === 0 ? "unknown" : "remaining";
 			treeEvidence = "parent-links-only";
 			if (checked.length === 0) {
-				detail = `${detail}; no live process names ${pid} as its parent, but a descendant whose intermediate parent already exited cannot be reached from a process-table snapshot and no kernel-enforced group is available through this PTY provider`;
+				detail = `${detail}; no live process started by ${pid} was found, but a descendant whose intermediate parent already exited cannot be reached from a process-table snapshot and no kernel-enforced group is available through this PTY provider`;
 			}
 		} else {
 			detail = `${detail}; the descendant read failed: ${reading.detail}`;

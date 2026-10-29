@@ -78,15 +78,63 @@ export async function queryPtyProcessIdentity(pid: number): Promise<PtyIdentityR
 	return reading;
 }
 
-/** Live descendants of one process, from a single process-table snapshot. */
-export async function queryPtyProcessTree(pid: number): Promise<PtyTreeReading> {
+/**
+ * Live descendants of one process, from a single process-table snapshot.
+ *
+ * A parent link in the table is a number, and Windows keeps it after the parent exits: a long-lived process whose creator
+ * had id X still names X as its parent when a later, unrelated process is given X. A walk by id alone would report that old
+ * process as a descendant of the newcomer. A child cannot be older than the process that started it (as long as the clock
+ * did not step back between the two starts), so with the root's kernel creation time (`rootCreationTime`) every row is read
+ * once more and one created before the parent it claims is dropped, together with everything below it. A row whose creation
+ * time cannot be read stays (it cannot be ruled out); a row that has exited since the snapshot is not reported, and what
+ * names it is still walked. Without a root creation time nothing can be ruled out and the walk is by id alone.
+ *
+ * What this cannot exclude: a process started by a new holder of the root's id after the root ended, which is newer than the
+ * root. The window opens when the root ends, and the caller may read the tree long after that.
+ */
+export async function queryPtyProcessTree(pid: number, rootCreationTime: string | null = null): Promise<PtyTreeReading> {
 	if (process.platform !== "win32") {
 		return { kind: "unknown", detail: "process tree reading is implemented for Windows only" };
 	}
 	if (!Number.isSafeInteger(pid) || pid <= 0) return { kind: "unknown", detail: "no process id to read" };
 	const native = await win32Native();
 	if (native === null) return { kind: "unknown", detail: NATIVE_UNAVAILABLE };
-	return native.processDescendants(pid);
+	if (!isPtyCreationTime(rootCreationTime)) return native.processDescendants(pid);
+	const table = native.processTable();
+	if (table.kind !== "found") return table;
+	const children = new Map<number, number[]>();
+	for (const row of table.entries) {
+		const siblings = children.get(row.parentPid);
+		if (siblings === undefined) children.set(row.parentPid, [row.pid]);
+		else siblings.push(row.pid);
+	}
+	// Breadth first inside this one snapshot, with a visited set: a reused parent id can make the table cyclic. Each entry of
+	// a level carries the oldest creation time a child of it may have: its own, or its nearest ancestor's when it cannot be read.
+	const visited = new Set<number>([pid]);
+	const found: number[] = [];
+	for (let level = [{ pid, notBefore: BigInt(rootCreationTime) }], next: typeof level = []; level.length > 0; level = next, next = []) {
+		for (const parent of level) {
+			for (const child of children.get(parent.pid) ?? []) {
+				if (visited.has(child)) continue;
+				visited.add(child);
+				const created = native.processCreation(child);
+				let notBefore = parent.notBefore;
+				if (created.kind === "gone") {
+					// Exited since the snapshot, so no survivor itself; what it left running still names it, under the bound that was read.
+					next.push({ pid: child, notBefore });
+					continue;
+				}
+				if (created.kind === "found" && isPtyCreationTime(created.filetime)) {
+					const startedAt = BigInt(created.filetime);
+					if (startedAt < parent.notBefore) continue;
+					notBefore = startedAt;
+				}
+				found.push(child);
+				next.push({ pid: child, notBefore });
+			}
+		}
+	}
+	return { kind: "found", pids: found };
 }
 
 /** A process that is gone, or why that could not be established in the bound. */

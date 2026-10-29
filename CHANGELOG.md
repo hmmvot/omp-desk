@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Chat: closing Find no longer takes the focus back from a click made a moment later.** The retry that gives the composer the focus ran once more 100 ms after Find closed even when the first attempt had worked, and moved the focus back to the composer after a click on the transcript background in that time.
+- **Terminal Force Stop no longer refuses because of an unrelated old process.** After a force stop the broker looked for processes that still named the stopped shell as their parent. Windows keeps a parent id after the parent ends and reuses ids within seconds, so an old process whose creator had the same id was read as a survivor, and Force Stop said `Some commands are still running. Nothing was restarted; try Stop again.` — on every try, for as long as that process ran. The reading now ignores a process that is older than the one it names as its parent.
 
 ## [0.4.13] - 2026-10-29
 
