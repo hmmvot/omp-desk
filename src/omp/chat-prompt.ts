@@ -23,7 +23,7 @@
  * one request to the next and a cache breakpoint can still sit on the real prompt (OMP never anchors a breakpoint on
  * or before a message it finds rewritten for the request, which is why the reminder is its own message).
  */
-import { HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
+import { HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../wire/control-protocol.ts";
 
 export interface ChatPromptInjection {
 	/** A short stable name for the feature the rule serves. */

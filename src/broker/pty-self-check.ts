@@ -26,7 +26,7 @@
  */
 
 import { silentLogger } from "../shared/logger.ts";
-import { startWin32Native } from "../host/win32-native.ts";
+import { startWin32Native } from "../wire/win32-native.ts";
 
 /** Namespace of both markers, so one observed here is ours and not a child's own text. */
 export const SELF_CHECK_MARKER = "omp-pty-check";

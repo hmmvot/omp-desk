@@ -101,10 +101,10 @@ import {
 	removeOwnControlRendezvous,
 	verifyControlRequestMac,
 	writeControlRendezvous,
-} from "../host/control-protocol.ts";
-import { NativeActivityJournal, NATIVE_ACTIVITY_HOOKS, type NativeActivityHook } from "../host/native-activity.ts";
-import { fileEvidenceStoreRoot } from "../host/file-evidence-reader.ts";
-import type { NativeFileObservationStorageProbe } from "../host/native-file-observation-storage.ts";
+} from "../wire/control-protocol.ts";
+import { NativeActivityJournal, NATIVE_ACTIVITY_HOOKS, type NativeActivityHook } from "../wire/native-activity.ts";
+import { fileEvidenceStoreRoot } from "../wire/file-evidence-reader.ts";
+import type { NativeFileObservationStorageProbe } from "../wire/native-file-observation-storage.ts";
 import { createFileEvidenceHooks, createFileEvidenceObserver } from "./file-evidence.ts";
 import { registerNavigateCommand, type NavigateCommandApi } from "./navigate-command.ts";
 import { registerClearCommand } from "./clear-command.ts";

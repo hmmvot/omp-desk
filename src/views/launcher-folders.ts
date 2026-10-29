@@ -10,7 +10,7 @@
  *    started and each window's folders in VS Code's order, only while
  *    `ompDesk.showWorkspaceFolders` is on. An open folder inside a version-control checkout is
  *    shown as the checkout's root, where its sessions run (`ompDesk.runSessionsAtRepositoryRoot`,
- *    `src/host/session-folder.ts`); the opened folder stays in `openedPaths` so the sessions
+ *    `src/wire/session-folder.ts`); the opened folder stays in `openedPaths` so the sessions
  *    recorded there keep their place;
  * 2. the profile-wide **pinned** folders (`WorkspaceFolderRegistry`), in their
  *    stored order; a pinned folder that is also open keeps its place among the open

@@ -1,14 +1,14 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV } from "./control-protocol";
-import type { ControlNativeState, ControlNativeTarget } from "./control-protocol";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV } from "../wire/control-protocol";
+import type { ControlNativeState, ControlNativeTarget } from "../wire/control-protocol";
 import { planControlLaunch } from "./launch-capability";
 import { DEFAULT_OMP_PROFILE, resolveOmpBinary } from "./native-terminal";
 import type { OmpCommand } from "./native-terminal";
 import type { RuntimeFlagPlan } from "./runtime-flags";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
-import { isPtyProcessAlive } from "./pty-identity";
+import { isPtyProcessAlive } from "../wire/pty-identity";
 import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
 import type { AttachTimings, RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
 import { brokerNativeGenerationReader, concurrentPinProof, lazyNativeGenerationReader } from "./rpc-reconcile";

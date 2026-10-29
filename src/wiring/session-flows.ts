@@ -18,7 +18,7 @@
 import type * as vscode from "vscode";
 import { bindingMatches } from "../host/bridge-records.ts";
 import type { BridgeNativeBinding } from "../host/bridge-records.ts";
-import { controlPathEquals } from "../host/control-protocol.ts";
+import { controlPathEquals } from "../wire/control-protocol.ts";
 import type { LaunchKind, LaunchTimeline } from "../host/launch-timeline.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { PtyHandle } from "../host/pty-client.ts";

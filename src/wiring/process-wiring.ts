@@ -31,14 +31,14 @@ import type {
 } from "../host/broker-processes.ts";
 import type { PeerRowAnswer, StopRowAnswer } from "../host/window-requests.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
-import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../wire/pty-identity.ts";
 import { identifyPeerExecutor, proveExecutorGone } from "../host/peer-executor.ts";
 import type { PeerExecutorProbe } from "../host/peer-executor.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
 import type { Logger } from "../shared/logger.ts";
 import { createUnmanagedBrokerScanner } from "../host/unmanaged-brokers.ts";
-import { win32Native } from "../host/win32-native.ts";
-import type { Win32Native } from "../host/win32-native.ts";
+import { win32Native } from "../wire/win32-native.ts";
+import type { Win32Native } from "../wire/win32-native.ts";
 import type { ShellSlotStore } from "../host/shell-slots.ts";
 import { ProcessTreeItem } from "../views/process-rows";
 import type { SessionsGrouping } from "../views/session-order";

@@ -6,7 +6,7 @@
  * Nothing imports this file except {@link ./rare-subsystems-loader.ts}: esbuild resolves that one import to the separate bundle,
  * and the extension build fails if any other path pulls these modules back into `out/extension.js`.
  */
-export { SettingsRefusal } from "../host/omp-settings-core.ts";
+export { SettingsRefusal } from "../wire/omp-settings-core.ts";
 export { SettingsEditors } from "../host/omp-settings-editor.ts";
 export { OmpConfigEditors } from "../host/omp-config-editor.ts";
 export { createDeskSettingsView } from "../host/desk-settings/view.ts";

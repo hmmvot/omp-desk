@@ -16,11 +16,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import * as fsSync from "node:fs";
 import * as fsp from "node:fs/promises";
-import { localFs } from "./local-fs.ts";
+import { localFs } from "../wire/local-fs.ts";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic, stageBeside } from "./atomic-file.ts";
-import { win32Native } from "./win32-native.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic, stageBeside } from "../wire/atomic-file.ts";
+import { win32Native } from "../wire/win32-native.ts";
 
 /** Directory created under `storageDir` that owns every claim file. */
 export const CLAIM_DIRECTORY = "session-claims";

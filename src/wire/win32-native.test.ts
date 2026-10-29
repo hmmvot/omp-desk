@@ -8,7 +8,7 @@ import { afterEach, describe, it } from "node:test";
 import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
 import { findForeignAccess, formatForeignAccess } from "./foreign-access.ts";
 import { describeLoadSteps, loadWin32Native, peMachineOf, setWin32NativeForTest, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./win32-native.ts";
-import { holdMutex, installedAddonAsset, releaseMutex } from "./win32-test-support.ts";
+import { holdMutex, installedAddonAsset, releaseMutex } from "../host/win32-test-support.ts";
 
 describe("peMachineOf", () => {
 	function image(machine: number): Buffer {

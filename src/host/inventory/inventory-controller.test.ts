@@ -3,8 +3,8 @@ import { describe, it } from "node:test";
 import { FRESH_MS, InventoryController } from "./inventory-controller.ts";
 import type { InventoryControllerDeps } from "./inventory-controller.ts";
 import { PendingOperations } from "../pending-operations.ts";
-import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, ViewKind, ViewModel } from "./inventory-model.ts";
-import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResult } from "./inventory-runtime.ts";
+import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, ViewKind, ViewModel } from "../../wire/inventory/inventory-model.ts";
+import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResult } from "../../wire/inventory/inventory-runtime.ts";
 import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
 

@@ -23,9 +23,9 @@ import {
 	isPtyCreationTime,
 	isPtyDigest,
 	isPtyGeneration,
-} from "./pty-protocol.ts";
-import type { PtyBrokerRecord } from "./pty-protocol.ts";
-import { ptyStateDirectory } from "./pty-registry.ts";
+} from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord } from "../wire/pty-protocol.ts";
+import { ptyStateDirectory } from "../wire/pty-registry.ts";
 
 const roots: string[] = [];
 

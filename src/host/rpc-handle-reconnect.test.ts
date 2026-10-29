@@ -12,8 +12,8 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PTY_PROTOCOL_VERSION, type PtyBrokerFrame, type PtyBrokerRecord, type PtyRequestFrame, type PtyStatusPayload } from "./pty-protocol.ts";
-import type { PtyClientSideConnection } from "./pty-ipc.ts";
+import { PTY_PROTOCOL_VERSION, type PtyBrokerFrame, type PtyBrokerRecord, type PtyRequestFrame, type PtyStatusPayload } from "../wire/pty-protocol.ts";
+import type { PtyClientSideConnection } from "../wire/pty-ipc.ts";
 import { RpcHandle } from "./rpc-handle.ts";
 
 const STATUS = { state: "running", exitCode: null, signal: null, nativePid: 4243, brokerPid: 4242 } as unknown as PtyStatusPayload;

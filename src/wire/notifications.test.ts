@@ -4,7 +4,7 @@ import { createChatModel, reduceChatFrame, applyChatUiRequest, type ChatEventFra
 import { turnActivity } from "../protocol/activity.ts";
 import { desktopNotificationSuppression, reportsTrailingQuestion, TurnActivityLedger, TurnNotifier, type TurnActivity, type NotificationSuppression } from "./notifications.ts";
 import { toChatEventFrame } from "../protocol/rpc.ts";
-import { assistantMessage } from "./rpc/test-support.ts";
+import { assistantMessage } from "../host/rpc/test-support.ts";
 
 const IDLE: TurnActivity = { streaming: false, backgroundWork: false, settled: true, promptStatus: null, completionOutcome: null, pendingRequest: null, outcome: null, trailingQuestion: false };
 const WORKING: TurnActivity = { ...IDLE, streaming: true, settled: false };

@@ -20,8 +20,8 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
-import { queryPtyProcessIdentity } from "./pty-identity.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { queryPtyProcessIdentity } from "../wire/pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 import type { brokerAndRootGone as brokerAndRootGoneType, recordedRootGone as recordedRootGoneType, waitForManagedRootExit as waitForManagedRootExitType } from "./native-session.ts";
 

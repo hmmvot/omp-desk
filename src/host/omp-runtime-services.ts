@@ -9,7 +9,7 @@
  */
 import { OmpUnavailableError } from "../shared/omp-unavailable";
 import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "./runtime-assets";
+import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../wire/runtime-assets";
 
 export interface OmpRuntimeServices {
 	readonly resolveOmpBinary: typeof resolveOmpBinary;

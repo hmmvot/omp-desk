@@ -19,7 +19,7 @@
  * wanted one, whose shape is wrong, whose dates are unreadable or lie in the future, or that is
  * not a small regular file, is a miss and is overwritten by the next proof. Only a *proven*
  * self-check is written — an inconclusive answer admits a launch provisionally and is never
- * kept. Writes replace the file atomically (`src/host/atomic-file.ts`), owner-only mode where
+ * kept. Writes replace the file atomically (`src/wire/atomic-file.ts`), owner-only mode where
  * the platform has one.
  *
  * The file is not a secret and carries nothing a session depends on for safety: it lets a
@@ -34,9 +34,9 @@ import { mkdir, rm, stat } from "node:fs/promises";
 import { arch, platform, release } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
-import { canonicalJson } from "./control-protocol.ts";
-import { RUNTIME_ASSET_DIRECTORY } from "./runtime-assets.ts";
+import { readBoundedFile, replaceFileAtomic } from "../wire/atomic-file.ts";
+import { canonicalJson } from "../wire/control-protocol.ts";
+import { RUNTIME_ASSET_DIRECTORY } from "../wire/runtime-assets.ts";
 
 /** What the runtime reported about itself when it was asked to prove itself. */
 export interface PtySelfCheckAnswer {

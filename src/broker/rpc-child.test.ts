@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import { RpcChildWriteError, startRpcChild, offersProtocol2, RPC_NEGOTIATE_ID, type RpcChild, type RpcChildOptions } from "./rpc-child.ts";
 import { peekRpcLine, RpcLineRing } from "./rpc-ring.ts";
-import { PTY_RPC_STDERR_TAIL_BYTES } from "../host/pty-protocol.ts";
+import { PTY_RPC_STDERR_TAIL_BYTES } from "../wire/pty-protocol.ts";
 
 /**
  * The stand-in for `omp --mode rpc-ui`. argv[2] picks a behaviour:

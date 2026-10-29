@@ -130,7 +130,7 @@ See ADR-0072. Agent model, prewalk and advisor overrides can be saved to the pro
 
 ### Files
 
-New: `src/omp/resolution.ts` (pure projection), `src/protocol/role-notes.ts` (item 6 text, the ids it covers and which roles OMP resolves as a chain), `src/webview/settings/{common,roles,agents,health}.tsx` (the page is split out of `main.tsx`, which keeps the host hook, the shell, the browser, presets and New agent). Changed: `src/omp/settings-worker.ts`, `src/omp/settings-contracts.ts` (and the worker's export-presence list: `resolveRoleChain`, `overlay`), `src/protocol/settings-model.ts`, `settings-messages.ts`, `settings-pick-items.ts`, `src/host/omp-settings-editor.ts`, `src/webview/settings/{main.tsx,model.ts,styles.ts}`. `src/omp/config-transaction.ts`, `src/host/omp-settings-core.ts` and everything of the OMP settings editor are not touched; `config-ancestor.ts` and `ancestorMessage` are reused.
+New: `src/omp/resolution.ts` (pure projection), `src/protocol/role-notes.ts` (item 6 text, the ids it covers and which roles OMP resolves as a chain), `src/webview/settings/{common,roles,agents,health}.tsx` (the page is split out of `main.tsx`, which keeps the host hook, the shell, the browser, presets and New agent). Changed: `src/omp/settings-worker.ts`, `src/omp/settings-contracts.ts` (and the worker's export-presence list: `resolveRoleChain`, `overlay`), `src/protocol/settings-model.ts`, `settings-messages.ts`, `settings-pick-items.ts`, `src/host/omp-settings-editor.ts`, `src/webview/settings/{main.tsx,model.ts,styles.ts}`. `src/omp/config-transaction.ts`, `src/wire/omp-settings-core.ts` and everything of the OMP settings editor are not touched; `config-ancestor.ts` and `ancestorMessage` are reused.
 
 ## Alternatives
 

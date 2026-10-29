@@ -1,7 +1,7 @@
 /**
  * Regression tests for content-addressed runtime assets.
  *
- * Runner: `node --test src/host/runtime-assets.test.ts`
+ * Runner: `node --test src/wire/runtime-assets.test.ts`
  *
  * These copies are what the native host-control module and the PowerShell peer
  * helper are run from, so what matters is that a copy is complete, verifiable by
@@ -28,8 +28,8 @@ import {
 } from "./runtime-assets.ts";
 import { readStorageSecurity, type PrivateStorageCommandResult, type PrivateStorageProbe } from "./private-storage.ts";
 import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
-import { installedAddonAsset } from "./win32-test-support.ts";
-import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
+import { installedAddonAsset } from "../host/win32-test-support.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "../host/private-storage-test-support.ts";
 
 /** The account a simulated Windows probe runs as. */
 const ACCOUNT = "WORKSTATION\\dev";

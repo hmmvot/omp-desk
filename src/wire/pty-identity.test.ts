@@ -1,7 +1,7 @@
 /**
  * Tests for the kernel identity readings the whole design rests on.
  *
- * Runner: `node --test src/host/pty-identity.test.ts`
+ * Runner: `node --test src/wire/pty-identity.test.ts`
  *
  * Every claim about "our process" — adopting a surviving broker, proving a stop,
  * deciding that a `node` process in a folder shell's tree is gone — is a creation-time
@@ -22,7 +22,7 @@ import {
 	waitForPtyProcessGone,
 } from "./pty-identity.ts";
 import { loadWin32Native, setWin32NativeForTest, type ProcessTableEntry, type Win32Native } from "./win32-native.ts";
-import { installedAddonAsset } from "./win32-test-support.ts";
+import { installedAddonAsset } from "../host/win32-test-support.ts";
 
 const children: ChildProcess[] = [];
 /** Processes started by an exited parent: they outlive the test unless it ends them. */

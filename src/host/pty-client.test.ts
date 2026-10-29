@@ -50,14 +50,14 @@ import {
 	attestationOf,
 	createPtyToken,
 	type PtyBrokerRecord,
-} from "./pty-protocol.ts";
+} from "../wire/pty-protocol.ts";
 import { PtyBrokerClient, type PtyHandle, type PtyHandleEvent } from "./pty-client.ts";
 import { PtyRequestError } from "./broker-handle.ts";
-import { connectPtyBroker } from "./pty-ipc.ts";
-import { isPtyProcessAlive, queryPtyProcessIdentity, queryPtyProcessTree, waitForPtyProcessGone } from "./pty-identity.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { connectPtyBroker } from "../wire/pty-ipc.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, queryPtyProcessTree, waitForPtyProcessGone } from "../wire/pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
-import { ptyRecordPath, readPtyRecord } from "./pty-registry.ts";
+import { ptyRecordPath, readPtyRecord } from "../wire/pty-registry.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 

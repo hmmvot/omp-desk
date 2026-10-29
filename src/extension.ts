@@ -46,11 +46,11 @@ import { reduceFileBlocks, splitFileBlocks } from "./shared/file-blocks";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
-import { useSynchronousLocalFs } from "./host/local-fs";
-import { synchronousLocalPaths } from "./host/private-storage";
+import { useSynchronousLocalFs } from "./wire/local-fs";
+import { synchronousLocalPaths } from "./wire/private-storage";
 import { acquireClaim, claimsDirectory, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
 import { startFsTurnaroundProbe } from "./host/fs-turnaround";
-import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
+import { startLoopLagMonitor, trackOperation } from "./wire/loop-lag";
 import type { OmpBinary, OmpCommand, OmpPackageRoot } from "./host/native-terminal";
 import { startChatRuntimeWarmup } from "./host/chat-runtime-warmup";
 import {
@@ -112,7 +112,7 @@ import type {
 import type { SessionIndexEntry, SessionViewMode } from "./host/session-model";
 import type { SessionFileHeader } from "./host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
-import { formatToolSpawn, setToolSpawnObserver } from "./host/tool-spawn-trace";
+import { formatToolSpawn, setToolSpawnObserver } from "./wire/tool-spawn-trace";
 import { type Logger, prefixedLogger } from "./shared/logger";
 import { LaunchTimeline, type LaunchKind } from "./host/launch-timeline";
 import { PendingOperations, type PendingHandle } from "./host/pending-operations";
@@ -129,10 +129,10 @@ import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
 import { EditorSlotPruner, EditorSlotWatch } from "./host/editor-slot-prune";
 import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./host/omp-session-lease";
-import { describeLoadSteps, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./host/win32-native";
+import { describeLoadSteps, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./wire/win32-native";
 import { warmNativeAsset } from "./host/native-proof";
 import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, simulatedNativeFailure } from "./wiring/native-module-notice";
-import { nativeTroubleshootingAnchor } from "./host/native-module-failure";
+import { nativeTroubleshootingAnchor } from "./wire/native-module-failure";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
 import { comparablePosix, findFileMentions } from "./host/file-mentions";
@@ -156,18 +156,18 @@ import { composePreviewQuote } from "./wiring/preview-quote";
 import type { PreviewDocument } from "./wiring/preview-quote";
 import type { ActivePreview } from "./wiring/preview-selection";
 import { activePreview, copyPreviewSelection, previewDocumentOf } from "./wiring/preview-selection";
-import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
-import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
+import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./wire/notifications";
+import type { TurnActivity, TurnNotice, NotificationSuppression } from "./wire/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
 import { sendDesktopNotification } from "./host/desktop-notifications";
 import { notificationLine } from "./shared/notification-text";
-import { NativeActivityLedger } from "./host/native-activity";
+import { NativeActivityLedger } from "./wire/native-activity";
 import {
   isOpenControlClient,
   mayRefreshControlSnapshot,
   mayReportControlFailure,
 } from "./host/control-attempt";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./host/runtime-assets";
+import { stageRuntimeAssets, verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./wire/runtime-assets";
 import { PackageDrift } from "./host/package-drift";
 import {
   DIAGNOSTICS_DOCUMENT_PATH,
@@ -217,7 +217,7 @@ import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
 import { LauncherFolders } from "./views/launcher-folders";
-import { SessionFolderResolver } from "./host/session-folder";
+import { SessionFolderResolver } from "./wire/session-folder";
 import { displayFolderPath } from "./host/folder-display";
 import type { LauncherFolder } from "./views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./views/workspace-folders";
@@ -275,7 +275,7 @@ import type { TabSelectionApi } from "./host/editor-tab-selection";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "./host/pty-client";
-import { ptyStateDirectory } from "./host/pty-registry";
+import { ptyStateDirectory } from "./wire/pty-registry";
 import { ptyRecordedTreeDigestFile } from "./host/pty-runtime";
 import { createPtyReadinessGate } from "./host/pty-readiness";
 import type { PtyReadinessGate } from "./host/pty-readiness";
@@ -345,8 +345,8 @@ import { SETTINGS_APPLY_NOT_LIVE } from "./host/omp-settings-apply";
 // what the broker actually admitted.
 import { folderShellOwnerHint } from "./host/shell-owner";
 import { shellEditorTitle, shellCleanupDescription, watchShellOwnerStop } from "./host/shell-title";
-import type { PtyOwnerHint, PtyOwnerStopState } from "./host/pty-protocol";
-import { filetimeToEpochMs } from "./host/pty-protocol";
+import type { PtyOwnerHint, PtyOwnerStopState } from "./wire/pty-protocol";
+import { filetimeToEpochMs } from "./wire/pty-protocol";
 import type {
   GuestControlRequestMessage,
   GuestControlStateMessage,
@@ -368,11 +368,11 @@ import {
   createControlRequestId,
   controlPathEquals,
   readControlRendezvous,
-} from "./host/control-protocol";
+} from "./wire/control-protocol";
 import type { ControlModelRef } from "./protocol/control";
 import type {
   ControlHostSnapshot,
-} from "./host/control-protocol";
+} from "./wire/control-protocol";
 import {
   HostControlClient,
   HostControlRefusedError,
@@ -396,8 +396,8 @@ import {
   observationTextState,
   observationTokenFromPath,
   OBSERVATION_DOCUMENT_SCHEME,
-} from "./host/file-evidence-reader";
-import type { ObservationPair, ObservationTextState } from "./host/file-evidence-reader";
+} from "./wire/file-evidence-reader";
+import type { ObservationPair, ObservationTextState } from "./wire/file-evidence-reader";
 import {
   NATIVE_FILE_OBSERVATION_DISCLOSURE,
   NATIVE_FILE_OBSERVATION_DISCLOSURE_ID,
@@ -410,15 +410,15 @@ import {
   resolveNativeFileObservationStorePaths,
   restrictNativeFileObservationStorage,
   revokeNativeFileObservationConsent,
-} from "./host/native-file-observation-storage";
+} from "./wire/native-file-observation-storage";
 import type {
   NativeFileObservationJournal,
   NativeFileObservationStorePaths,
-} from "./host/native-file-observation-storage";
+} from "./wire/native-file-observation-storage";
 import type {
   NativeFileObservationCallView,
   NativeFileObservationRecord,
-} from "./host/native-file-observation";
+} from "./wire/native-file-observation";
 
 // The declarations exported below, other than `activate`, `deactivate` and `fileEvidenceDeletionRefusal`, exist for
 // `src/extension-harness.ts`, the entry the lifecycle test bundles: they are private functions of this module that the

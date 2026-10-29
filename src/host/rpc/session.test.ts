@@ -18,7 +18,7 @@ import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSession
 import { turnActivity } from "../../protocol/activity.ts";
 import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
 import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
-import { TurnActivityLedger, type TurnNotice } from "../notifications.ts";
+import { TurnActivityLedger, type TurnNotice } from "../../wire/notifications.ts";
 import {
 	ManualTimers,
 	ScratchDir,

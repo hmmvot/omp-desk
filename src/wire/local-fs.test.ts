@@ -5,9 +5,9 @@ import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { localFs, markSynchronousLocalRoots, useSynchronousLocalFs } from "./local-fs.ts";
 import { ptyRecordPath, ptyStateDirectory, readPtyRecord } from "./pty-registry.ts";
-import { ptyRecordedTreeDigest, ptyRecordedTreeDigestFile } from "./pty-runtime.ts";
-import { catalogPaths, readCatalogDocument, transactCatalog } from "./profile-catalog.ts";
-import { acquireClaim, claimMutexPath, claimPathFor, createClaimHolder, createOwnerGeneration, readClaim } from "./session-claim.ts";
+import { ptyRecordedTreeDigest, ptyRecordedTreeDigestFile } from "../host/pty-runtime.ts";
+import { catalogPaths, readCatalogDocument, transactCatalog } from "../host/profile-catalog.ts";
+import { acquireClaim, claimMutexPath, claimPathFor, createClaimHolder, createOwnerGeneration, readClaim } from "../host/session-claim.ts";
 
 const roots: string[] = [];
 const unmark: Array<() => void> = [];

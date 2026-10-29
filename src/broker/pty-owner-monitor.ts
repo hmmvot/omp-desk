@@ -49,14 +49,14 @@ import {
 	type PtyOwnerStopState,
 	type PtyOwnerStopStatus,
 	type PtyStopResult,
-} from "../host/pty-protocol.ts";
+} from "../wire/pty-protocol.ts";
 import {
 	startPtyOwnerWatcher,
 	type PtyOwnerWatchEvents,
 	type PtyOwnerWatcher,
 	type PtyOwnerWatcherLaunch,
 	type PtyOwnerWatchHelper,
-} from "../host/pty-owner-watch.ts";
+} from "../wire/pty-owner-watch.ts";
 
 /** Default reason an automatic stop is attributed to, in logs and in its result. */
 export const PTY_OWNER_EXIT_REASON = "the owning VS Code instance exited";

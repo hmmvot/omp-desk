@@ -37,7 +37,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "./atomic-file.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "../wire/atomic-file.ts";
 import { BRIDGE_PATH, BRIDGE_SECRET_BYTES, asciiJsonText, decodeBase64Url, encodeBase64Url, encodeHex, sha256 } from "../protocol/bridge-protocol.ts";
 import { isBridgeTabId, tabIdToken } from "./bridge-identity.ts";
 

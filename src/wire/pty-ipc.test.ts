@@ -1,7 +1,7 @@
 /**
  * Tests for the PTY broker's loopback transport.
  *
- * Runner: `node --test src/host/pty-ipc.test.ts`
+ * Runner: `node --test src/wire/pty-ipc.test.ts`
  *
  * The broker has no other door: everything a caller can do to a terminal goes
  * through this socket. What matters is that a peer without the token cannot open one,

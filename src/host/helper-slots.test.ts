@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createHelperSlots, HELPER_SLOT_NAME } from "./helper-slots.ts";
-import { ptySlotLockPath } from "./pty-registry.ts";
+import { ptySlotLockPath } from "../wire/pty-registry.ts";
 
 let storage = "";
 before(async () => { storage = await mkdtemp(path.join(tmpdir(), "omp-helper-slots-")); });

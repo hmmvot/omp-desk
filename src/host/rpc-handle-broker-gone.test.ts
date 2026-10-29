@@ -10,8 +10,8 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { PtyBrokerRecord } from "./pty-protocol.ts";
-import type { PtyClientSideConnection } from "./pty-ipc.ts";
+import type { PtyBrokerRecord } from "../wire/pty-protocol.ts";
+import type { PtyClientSideConnection } from "../wire/pty-ipc.ts";
 import { RpcHandle } from "./rpc-handle.ts";
 import type { RpcChannelEvent } from "../protocol/rpc.ts";
 

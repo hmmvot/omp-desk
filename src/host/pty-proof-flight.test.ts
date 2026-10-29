@@ -22,7 +22,7 @@ import { setImmediate as yieldTurn } from "node:timers/promises";
 import { PTY_BROKER_ENTRY, PTY_OWNER_HELPER, discardReusedPtyProof, ensurePtyRuntime, forgetProvedPtyRuntimes, type PtyRuntimeOptions, type PtyRuntimeReadiness, type ReusedPtyProof, type SelfCheckResult } from "./pty-runtime.ts";
 import { PTY_FLIGHT_DIRECTORY, ptyFlightDirectory, singleFlight, type PtyFlightAttempt, type PtyFlightOptions, type PtyFlightResult } from "./pty-proof-flight.ts";
 import { PTY_PROOF_DIRECTORY, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
-import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import type { PrivateStorageCommandResult, PrivateStorageProbe } from "../wire/private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 
 const roots: string[] = [];

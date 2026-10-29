@@ -27,7 +27,7 @@ import type { BridgeNativeBinding, BridgeRecordScope } from "../host/bridge-reco
 import type { BridgeDocumentRoute } from "../host/bridge-route.ts";
 import type { LocalSessionRuntime } from "../runtime/local-runtime.ts";
 import { isOpenControlClient } from "../host/control-attempt.ts";
-import { controlPathEquals } from "../host/control-protocol.ts";
+import { controlPathEquals } from "../wire/control-protocol.ts";
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
 import type { EditorCoordinator, EditorReservationResult } from "../host/editor-coordinator.ts";
 import type { EditorSlotRegistry } from "../host/editor-slots.ts";

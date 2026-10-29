@@ -16,8 +16,8 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { brokerRecordFacts } from "./broker-processes.ts";
 import type { BrokerProcessSource, SourcedBrokerRecord } from "./broker-processes.ts";
-import { PTY_RECORD_SUFFIX, parsePtyBrokerRecord } from "./pty-protocol.ts";
-import { ptyStateDirectory } from "./pty-registry.ts";
+import { PTY_RECORD_SUFFIX, parsePtyBrokerRecord } from "../wire/pty-protocol.ts";
+import { ptyStateDirectory } from "../wire/pty-registry.ts";
 
 export interface BrokerRecordListing {
 	readonly records: readonly SourcedBrokerRecord[];

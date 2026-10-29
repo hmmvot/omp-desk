@@ -24,7 +24,7 @@ import type { ChatHostMessage, ChatSnapshotChunkMessage, ChatSnapshotMessage } f
 import { ChatClient } from "../webview/lib/chat-client.ts";
 import { CHAT_ALREADY_RUNNING_SENTENCE, CHAT_NOT_LIVE_SENTENCE, ChatRuntime } from "./chat-runtime.ts";
 import type { ChatPage, ChatRuntimeEvent, ChatRuntimeOptions } from "./chat-runtime.ts";
-import { SettingsRefusal } from "./omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import { OmpUnavailableError } from "../shared/omp-unavailable.ts";
 import { settingsSessionApply } from "./omp-settings-apply.ts";
 import { FakeRpcChannel } from "./rpc/fake-channel.ts";

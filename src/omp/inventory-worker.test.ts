@@ -5,10 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runSettingsWorker } from "../host/omp-settings-worker.ts";
-import { parseSnapshot } from "../host/inventory/inventory-runtime.ts";
+import { runSettingsWorker } from "../wire/omp-settings-worker.ts";
+import { parseSnapshot } from "../wire/inventory/inventory-runtime.ts";
 import { BUILTIN_SWITCHES } from "./inventory-switches.ts";
-import type { InventoryRow, InventorySnapshot } from "../host/inventory/inventory-model.ts";
+import type { InventoryRow, InventorySnapshot } from "../wire/inventory/inventory-model.ts";
 
 const packageRoot = process.env.OMP_SETTINGS_TEST_PACKAGE_ROOT ?? path.join(os.homedir(), ".bun", "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
 const bunPath = process.env.OMP_SETTINGS_TEST_BUN ?? path.join(os.homedir(), ".bun", "bin", process.platform === "win32" ? "bun.exe" : "bun");

@@ -4,7 +4,7 @@
  * The clock is injected and jumped, so a "blocked loop" costs the test nothing: the timer fires on time in real time
  * and the gauge sees a stretch it did not expect.
  *
- * Runner: `node --test src/host/loop-gauge.test.ts`
+ * Runner: `node --test src/wire/loop-gauge.test.ts`
  */
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";

@@ -14,7 +14,7 @@ import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import type { PrivateStorageCommandResult, PrivateStorageProbe } from "../wire/private-storage.ts";
 import { type LoggedLine, recordingLogger } from "../shared/logger.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import {
@@ -37,9 +37,9 @@ import {
 	type PtyProofKey,
 	type PtySelfCheckAnswer,
 } from "./pty-runtime-proof-store.ts";
-import { PTY_PROTOCOL_VERSION, PTY_RECORD_VERSION, PTY_RUNTIME_VERSION, PTY_SERVICE, createPtyGeneration, createPtyToken } from "./pty-protocol.ts";
-import type { PtyBrokerRecord } from "./pty-protocol.ts";
-import { ptyRecordPath } from "./pty-registry.ts";
+import { PTY_PROTOCOL_VERSION, PTY_RECORD_VERSION, PTY_RUNTIME_VERSION, PTY_SERVICE, createPtyGeneration, createPtyToken } from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord } from "../wire/pty-protocol.ts";
+import { ptyRecordPath } from "../wire/pty-registry.ts";
 
 const WINDOWS_ONLY = process.platform !== "win32" ? "the runtime proof is Windows-only" : false;
 const ACCOUNT = "WORKSTATION\\dev";

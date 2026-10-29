@@ -39,10 +39,10 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { stat } from "node:fs/promises";
-import { localFs } from "./local-fs.ts";
+import { localFs } from "../wire/local-fs.ts";
 import { join } from "node:path";
 import process from "node:process";
-import type { PrivateStorageProbe } from "./private-storage.ts";
+import type { PrivateStorageProbe } from "../wire/private-storage.ts";
 import {
 	hashRuntimeTree,
 	listRuntimeTreeFiles,
@@ -51,10 +51,10 @@ import {
 	type RuntimeTreeSource,
 	type StagedRuntimeAsset,
 	type StagedRuntimeTree,
-} from "./runtime-assets.ts";
+} from "../wire/runtime-assets.ts";
 import { forgetPtyProof, ptyProofKey, ptyProofKeyName, ptyProofPath, readPtyProof, writePtyProof, type PtyProofRecord, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
 import { singleFlight, type PtyFlightAttempt, type PtyFlightOptions } from "./pty-proof-flight.ts";
-import { isPtyDigest, PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
+import { isPtyDigest, PTY_RUNTIME_VERSION } from "../wire/pty-protocol.ts";
 import {
 	SELF_CHECK_DEADLINE_FLAG,
 	SELF_CHECK_DEADLINE_MS,

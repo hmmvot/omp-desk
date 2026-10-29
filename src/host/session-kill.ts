@@ -50,7 +50,7 @@ import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import type { Logger } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "./broker-processes.ts";
-import type { PtyGoneReading, PtyIdentityReading } from "./pty-identity.ts";
+import type { PtyGoneReading, PtyIdentityReading } from "../wire/pty-identity.ts";
 
 /** How long a root may take to disappear after the tree kill returned. */
 export const KILL_GONE_TIMEOUT_MS = 5_000;

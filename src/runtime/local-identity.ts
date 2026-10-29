@@ -10,7 +10,7 @@
  */
 import type { Logger } from "../shared/logger.ts";
 import type { ContinuationProof } from "../host/session-chain.ts";
-import { controlPathEquals } from "../host/control-protocol.ts";
+import { controlPathEquals } from "../wire/control-protocol.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";

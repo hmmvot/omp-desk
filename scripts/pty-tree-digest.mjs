@@ -2,7 +2,7 @@
 //
 // The tree is `out/pty/` (without source maps) plus the native module the host also loads, `out/native/koffi.node`, which rides
 // in the tree as `native/koffi.node`. Its digest names "this build's broker runtime": a surviving broker that reports the same
-// digest runs exactly the bytes this VSIX shipped. The algorithm is `hashRuntimeTree` in `src/host/runtime-assets.ts`, written
+// digest runs exactly the bytes this VSIX shipped. The algorithm is `hashRuntimeTree` in `src/wire/runtime-assets.ts`, written
 // out again here because the build is plain JavaScript; `scripts/pty-tree-digest.test.mjs` proves the two agree on a tree.
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";

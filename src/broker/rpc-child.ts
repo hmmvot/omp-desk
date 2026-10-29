@@ -31,7 +31,7 @@ import {
 	PTY_RPC_MAX_LINE_BYTES,
 	PTY_RPC_MAX_READY_CHARS,
 	PTY_RPC_STDERR_TAIL_BYTES,
-} from "../host/pty-protocol.ts";
+} from "../wire/pty-protocol.ts";
 import { peekRpcLine, RpcLineRing } from "./rpc-ring.ts";
 
 /** The id of the negotiate command the broker itself writes; its response is swallowed. */

@@ -6,7 +6,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runSettingsWorker } from "../host/omp-settings-worker.ts";
+import { runSettingsWorker } from "../wire/omp-settings-worker.ts";
 import type { ConfigChange, ConfigEntry, ConfigLayer, ConfigReceipt } from "../protocol/omp-config-model.ts";
 import type { ConfigRecord } from "../protocol/settings-model.ts";
 

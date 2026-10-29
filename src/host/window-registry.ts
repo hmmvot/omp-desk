@@ -23,8 +23,8 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { errorCode, readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
-import type { BoundedRead } from "./atomic-file.ts";
+import { errorCode, readBoundedFile, replaceFileAtomic } from "../wire/atomic-file.ts";
+import type { BoundedRead } from "../wire/atomic-file.ts";
 import { isEditorSlotId } from "./editor-slots.ts";
 import { watchDirectory } from "./directory-watch.ts";
 

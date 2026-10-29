@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import { createConnection } from "node:net";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
-import type { PtyBrokerRecord, PtyLaunchSpec } from "./pty-protocol";
+import type { PtyBrokerRecord, PtyLaunchSpec } from "../wire/pty-protocol";
 import type { OmpBinary, OmpCliResult, OmpCommand } from "./native-terminal";
 import { NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
 import type { RuntimeFlagPlan } from "./runtime-flags.ts";
-import { acquirePtySlotLock, releasePtySlotLock } from "./pty-registry.ts";
+import { acquirePtySlotLock, releasePtySlotLock } from "../wire/pty-registry.ts";
 
 export const STATS_PORT = 3847;
 export const STATS_ORIGIN = `http://127.0.0.1:${STATS_PORT}`;

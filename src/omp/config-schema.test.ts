@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ancestorMessage, assertSchemaShape, baselineProjection, optionNumber, projectSnapshot, VERIFIED_OMP_VERSION } from "./config-schema.ts";
 import { fakeSchema, loadRecording } from "./config-schema-fixture.ts";
 import { evaluateCondition, KNOWN_CONDITIONS } from "./config-conditions.ts";
-import { SettingsRefusal } from "../host/omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import type { ConfigEntry, ConfigSnapshot } from "../protocol/omp-config-model.ts";
 
 const recording = loadRecording();

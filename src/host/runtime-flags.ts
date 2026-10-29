@@ -12,7 +12,7 @@
  * The recipient is public by construction (ADR-0006), so the define may sit in argv or in the environment; the
  * control key and the private recipient never do.
  */
-import { BUN_OPTIONS_BASE_ENV } from "./control-protocol.ts";
+import { BUN_OPTIONS_BASE_ENV } from "../wire/control-protocol.ts";
 import type { NativeControlBootstrap } from "./native-terminal";
 
 /** `argv`: on the command line, before the launcher's own prefix. `bun-options`: in `BUN_OPTIONS`. `none`: not delivered. */

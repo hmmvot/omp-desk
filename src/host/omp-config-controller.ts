@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { SettingsRefusal } from "./omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import { locateYamlKey } from "./yaml-key-line.ts";
 import { isRecord as record } from "../shared/guards.ts";
 import { describeOutcome } from "../protocol/omp-config-model.ts";

@@ -18,7 +18,7 @@
  * No `vscode` import; the timer and the liveness read are injectable.
  */
 
-import { isPtyProcessAlive } from "./pty-identity.ts";
+import { isPtyProcessAlive } from "../wire/pty-identity.ts";
 
 /** How often a driven runtime's broker process is looked for. */
 export const BROKER_LOSS_POLL_MS = 1_000;

@@ -22,7 +22,7 @@ import {
 	readStorageSecurity,
 	permissionsPermitReplacement,
 	type PrivateStorageSecurityRead,
-} from "./private-storage.ts";
+} from "../wire/private-storage.ts";
 
 export interface ExecutableTrustProbe {
 	/** Replaces the native read of the account SID, every access list and every owner. */

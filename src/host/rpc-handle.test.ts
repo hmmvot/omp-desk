@@ -32,10 +32,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { BrokerHandle } from "./broker-handle.ts";
-import { PTY_PROTOCOL_VERSION, attestationOf, type PtyBrokerFrame, type PtyRequestFrame } from "./pty-protocol.ts";
+import { PTY_PROTOCOL_VERSION, attestationOf, type PtyBrokerFrame, type PtyRequestFrame } from "../wire/pty-protocol.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import { RpcHandle, RpcWriteError } from "./rpc-handle.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 import type { RpcChannelEvent } from "../protocol/rpc.ts";
 
@@ -670,8 +670,8 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 });
 
 /** A raw authenticated connection to a record's broker, for requests the typed handles never make. */
-async function rawHandle(record: import("./pty-protocol.ts").PtyBrokerRecord): Promise<RawHandle> {
-	const { connectPtyBroker } = await import("./pty-ipc.ts");
+async function rawHandle(record: import("../wire/pty-protocol.ts").PtyBrokerRecord): Promise<RawHandle> {
+	const { connectPtyBroker } = await import("../wire/pty-ipc.ts");
 	const connection = await connectPtyBroker({
 		token: record.token,
 		brokerId: record.brokerId,

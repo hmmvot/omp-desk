@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import module from "node:module";
 import { describe, it } from "node:test";
-import type { ViewItem, ViewModel } from "../host/inventory/inventory-model.ts";
+import type { ViewItem, ViewModel } from "../wire/inventory/inventory-model.ts";
 
 if (typeof module.registerHooks === "function") {
 	const stubUrl = new URL("./vscode-test-stub.ts", import.meta.url).href;

@@ -2,8 +2,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { claudeRegistryBindsFolder } from "./inventory-guards.ts";
-import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
-import { PROTECTED_EXTENSION_NAMES, REASONS_PER_VIEW } from "../host/inventory/inventory-model.ts";
+import { SettingsRefusal, valueAt } from "../wire/omp-settings-core.ts";
+import { PROTECTED_EXTENSION_NAMES, REASONS_PER_VIEW } from "../wire/inventory/inventory-model.ts";
 import { isRecord as record } from "../shared/guards";
 import { ompDependencyRoot } from "../shared/omp-package-layout";
 import { BUILTIN_SWITCHES, SHARED_SWITCH_NOTES } from "./inventory-switches.ts";
@@ -12,7 +12,7 @@ import type { McpEntry } from "./inventory-mcp.ts";
 import { globalConfigFile, readConfig, writeConfig } from "./config-transaction.ts";
 import type { ConfigEdit, ConfigRecord } from "../protocol/settings-model.ts";
 import { OMISSION, projectFailure, projectWarning } from "./inventory-reasons.ts";
-import type { IncompleteReason, InventoryRow, InventorySnapshot, RowToggle, ViewKind } from "../host/inventory/inventory-model.ts";
+import type { IncompleteReason, InventoryRow, InventorySnapshot, RowToggle, ViewKind } from "../wire/inventory/inventory-model.ts";
 
 /**
  * Bun worker for ADR-0061: reads OMP's own extension inventory (the TUI dashboard's

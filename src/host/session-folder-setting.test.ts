@@ -23,8 +23,8 @@ if (typeof module.registerHooks === "function") {
 
 const stub = await import("../wiring/vscode-test-stub.ts");
 const { editorProjectFolder, runsAtRepositoryRoot } = await import("./session-folder-setting.ts");
-const { SessionFolderResolver } = await import("./session-folder.ts");
-const { probePathKind } = await import("./checkout-root.ts");
+const { SessionFolderResolver } = await import("../wire/session-folder.ts");
+const { probePathKind } = await import("../wire/checkout-root.ts");
 const { LauncherFolders } = await import("../views/launcher-folders.ts");
 const { WorkspaceFolderRegistry } = await import("../views/workspace-folders.ts");
 

@@ -12,7 +12,7 @@
  * from the window/editor focus events and persists the result through
  * `SessionIndex.recordConversationState`.
  */
-import { desktopNotificationSuppression } from "./notifications.ts";
+import { desktopNotificationSuppression } from "../wire/notifications.ts";
 
 export interface ReplyMarkers {
 	readonly lastCompletedReplyId: string | null;

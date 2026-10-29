@@ -15,10 +15,10 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { synchronousLocalPaths } from "./private-storage.ts";
+import { synchronousLocalPaths } from "../wire/private-storage.ts";
 import * as path from "node:path";
 import type { Logger } from "../shared/logger.ts";
-import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "./atomic-file.ts";
+import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "../wire/atomic-file.ts";
 import { IdentityTurns, RESTORE_CONCURRENCY, RestoreStepTimer, mapBounded } from "./session-restore-trace.ts";
 import type { IdentityTurn, OmpHostStepTimings, StepSink } from "./session-restore-trace.ts";
 import {

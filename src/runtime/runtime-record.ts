@@ -6,7 +6,7 @@
  * native handover renames the conversation.
  */
 import type { HostControlClient } from "../host/control-client.ts";
-import type { ControlHostSnapshot } from "../host/control-protocol.ts";
+import type { ControlHostSnapshot } from "../wire/control-protocol.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { StopRecord } from "./local-stop.ts";
 

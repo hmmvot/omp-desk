@@ -6,7 +6,7 @@
  * `sessionFolderFor`. An editor opened for a session binds that session's own folder instead, so it reads the `<cwd>/.omp` the session reads.
  */
 import * as vscode from "vscode";
-import { sessionFolderFor } from "./session-folder.ts";
+import { sessionFolderFor } from "../wire/session-folder.ts";
 
 export const RUN_AT_REPOSITORY_ROOT_SETTING = "ompDesk.runSessionsAtRepositoryRoot";
 

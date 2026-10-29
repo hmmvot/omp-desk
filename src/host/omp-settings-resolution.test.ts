@@ -5,7 +5,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
-import { runSettingsWorker } from "./omp-settings-worker.ts";
+import { runSettingsWorker } from "../wire/omp-settings-worker.ts";
 import { ROLE_NOTES } from "../protocol/role-notes.ts";
 import type { ConfigRecord, SettingsAgent, SettingsRole, SettingsSnapshot } from "../protocol/settings-model.ts";
 

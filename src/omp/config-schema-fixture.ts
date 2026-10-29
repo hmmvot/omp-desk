@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { valueAt } from "../host/omp-settings-core.ts";
+import { valueAt } from "../wire/omp-settings-core.ts";
 import type { NativeDef, NativeLayers, NativeSetting, NativeTabs, NativeUi, SchemaInput } from "./config-schema.ts";
 import type { ConfigRecord } from "../protocol/settings-model.ts";
 

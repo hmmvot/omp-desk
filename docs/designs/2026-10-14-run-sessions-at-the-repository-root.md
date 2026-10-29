@@ -51,9 +51,9 @@ Non-goals:
 
 No agent-file test remains: a subfolder with its own `AGENTS.md` inside a checkout also runs sessions at the root. A monorepo that wants sessions per package turns the setting off for that workspace or folder (the scope is `resource`, so a multi-root workspace decides per folder).
 
-`sessionFolderFor(folder, enabled)` (`src/host/session-folder.ts`) is the one function; `SessionFolderResolver` remembers its answers for the synchronous Sessions code. `editorProjectFolder(folder)` (`src/host/session-folder-setting.ts`) reads the setting for that folder and calls `sessionFolderFor`; the editors use it for the first opened workspace folder when no session is active (see Editors).
+`sessionFolderFor(folder, enabled)` (`src/wire/session-folder.ts`) is the one function; `SessionFolderResolver` remembers its answers for the synchronous Sessions code. `editorProjectFolder(folder)` (`src/host/session-folder-setting.ts`) reads the setting for that folder and calls `sessionFolderFor`; the editors use it for the first opened workspace folder when no session is active (see Editors).
 
-### Checkout root search (`src/host/checkout-root.ts`)
+### Checkout root search (`src/wire/checkout-root.ts`)
 
 Walk up from the folder; the first directory (the folder itself included) that carries a marker is the root, whatever its system. The nearest wins, so a submodule or a worktree is its own root, and a Mercurial repository inside a Git one is the Mercurial root.
 

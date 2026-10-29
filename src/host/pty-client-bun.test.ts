@@ -27,12 +27,12 @@ import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { recordingLogger, type Logger, type LoggedLine } from "../shared/logger.ts";
 import { MIN_BUN_VERSION, isSupportedBunVersion, type OmpLaunchFacts } from "./chat-broker-runtime.ts";
-import type { PrivateStorageSecurityRead, PrivateStorageSecurityReport } from "./private-storage.ts";
+import type { PrivateStorageSecurityRead, PrivateStorageSecurityReport } from "../wire/private-storage.ts";
 import { PtyBrokerClient, type ChatBrokerRuntimePolicy, type PtyBrokerClientOptions, type RpcLaunchOutcome } from "./pty-client.ts";
-import { ptyRecordPath } from "./pty-registry.ts";
-import type { PtyBrokerRuntime, PtyLaunchSpec } from "./pty-protocol.ts";
+import { ptyRecordPath } from "../wire/pty-registry.ts";
+import type { PtyBrokerRuntime, PtyLaunchSpec } from "../wire/pty-protocol.ts";
 import type { RpcHandle } from "./rpc-handle.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));

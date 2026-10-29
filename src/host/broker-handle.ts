@@ -13,7 +13,7 @@
  * child gets the answer, and a refusal is never silently turned into a success.
  */
 
-import { PTY_PROTOCOL_VERSION, isPtyStopResult } from "./pty-protocol.ts";
+import { PTY_PROTOCOL_VERSION, isPtyStopResult } from "../wire/pty-protocol.ts";
 import type {
 	PtyBrokerFrame,
 	PtyBrokerRecord,
@@ -24,8 +24,8 @@ import type {
 	PtyStatusPayload,
 	PtyStopMode,
 	PtyStopResult,
-} from "./pty-protocol.ts";
-import type { PtyClientSideConnection } from "./pty-ipc.ts";
+} from "../wire/pty-protocol.ts";
+import type { PtyClientSideConnection } from "../wire/pty-ipc.ts";
 
 /** Default time to wait for one request's answer. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;

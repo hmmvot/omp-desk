@@ -26,8 +26,8 @@ import {
 	queryControlProcessGeneration,
 } from "../host/control-client.ts";
 import type { HostControlExpectation, HostControlVerifiedConnection } from "../host/control-client.ts";
-import { readControlRendezvous } from "../host/control-protocol.ts";
-import type { ControlRendezvous } from "../host/control-protocol.ts";
+import { readControlRendezvous } from "../wire/control-protocol.ts";
+import type { ControlRendezvous } from "../wire/control-protocol.ts";
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
 import type { LaunchTimeline } from "../host/launch-timeline.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";

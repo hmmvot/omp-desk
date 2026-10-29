@@ -35,7 +35,7 @@
  * `seq`.
  */
 
-import { ptyRpcFragment, ptyRpcFragmentCount } from "../host/pty-protocol.ts";
+import { ptyRpcFragment, ptyRpcFragmentCount } from "../wire/pty-protocol.ts";
 import type { RpcForcedClose } from "../protocol/rpc.ts";
 
 /** Ring bound: raw bytes of live (non-superseded) replayable lines. */

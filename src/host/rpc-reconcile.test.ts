@@ -16,7 +16,7 @@
  *
  * Runner: `node --test src/host/rpc-reconcile.test.ts`.
  */
-import type { PtyIdentityReading } from "./pty-identity.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -45,7 +45,7 @@ import type {
 import type { OmpHostLauncher, SessionIndexStore } from "./session-index.ts";
 import type { OwnerReconcileRequest } from "./session-availability.ts";
 import type { OmpHostHandle, RecordedHost, RecordedRpcIdentity, SessionIndexEntry } from "./session-model.ts";
-import type { PtyBrokerRecord, PtyStatusPayload, PtyStopResult } from "./pty-protocol.ts";
+import type { PtyBrokerRecord, PtyStatusPayload, PtyStopResult } from "../wire/pty-protocol.ts";
 
 /** The part of the compiled module these tests drive. */
 interface RpcReconcileModule {

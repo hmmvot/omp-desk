@@ -31,7 +31,7 @@ import {
 	parseChatWebviewMessage,
 	splitChatSnapshot,
 } from "./chat-messages.ts";
-import { PTY_RPC_MAX_WRITE_BYTES } from "../host/pty-protocol.ts";
+import { PTY_RPC_MAX_WRITE_BYTES } from "../wire/pty-protocol.ts";
 
 const EPOCH = { nonce: "host-a", counter: 1 };
 const REQUEST_ID = "0123456789abcdef0123456789abcdef";

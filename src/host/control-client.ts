@@ -40,7 +40,7 @@ import { createPublicKey, generateKeyPair } from "node:crypto";
 import { Socket } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "node:timers";
-import { win32Native, type ProcessCreationReading } from "./win32-native.ts";
+import { win32Native, type ProcessCreationReading } from "../wire/win32-native.ts";
 import { proveContinuation } from "./session-chain.ts";
 import {
 	CONTROL_MAX_FRAME_BYTES,
@@ -81,7 +81,7 @@ import {
 	verifyControlErrorMac,
 	verifyControlHandshakeMac,
 	verifyControlResponseMac,
-} from "./control-protocol.ts";
+} from "../wire/control-protocol.ts";
 
 export {
 	controlRecipientFingerprint,
@@ -89,14 +89,14 @@ export {
 	createControlRequestId,
 	createControlSlotId,
 	readControlRendezvous,
-} from "./control-protocol.ts";
+} from "../wire/control-protocol.ts";
 export type {
 	ControlErrorCode,
 	ControlHostBinding,
 	ControlHostSnapshot,
 	ControlRendezvous,
 	ControlToolList,
-} from "./control-protocol.ts";
+} from "../wire/control-protocol.ts";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;

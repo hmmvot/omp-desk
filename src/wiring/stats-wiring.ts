@@ -6,8 +6,8 @@ import { resolveOmpBinary, runOmpCli } from "../host/native-terminal";
 import type { RuntimeFlagPlan } from "../host/runtime-flags";
 import { admitStatsLaunch, ensureStatsDashboard, planStatsPreload, probeStatsDashboard, STATS_ORIGIN, withStatsLaunchLock } from "../host/stats-dashboard";
 import { statsWebviewHtml } from "../host/stats-webview";
-import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets";
+import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../wire/pty-identity";
+import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../wire/runtime-assets";
 import type { Logger } from "../shared/logger.ts";
 
 export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {

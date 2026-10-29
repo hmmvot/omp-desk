@@ -29,7 +29,7 @@
  *    evidence gate and a verified Windows exclusion mechanism exist.
  *
  * The OMP surface this is written against is cited in
- * `host/native-file-observation.ts`. OMP invokes `tool_call` handlers before
+ * `wire/native-file-observation.ts`. OMP invokes `tool_call` handlers before
  * the tool executes, and a handler that hangs blocks the tool
  * (pi-coding-agent `src/extensibility/extensions/runner.ts`), which is why the
  * hook adapter here is bounded and never rejects.
@@ -60,7 +60,7 @@ import {
 	parseNativeFileObservationRecord,
 	resolveNativeFileObservationLimits,
 	summarizeNativeFileObservations,
-} from "../host/native-file-observation.ts";
+} from "../wire/native-file-observation.ts";
 import {
 	NATIVE_FILE_OBSERVATION_DISCLOSURE,
 	NATIVE_FILE_OBSERVATION_DISCLOSURE_ID,
@@ -89,7 +89,7 @@ import {
 	restrictNativeFileObservationStorage,
 	revokeNativeFileObservationConsent,
 	verifyNativeFileObservationStorage,
-} from "../host/native-file-observation-storage.ts";
+} from "../wire/native-file-observation-storage.ts";
 
 export {
 	NATIVE_FILE_OBSERVATION_DISCLOSURE,

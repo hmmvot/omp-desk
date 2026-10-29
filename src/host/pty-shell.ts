@@ -28,7 +28,7 @@ import { access, stat } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import process from "node:process";
-import { clampPtySize, type PtyLaunchSpec, type PtyOwnerHint } from "./pty-protocol.ts";
+import { clampPtySize, type PtyLaunchSpec, type PtyOwnerHint } from "../wire/pty-protocol.ts";
 
 /** Arguments a shell gets so it starts as an interactive shell, without a banner. */
 const SHELL_ARGUMENTS: Record<string, readonly string[]> = {

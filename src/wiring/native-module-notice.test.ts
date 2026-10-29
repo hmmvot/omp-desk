@@ -20,7 +20,7 @@ import {
 	simulatedNativeFailure,
 } from "./native-module-notice.ts";
 import type { NativeNoticePort } from "./native-module-notice.ts";
-import { classifyNativeFailure } from "../host/native-module-failure.ts";
+import { classifyNativeFailure } from "../wire/native-module-failure.ts";
 import { recordingLogger } from "../shared/logger.ts";
 import type { LoggedLine } from "../shared/logger.ts";
 

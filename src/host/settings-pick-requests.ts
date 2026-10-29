@@ -1,4 +1,4 @@
-import { SettingsRefusal } from "./omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import type { SettingsRole, SettingsScope } from "../protocol/settings-model.ts";
 import { LIST_PICK_PURPOSES } from "../protocol/settings-pick-items.ts";
 import type { PickPurpose } from "../protocol/settings-pick-items.ts";

@@ -45,8 +45,8 @@ import {
 	type PtyOwnerWatcherLaunch,
 	type PtyOwnerWatchEvents,
 	type PtyOwnerWatchHelper,
-} from "../host/pty-owner-watch.ts";
-import type { PtyOwnerHint, PtyOwnerStopStatus, PtyStopResult } from "../host/pty-protocol.ts";
+} from "../wire/pty-owner-watch.ts";
+import type { PtyOwnerHint, PtyOwnerStopStatus, PtyStopResult } from "../wire/pty-protocol.ts";
 
 /** A creation time no two fixtures share, in the form the protocol accepts. */
 function creationFor(pid: number): string {
@@ -444,7 +444,7 @@ describe("owner watch policy", () => {
 	});
 });
 
-const HELPER_PATH = fileURLToPath(new URL("../host/pty-owner-watch.ps1", import.meta.url));
+const HELPER_PATH = fileURLToPath(new URL("../wire/pty-owner-watch.ps1", import.meta.url));
 const PACKAGED_HELPER_PATH = fileURLToPath(new URL("../../out/pty/pty-owner-watch.ps1", import.meta.url));
 
 /**

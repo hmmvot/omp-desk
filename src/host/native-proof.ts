@@ -24,10 +24,10 @@ import { lstatSync, readFileSync, type BigIntStats } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { RUNTIME_ASSET_DIRECTORY } from "./runtime-assets.ts";
-import { ancestorComponents, chainSecurityProblem, onLocalFixedNtfs, readSecurityOn, readSecuritySyncOn, restrictPrivateStorage } from "./private-storage.ts";
-import type { PrivateStorageProbe } from "./private-storage.ts";
-import type { Win32Native } from "./win32-native.ts";
+import { RUNTIME_ASSET_DIRECTORY } from "../wire/runtime-assets.ts";
+import { ancestorComponents, chainSecurityProblem, onLocalFixedNtfs, readSecurityOn, readSecuritySyncOn, restrictPrivateStorage } from "../wire/private-storage.ts";
+import type { PrivateStorageProbe } from "../wire/private-storage.ts";
+import type { Win32Native } from "../wire/win32-native.ts";
 
 /** The directory (inside the global storage, outside the verified chain) holding the records. */
 export const NATIVE_PROOF_DIRECTORY = "native-proof";

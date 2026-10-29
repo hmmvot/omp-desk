@@ -46,7 +46,7 @@ import type { InputReclaim, RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { AbortRestoreOutcome, ClearOutcome, NavigateOutcome, NavigateRequest, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";
-import { SettingsRefusal } from "./omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import { OmpUnavailableError } from "../shared/omp-unavailable.ts";
 import { nativeSettingsCommand, type NativeSettingsTarget } from "../chat/settings-command.ts";
 import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES, type ClearDeferrable } from "../chat/clear.ts";

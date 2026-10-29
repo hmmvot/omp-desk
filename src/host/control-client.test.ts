@@ -54,7 +54,7 @@ import {
 	removeOwnControlRendezvous,
 	verifyControlRequestMac,
 	writeControlRendezvous,
-} from "./control-protocol.ts";
+} from "../wire/control-protocol.ts";
 import {
 	type ControlPeerBridge,
 	HostControlClient,
@@ -82,9 +82,9 @@ import {
 	readControlLaunchMetadata,
 	startHostControlServer,
 } from "../omp/host-control.ts";
-import { loadWin32Native, setWin32NativeForTest, win32Native } from "./win32-native.ts";
+import { loadWin32Native, setWin32NativeForTest, win32Native } from "../wire/win32-native.ts";
 import { electronCode, installedAddonAsset } from "./win32-test-support.ts";
-import { NativeActivityLedger } from "./native-activity.ts";
+import { NativeActivityLedger } from "../wire/native-activity.ts";
 
 const tempDirs: string[] = [];
 const servers: HostControlServer[] = [];
@@ -1322,7 +1322,7 @@ describe("native peer bridge", { skip: process.platform !== "win32" }, () => {
 				const bundle = path.join(dir, "bridge.mjs");
 				const entry = path.join(dir, "entry.ts");
 				await writeFile(entry, `
-					import { loadWin32Native, setWin32NativeForTest } from ${JSON.stringify(fileURLToPath(new URL("./win32-native.ts", import.meta.url)))};
+					import { loadWin32Native, setWin32NativeForTest } from ${JSON.stringify(fileURLToPath(new URL("../wire/win32-native.ts", import.meta.url)))};
 					import { nativeControlPeerBridge } from ${JSON.stringify(fileURLToPath(new URL("./control-client.ts", import.meta.url)))};
 					const [path, sha256, pipeName, pid, creation] = process.argv.slice(2);
 					setWin32NativeForTest(await loadWin32Native({ path, sha256 }));

@@ -1,4 +1,4 @@
-import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
+import { SettingsRefusal, valueAt } from "../wire/omp-settings-core.ts";
 import { isRecord as record } from "../shared/guards.ts";
 import { evaluateCondition, KNOWN_CONDITIONS } from "./config-conditions.ts";
 import type { ConditionReader } from "./config-conditions.ts";

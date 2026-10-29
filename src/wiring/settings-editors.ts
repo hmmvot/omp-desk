@@ -10,7 +10,7 @@ import * as vscode from "vscode";
 import type { Logger } from "../shared/logger.ts";
 import type { SettingsKind } from "../chat/settings-command.ts";
 import { lazy } from "../host/lazy-module.ts";
-import { SettingsRefusal } from "../host/omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import { ompRuntimeServices } from "../host/omp-runtime-services.ts";
 import { rareSubsystems } from "./rare-subsystems-loader.ts";
 

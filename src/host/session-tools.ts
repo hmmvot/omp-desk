@@ -1,7 +1,7 @@
 import type { ChatSlashCommand } from "../chat/model.ts";
-import type { ControlToolList } from "./control-protocol.ts";
+import type { ControlToolList } from "../wire/control-protocol.ts";
 import type { RpcToolDescriptor } from "../protocol/rpc.ts";
-import type { SessionEvidence, SessionToolEntry } from "./inventory/inventory-model.ts";
+import type { SessionEvidence, SessionToolEntry } from "../wire/inventory/inventory-model.ts";
 
 /**
  * The OMP editor the inventory views describe, and how to read what its session itself reports.

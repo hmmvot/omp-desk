@@ -12,7 +12,7 @@ A Chat tab froze: its page's main thread was stuck while the extension host ran 
 ## Goals and Non-goals
 
 - Goals: the log shows, at Info, when a *visible* Chat page has been silent for 10 seconds, what the page last reported it was doing, and how long the silence lasted once the page answers again; it shows every task of 1 second or more that the page measured, with the browser's attribution; a hidden page, a hidden panel, a replaced document, a paused host and a reloaded page are never reported as a freeze; the report is cheap (constant work per event, at most two posts a second, one timer while visible), carries no message text, and is validated by the existing guest vocabulary against closed vocabularies (ADR-0017's rule for owned diagnostic surfaces).
-- Non-goals: unfreezing or reloading a stuck page; a user-visible notice; diagnosing a stall of the extension host (`src/host/loop-lag.ts` does that); detail tabs (read-only pages with no editor slot); a page on the bridge route (see Risks); a general page performance profile.
+- Non-goals: unfreezing or reloading a stuck page; a user-visible notice; diagnosing a stall of the extension host (`src/wire/loop-lag.ts` does that); detail tabs (read-only pages with no editor slot); a page on the bridge route (see Risks); a general page performance profile.
 
 ## Current State
 

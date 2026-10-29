@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { BUN_OPTIONS_BASE_ENV, restoreInheritedBunOptions } from "./control-protocol.ts";
+import { BUN_OPTIONS_BASE_ENV, restoreInheritedBunOptions } from "../wire/control-protocol.ts";
 import { encodeBunOption, NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
 
 const FLAGS = { define: { name: "__OMP_VSCODE_RECIPIENT_PUBLIC_KEY", value: "cHVibGljLXJlY2lwaWVudA" }, preload: "C:\\Users\\Jane Doe\\AppData\\host control.mjs" } as const;

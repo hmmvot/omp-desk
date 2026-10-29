@@ -43,7 +43,7 @@ import {
 	type SessionClaim,
 } from "./session-claim.ts";
 import { shortDirectoryAlias } from "./short-name-test-support.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 
 const tempRoots: string[] = [];

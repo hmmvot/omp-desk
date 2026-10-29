@@ -25,9 +25,9 @@ import {
 	PTY_RUNTIME_VERSION,
 	PTY_SERVICE,
 	createPtyToken,
-} from "./pty-protocol.ts";
-import type { PtyBrokerRecord, PtyKind, PtyStopResult } from "./pty-protocol.ts";
-import type { PtyRecordLookup } from "./pty-registry.ts";
+} from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord, PtyKind, PtyStopResult } from "../wire/pty-protocol.ts";
+import type { PtyRecordLookup } from "../wire/pty-registry.ts";
 import type { ProbeHandle } from "./rpc-reconcile.ts";
 
 const BROKER_ID = "pty-11111111-2222-3333-4444-555555555555";

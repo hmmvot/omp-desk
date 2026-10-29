@@ -1,4 +1,4 @@
-import type { InventoryRow, RowSource, RowToggle } from "../host/inventory/inventory-model.ts";
+import type { InventoryRow, RowSource, RowToggle } from "../wire/inventory/inventory-model.ts";
 
 /**
  * One MCP server name, one row (ADR-0061, amendment). OMP's capability loader keys servers by name and the

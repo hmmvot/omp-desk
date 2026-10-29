@@ -9,9 +9,9 @@ import { synchronousLocalPaths, isPermittedAclPrincipal, namedPrincipal, parseWi
 import { findForeignAccess } from "./foreign-access.ts";
 import { classifyNativeFailure, nativeFailureMessage } from "./native-module-failure.ts";
 import { formatToolSpawn, reportToolSpawn, setToolSpawnObserver, type ToolSpawn } from "./tool-spawn-trace.ts";
-import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "../host/private-storage-test-support.ts";
 import { loadWin32Native, setWin32NativeForTest, type Win32Native, type Win32SecurityRead } from "./win32-native.ts";
-import { installedAddonAsset } from "./win32-test-support.ts";
+import { installedAddonAsset } from "../host/win32-test-support.ts";
 
 // Captured with Windows .NET Encoding.GetEncoding(866), not UTF-8 literals masquerading as OEM bytes.
 const RUSSIAN_PRINCIPALS = [

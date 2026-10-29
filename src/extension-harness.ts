@@ -9,7 +9,7 @@
  *
  * The test's esbuild plugin substitutes the modules `vscode`, `./host/session-claim`, `./host/desktop-notifications`,
  * `./host/native-terminal`, `./host/omp-vscode`, `./host/provider-login-rpc`, `./host/rpc-launch`, `./host/control-client`,
- * `./host/control-protocol` and `./host/rpc-reconcile` by their import specifiers, so this module imports them with the same
+ * `./wire/control-protocol` and `./host/rpc-reconcile` by their import specifiers, so this module imports them with the same
  * specifiers `extension.ts` does and gets the same substituted instances. The fixture members those substitutes add to their
  * modules are read through a cast (they are not exports of the real modules).
  */

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import { emptyView, inventoryPendingKey } from "../host/inventory/inventory-model.ts";
-import type { ViewGroup, ViewItem, ViewModel } from "../host/inventory/inventory-model.ts";
+import { emptyView, inventoryPendingKey } from "../wire/inventory/inventory-model.ts";
+import type { ViewGroup, ViewItem, ViewModel } from "../wire/inventory/inventory-model.ts";
 
 /** The command a row's click runs: open its source file. Registered by the inventory registration. */
 export const OPEN_SOURCE_COMMAND = "ompDesk.inventory.open";

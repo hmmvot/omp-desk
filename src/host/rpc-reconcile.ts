@@ -18,10 +18,10 @@
  */
 import type { BrokerSlotProvenance } from "./broker-slots";
 import type { PtyShutdownResult } from "./broker-handle";
-import type { PtyIdentityReading } from "./pty-identity";
+import type { PtyIdentityReading } from "../wire/pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
-import { attestationOf } from "./pty-protocol";
-import type { PtyBrokerRecord, PtyKind, PtyStatusPayload, PtyStopResult } from "./pty-protocol";
+import { attestationOf } from "../wire/pty-protocol";
+import type { PtyBrokerRecord, PtyKind, PtyStatusPayload, PtyStopResult } from "../wire/pty-protocol";
 import { isManagedHost, isUnreadLaunchAttempt } from "./session-model";
 import type { RecordedRpcIdentity } from "./session-model";
 import { timedStep } from "./session-restore-trace";

@@ -1,4 +1,4 @@
-import { REASON_LIMIT } from "../host/inventory/inventory-model.ts";
+import { REASON_LIMIT } from "../wire/inventory/inventory-model.ts";
 
 /**
  * The reason a view's list may be incomplete, as the banner and the Desk log show it (ADR-0061, item 10).

@@ -167,7 +167,7 @@ export function isNativeObservationDigest(value: unknown): value is string {
 /**
  * Path-identity digest. On Windows the comparison is case-insensitive and
  * separator-normalized, matching the claim-identity folding in
- * `normalizeClaimIdentity` (`./session-claim.ts`), so `C:\A\b` and `c:/a/B`
+ * `normalizeClaimIdentity` (`../host/session-claim.ts`), so `C:\A\b` and `c:/a/B`
  * bind to one digest instead of producing two records for one file.
  */
 export function nativeObservationPathDigest(absolutePath: string, platform: NodeJS.Platform = process.platform): string {

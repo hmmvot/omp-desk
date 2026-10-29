@@ -12,7 +12,7 @@
  * `null` and the caller runs anyway.
  */
 import { randomUUID } from "node:crypto";
-import { acquirePtySlotLock, releasePtySlotLock } from "./pty-registry.ts";
+import { acquirePtySlotLock, releasePtySlotLock } from "../wire/pty-registry.ts";
 import { helperSleep, type HelperSlotLease, type HelperSlots } from "./helper-scheduler.ts";
 
 export const HELPER_SLOT_NAME = "omp-helper";

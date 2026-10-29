@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
 import { spawn } from "node:child_process";
 import { build } from "esbuild";
-import { formatToolSpawn, setToolSpawnObserver, type ToolSpawn } from "../host/tool-spawn-trace.ts";
+import { formatToolSpawn, setToolSpawnObserver, type ToolSpawn } from "../wire/tool-spawn-trace.ts";
 import { electronCode, installedAddonAsset } from "../host/win32-test-support.ts";
 import { parseVerdict, runNativeStage } from "./native-stage-client.ts";
 

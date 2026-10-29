@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { ancestorContextDir } from "./config-ancestor.ts";
-import { sessionFolderFor } from "../host/session-folder.ts";
+import { sessionFolderFor } from "../wire/session-folder.ts";
 
 async function tree(files: readonly string[]): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ancestor-"));

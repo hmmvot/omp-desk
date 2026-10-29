@@ -70,7 +70,7 @@ const sessionTree = await import("../views/session-tree.ts");
 const { ContextTreeProvider } = await import("../views/context-tree.ts");
 const { InventoryTreeProvider } = await import("../views/inventory-tree.ts");
 const { projectContext } = await import("../host/context/context-model.ts");
-const { projectView } = await import("../host/inventory/inventory-model.ts");
+const { projectView } = await import("../wire/inventory/inventory-model.ts");
 
 // ---------------------------------------------------------------------------------------------------------------
 // package.json, as the editor reads it

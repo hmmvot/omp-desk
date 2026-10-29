@@ -11,9 +11,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
 import type { LogLevel } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "./broker-processes.ts";
-import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "./pty-identity.ts";
-import type { PtyIdentityReading } from "./pty-identity.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../wire/pty-identity.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 import {
 	killProcessTree,

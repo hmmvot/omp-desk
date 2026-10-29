@@ -78,12 +78,12 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import { localFs } from "./local-fs.ts";
+import { localFs } from "../wire/local-fs.ts";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { renameReplacing, stageBeside } from "./atomic-file.ts";
-import { trackOperation } from "./loop-lag.ts";
+import { renameReplacing, stageBeside } from "../wire/atomic-file.ts";
+import { trackOperation } from "../wire/loop-lag.ts";
 
 /** Document schema version this build writes and accepts. */
 export const CATALOG_VERSION = 1;

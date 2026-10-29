@@ -5,7 +5,7 @@ import { globalConfigFile, readConfig, writeConfig } from "./config-transaction.
 import { ancestorMessage, assertSchemaShape, baselineProjection, optionNumber, projectSnapshot, SHAPE_MESSAGE } from "./config-schema.ts";
 import { ancestorContextDir } from "./config-ancestor.ts";
 import type { NativeLayers, NativeSetting, NativeTabs } from "./config-schema.ts";
-import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
+import { SettingsRefusal, valueAt } from "../wire/omp-settings-core.ts";
 import { ompDependencyRoot } from "../shared/omp-package-layout.ts";
 import { isRecord as record } from "../shared/guards.ts";
 import { parseNumericInput } from "../protocol/omp-config-model.ts";

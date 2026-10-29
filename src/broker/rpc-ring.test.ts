@@ -12,7 +12,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PTY_RPC_FRAGMENT_RAW_BYTES } from "../host/pty-protocol.ts";
+import { PTY_RPC_FRAGMENT_RAW_BYTES } from "../wire/pty-protocol.ts";
 import {
 	DEFAULT_RPC_RING_LIMITS,
 	RPC_FELL_BEHIND_REASON,

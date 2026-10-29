@@ -15,8 +15,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "../shared/logger.ts";
-import { RUNTIME_ASSET_DIRECTORY } from "../host/runtime-assets.ts";
-import { classifyNativeFailure, nativeDiagnosticsText, nativeFailureMessage, type NativeFailure } from "../host/native-module-failure.ts";
+import { RUNTIME_ASSET_DIRECTORY } from "../wire/runtime-assets.ts";
+import { classifyNativeFailure, nativeDiagnosticsText, nativeFailureMessage, type NativeFailure } from "../wire/native-module-failure.ts";
 
 /** The buttons, in the order they are offered. */
 export const NATIVE_NOTICE_COPY = "Copy diagnostics";

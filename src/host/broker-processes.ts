@@ -32,9 +32,9 @@
  * could not parse is not the same as no mapping.
  */
 
-import { PTY_PROTOCOL_VERSION, PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
-import type { PtyBrokerRecord, PtyKind } from "./pty-protocol.ts";
-import type { PtyIdentityReading } from "./pty-identity.ts";
+import { PTY_PROTOCOL_VERSION, PTY_RUNTIME_VERSION } from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord, PtyKind } from "../wire/pty-protocol.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
 import { processKey } from "./unmanaged-brokers.ts";
 import type { UnmanagedBroker, UnmanagedBrokerFacts } from "./unmanaged-brokers.ts";
 

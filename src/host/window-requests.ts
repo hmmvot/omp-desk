@@ -61,11 +61,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { errorCode, readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
+import { errorCode, readBoundedFile, replaceFileAtomic } from "../wire/atomic-file.ts";
 import { watchDirectory } from "./directory-watch.ts";
 import type { OpenWindow } from "./window-registry.ts";
 import type { RowIdentity } from "./broker-processes.ts";
-import type { PtyKind } from "./pty-protocol.ts";
+import type { PtyKind } from "../wire/pty-protocol.ts";
 
 export const WINDOW_REQUEST_DIRECTORY = "window-requests";
 /**

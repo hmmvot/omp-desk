@@ -26,7 +26,7 @@
 import type { Logger } from "../shared/logger.ts";
 import type { ProbeHandle } from "./rpc-reconcile";
 import type { PtyBrokerClient } from "./pty-client.ts";
-import type { PtyKind } from "./pty-protocol.ts";
+import type { PtyKind } from "../wire/pty-protocol.ts";
 
 /** Bound for the child to stop; the broker answers within it. */
 export const BROKER_PROCESS_STOP_TIMEOUT_MS = 15_000;

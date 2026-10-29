@@ -22,8 +22,8 @@ import * as path from "node:path";
 import type { Logger } from "../shared/logger.ts";
 import type { OmpLauncherKind } from "./chat-broker-runtime";
 import type { PtyHandle } from "./pty-client";
-import type { PtyStatusPayload } from "./pty-protocol";
-import type { PtyBrokerRecord } from "./pty-protocol";
+import type { PtyStatusPayload } from "../wire/pty-protocol";
+import type { PtyBrokerRecord } from "../wire/pty-protocol";
 import type {
   TerminalWriter,
   TerminalWriterEvent,

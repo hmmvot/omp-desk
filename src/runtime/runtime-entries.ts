@@ -18,8 +18,8 @@
  * read is usually the one a half-finished install replaced.
  */
 import type { Logger } from "../shared/logger.ts";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets.ts";
-import type { StagedRuntimeAsset } from "../host/runtime-assets.ts";
+import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../wire/runtime-assets.ts";
+import type { StagedRuntimeAsset } from "../wire/runtime-assets.ts";
 import type { NativeStageVerdict } from "./native-stage.ts";
 
 /** Staged copies every child process of this window runs. */

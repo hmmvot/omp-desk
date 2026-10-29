@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { globalConfigFile, readConfig, stageFile, writeConfig } from "./config-transaction.ts";
 import type { FileBaseline } from "./config-transaction.ts";
-import { displaySettings, editorSettings, parseAgentSpec, valueAt, withRollbackJournalHeader, EDITOR_SETTING_PATHS, SettingsRefusal } from "../host/omp-settings-core.ts";
+import { displaySettings, editorSettings, parseAgentSpec, valueAt, withRollbackJournalHeader, EDITOR_SETTING_PATHS, SettingsRefusal } from "../wire/omp-settings-core.ts";
 import { ompDependencyRoot } from "../shared/omp-package-layout";
 import { isRecord as record } from "../shared/guards";
 import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope } from "../protocol/settings-model.ts";

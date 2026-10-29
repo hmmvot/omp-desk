@@ -17,7 +17,7 @@ import {
 	sessionIncarnation,
 } from "./window-registry.ts";
 import type { WindowRecord, WindowRegistryOptions, WindowSnapshot } from "./window-registry.ts";
-import { readBoundedFile } from "./atomic-file.ts";
+import { readBoundedFile } from "../wire/atomic-file.ts";
 
 const LEASE = 60_000;
 const BASE = Date.parse("2026-10-10T10:00:00.000Z");

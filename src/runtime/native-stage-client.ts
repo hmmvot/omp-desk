@@ -7,7 +7,7 @@
  */
 import { spawn } from "node:child_process";
 import { ptyRuntimeCommand } from "../host/pty-runtime.ts";
-import { startToolSpawnTrace } from "../host/tool-spawn-trace.ts";
+import { startToolSpawnTrace } from "../wire/tool-spawn-trace.ts";
 import type { NativeStageTiming, NativeStageVerdict } from "./native-stage.ts";
 
 /**

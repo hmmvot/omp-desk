@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { OmpConfigController, parseConfigAction } from "./omp-config-controller.ts";
 import type { OmpConfigPorts } from "./omp-config-controller.ts";
-import { SettingsRefusal } from "./omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import type { ConfigEntry, ConfigMessage, ConfigReceipt } from "../protocol/omp-config-model.ts";
 import type { ConfigRecord } from "../protocol/settings-model.ts";
 

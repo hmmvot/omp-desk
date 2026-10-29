@@ -123,10 +123,10 @@ import {
 	type PtyStopResult,
 	type PtyTreeEvidence,
 	type PtyTreeVerdict,
-} from "../host/pty-protocol.ts";
-import { isPtyProcessAlive, queryPtyProcessIdentity, queryPtyProcessTree, waitForPtyProcessGone } from "../host/pty-identity.ts";
-import { createLineReader, startPtyBrokerServer, type PtyBrokerServer, type PtyBrokerSideConnection } from "../host/pty-ipc.ts";
-import { claimPtyRecord, ensurePtyStateAccess, retirePtyRecord } from "../host/pty-registry.ts";
+} from "../wire/pty-protocol.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, queryPtyProcessTree, waitForPtyProcessGone } from "../wire/pty-identity.ts";
+import { createLineReader, startPtyBrokerServer, type PtyBrokerServer, type PtyBrokerSideConnection } from "../wire/pty-ipc.ts";
+import { claimPtyRecord, ensurePtyStateAccess, retirePtyRecord } from "../wire/pty-registry.ts";
 import type * as PtyScreenModule from "./pty-screen.ts";
 import type { PtyScreenChunk, PtyScreenModel } from "./pty-screen.ts";
 import { RpcChildWriteError, startRpcChild, type RpcChild } from "./rpc-child.ts";
@@ -146,8 +146,8 @@ import {
 	selfCheckVerdict,
 } from "./pty-self-check.ts";
 import { silentLogger } from "../shared/logger.ts";
-import { startWin32Native } from "../host/win32-native.ts";
-import type { StagedRuntimeAsset } from "../host/runtime-assets.ts";
+import { startWin32Native } from "../wire/win32-native.ts";
+import type { StagedRuntimeAsset } from "../wire/runtime-assets.ts";
 
 /** Exit codes of this entry, for a caller that only has the child's status. */
 export const PTY_BROKER_EXIT = {

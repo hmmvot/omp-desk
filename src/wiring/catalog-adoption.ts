@@ -23,7 +23,7 @@
 import { CoalescedRun } from "../host/coalesced-run.ts";
 import { setImmediate as yieldToIo } from "node:timers/promises";
 import { BROKER_SLOTS_KEY } from "../host/broker-slots.ts";
-import { trackOperation } from "../host/loop-lag.ts";
+import { trackOperation } from "../wire/loop-lag.ts";
 import type { CatalogPaths, CatalogRefresh, CatalogStore } from "../host/profile-catalog.ts";
 import { ParkedRpcConnections } from "../host/rpc-parked.ts";
 import type { OwnerReconciler } from "../host/session-availability.ts";

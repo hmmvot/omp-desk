@@ -46,10 +46,10 @@ import {
 	verifyNativeFileObservationStorage,
 } from "./native-file-observation-storage.ts";
 import { permissionsPermitReplacement, posixAccessMarker, posixAccessProblem, readStorageSecurity } from "./private-storage.ts";
-import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
-import { shortDirectoryAlias } from "./short-name-test-support.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "../host/private-storage-test-support.ts";
+import { shortDirectoryAlias } from "../host/short-name-test-support.ts";
 import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
-import { installedAddonAsset } from "./win32-test-support.ts";
+import { installedAddonAsset } from "../host/win32-test-support.ts";
 import {
 	createFileEvidenceHooks,
 	createFileEvidenceObserver,

@@ -96,7 +96,7 @@
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import * as path from "node:path";
-import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "./atomic-file.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "../wire/atomic-file.ts";
 import {
 	ClaimOwnershipError,
 	acquireClaim,

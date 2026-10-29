@@ -16,7 +16,7 @@ import {
 	type LeaseState,
 } from "./omp-session-lease.ts";
 import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
-import { loadWin32Native, type MutexState, type Win32Native } from "./win32-native.ts";
+import { loadWin32Native, type MutexState, type Win32Native } from "../wire/win32-native.ts";
 import { holdMutex, installedAddonAsset, releaseMutex } from "./win32-test-support.ts";
 
 /**

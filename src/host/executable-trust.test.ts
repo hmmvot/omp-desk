@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { permissionsPermitModification, verifyExecutableTrust, type ExecutableTrust } from "./executable-trust.ts";
-import type { PrivateStorageSecurityRead, PrivateStorageSecurityReport } from "./private-storage.ts";
+import type { PrivateStorageSecurityRead, PrivateStorageSecurityReport } from "../wire/private-storage.ts";
 
 const ME = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 const OTHER = "S-1-5-21-1111111111-2222222222-3333333333-1002";

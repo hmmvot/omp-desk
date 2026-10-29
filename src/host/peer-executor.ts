@@ -12,7 +12,7 @@
  */
 
 import type { PeerExecutor, KillAllPeer } from "./broker-process-controller.ts";
-import type { PtyGoneReading, PtyIdentityReading } from "./pty-identity.ts";
+import type { PtyGoneReading, PtyIdentityReading } from "../wire/pty-identity.ts";
 
 /** How long a requester waits for a silent window's host to be proven gone before leaving its rows alone. */
 export const PEER_EXECUTOR_PROBE_MS = 3_000;

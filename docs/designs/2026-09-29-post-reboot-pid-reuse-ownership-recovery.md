@@ -69,7 +69,7 @@ Two new observation ports and one new rule; no schema change, no new durable fie
 `{ kind: "observed", creationTimeMs }` or `{ kind: "unknown", detail }`. Production wires it in
 `src/extension.ts` to `queryControlProcessGeneration(pid)` — the same verified helper the host-control pipe
 authenticates with, already staged by activation — converted by `filetimeToEpochMs`
-(`src/host/pty-protocol.ts`, the module that owns the FILETIME dialect). A non-Windows host, an unstaged
+(`src/wire/pty-protocol.ts`, the module that owns the FILETIME dialect). A non-Windows host, an unstaged
 helper, a refused probe and an unusable value all answer `unknown`.
 
 **A port for the boot instant.** `OwnerReconcilePorts.systemBootEpochMs()` returns
@@ -174,7 +174,7 @@ The verdict feeds more than an attach, and a wrong `free` would reach each of th
 
 ## Rollout and Verification
 
-- `src/host/pty-protocol.test.ts`: the FILETIME conversion, including truncation, pre-epoch and
+- `src/wire/pty-protocol.test.ts`: the FILETIME conversion, including truncation, pre-epoch and
   out-of-range values.
 - `src/host/session-index.test.ts`: the rule's boundary cases — a reboot is required *strictly after* the
   row's own observation (a boot at, before, or unreadable is refused) and the occupant must postdate that

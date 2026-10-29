@@ -1,7 +1,7 @@
 /** The folder-shell title stays compact; its live cleanup verdict belongs in a tooltip. */
 
 import type { PtyHandle, PtyHandleEvent } from "./pty-client.ts";
-import type { PtyOwnerStopState, PtyOwnerStopStatus } from "./pty-protocol.ts";
+import type { PtyOwnerStopState, PtyOwnerStopStatus } from "../wire/pty-protocol.ts";
 
 export function shellEditorTitle(label: string): string {
 	return `Terminal: ${label}`;

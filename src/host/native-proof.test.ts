@@ -22,11 +22,11 @@ import {
 } from "./native-proof.ts";
 import type { NativeProofRecord } from "./native-proof.ts";
 import { stageNativeModule } from "../runtime/native-stage.ts";
-import { stageRuntimeAssets } from "./runtime-assets.ts";
-import { chainSecurityProblem } from "./private-storage.ts";
-import type { PrivateStorageSecurityRead, PrivateStorageSecurityReport } from "./private-storage.ts";
-import { loadWin32Native, loadWin32NativeSync, setWin32NativeForTest } from "./win32-native.ts";
-import type { Win32Native } from "./win32-native.ts";
+import { stageRuntimeAssets } from "../wire/runtime-assets.ts";
+import { chainSecurityProblem } from "../wire/private-storage.ts";
+import type { PrivateStorageSecurityRead, PrivateStorageSecurityReport } from "../wire/private-storage.ts";
+import { loadWin32Native, loadWin32NativeSync, setWin32NativeForTest } from "../wire/win32-native.ts";
+import type { Win32Native } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 
 const windowsOnly = { skip: process.platform !== "win32" ? "the proof reads Windows file identity and staging rules" : false };

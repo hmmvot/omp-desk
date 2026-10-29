@@ -31,15 +31,15 @@ import type {
 	BrokerRecordFacts,
 	SourcedBrokerRecord,
 } from "./broker-processes.ts";
-import type { PtyIdentityReading } from "./pty-identity.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
 import {
 	PTY_PROTOCOL_VERSION,
 	PTY_RECORD_VERSION,
 	PTY_RUNTIME_VERSION,
 	PTY_SERVICE,
 	createPtyToken,
-} from "./pty-protocol.ts";
-import type { PtyBrokerRecord, PtyKind } from "./pty-protocol.ts";
+} from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord, PtyKind } from "../wire/pty-protocol.ts";
 
 const BUILD_DIGEST = "b".repeat(64);
 const OTHER_DIGEST = "c".repeat(64);

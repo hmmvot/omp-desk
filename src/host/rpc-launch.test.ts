@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "./control-protocol.ts";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../wire/control-protocol.ts";
 import type { NativeControlBootstrap } from "./native-terminal.ts";
 import { controlRuntimeFlagSet, NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
 import type { RuntimeFlagPlan } from "./runtime-flags.ts";

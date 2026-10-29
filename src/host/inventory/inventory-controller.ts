@@ -1,7 +1,7 @@
 import { readSessionEvidence } from "../session-tools.ts";
-import { emptyView, inventoryPendingKey, isUnavailable, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "./inventory-model.ts";
-import type { InventoryResult, InventoryRow, InventoryScope, SessionEvidence, ViewKind, ViewModel } from "./inventory-model.ts";
-import type { InventoryRuntime } from "./inventory-runtime.ts";
+import { emptyView, inventoryPendingKey, isUnavailable, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "../../wire/inventory/inventory-model.ts";
+import type { InventoryResult, InventoryRow, InventoryScope, SessionEvidence, ViewKind, ViewModel } from "../../wire/inventory/inventory-model.ts";
+import type { InventoryRuntime } from "../../wire/inventory/inventory-runtime.ts";
 import type { Logger } from "../../shared/logger.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
 import type { PendingOperations } from "../pending-operations.ts";

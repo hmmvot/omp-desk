@@ -15,10 +15,10 @@
  */
 
 import path from "node:path";
-import { filetimeToEpochMs, isPtyKind, isPtySlot } from "./pty-protocol.ts";
-import type { PtyKind } from "./pty-protocol.ts";
-import type { ProcessCommandLineReading, ProcessTableReading, Win32Native } from "./win32-native.ts";
-import type { PtyIdentityReading } from "./pty-identity.ts";
+import { filetimeToEpochMs, isPtyKind, isPtySlot } from "../wire/pty-protocol.ts";
+import type { PtyKind } from "../wire/pty-protocol.ts";
+import type { ProcessCommandLineReading, ProcessTableReading, Win32Native } from "../wire/win32-native.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
 
 /** What a broker's command line says about it. */
 export interface UnmanagedBrokerFacts {

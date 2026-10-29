@@ -86,7 +86,7 @@ The raw addon loads in all three runtimes Desk runs in: Node, Electron's Node (t
 
 ### Module
 
-`src/host/win32-native.ts` is the only module that touches the FFI. It exports:
+`src/wire/win32-native.ts` is the only module that touches the FFI. It exports:
 
 ```ts
 export interface Win32Native {

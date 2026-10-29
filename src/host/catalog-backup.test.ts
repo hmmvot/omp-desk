@@ -42,12 +42,12 @@ import {
 import type { BackupWriterDeps, CatalogContentKeys, CatalogCopy, CatalogRegression, RecoveryLocation, RecoverySource, RecoverySourceDeps } from "./catalog-backup.ts";
 import { catalogPaths, createCatalogStore, readCatalogDocument } from "./profile-catalog.ts";
 import type { CatalogPaths, CatalogRecordMerger } from "./profile-catalog.ts";
-import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import type { PrivateStorageCommandResult, PrivateStorageProbe } from "../wire/private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
-import type { PtyIdentityReading } from "./pty-identity.ts";
-import { PTY_PROTOCOL_VERSION, PTY_RECORD_VERSION, PTY_SERVICE, createPtyToken } from "./pty-protocol.ts";
-import type { PtyBrokerRecord } from "./pty-protocol.ts";
-import { claimPtyRecord, ptyRecordPath, readPtyRecord } from "./pty-registry.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
+import { PTY_PROTOCOL_VERSION, PTY_RECORD_VERSION, PTY_SERVICE, createPtyToken } from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord } from "../wire/pty-protocol.ts";
+import { claimPtyRecord, ptyRecordPath, readPtyRecord } from "../wire/pty-registry.ts";
 
 const DAY = 24 * 60 * 60_000;
 const KEYS: CatalogContentKeys = { sessions: "test.sessions", folders: "test.folders" };

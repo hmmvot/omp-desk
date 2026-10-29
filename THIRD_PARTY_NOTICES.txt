@@ -136,7 +136,7 @@ win32-arm64), taken unmodified from koffi's own platform package and pinned by
 SHA-256 in `scripts/native-assets.mjs`. Only the prebuilt Node-API addon is
 shipped; koffi's JavaScript is not. Desk loads it with `process.dlopen` from a
 staged, hashed copy and calls `kernel32` and `advapi32` through it
-(`src/host/win32-native.ts`, ADR-0076). The MIT permission text below applies to
+(`src/wire/win32-native.ts`, ADR-0076). The MIT permission text below applies to
 it unchanged.
 
 ================================================================================

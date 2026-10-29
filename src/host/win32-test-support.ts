@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { StagedRuntimeAsset } from "./runtime-assets.ts";
+import type { StagedRuntimeAsset } from "../wire/runtime-assets.ts";
 
 /** The installed `koffi.node` for this process's architecture, with the digest staging would record. */
 export async function installedAddonAsset(): Promise<StagedRuntimeAsset> {

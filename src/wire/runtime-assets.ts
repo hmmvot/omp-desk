@@ -24,7 +24,7 @@
  * the staged paths are *not* secret — they appear in the command line of the
  * processes that load them — but they are code that runs as this user, so no
  * other account may write them. The tree is verified through the shared private
- * storage convention (`src/host/private-storage.ts`), which this module describes
+ * storage convention (`src/wire/private-storage.ts`), which this module describes
  * as a layout rather than re-implementing: the runtime directory and every digest
  * directory (the directories this module owns, rewritten non-recursively when not
  * yet limited and, in a staging that writes, *before* the first copy is written, so

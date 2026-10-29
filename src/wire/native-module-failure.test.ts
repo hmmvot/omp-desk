@@ -1,7 +1,7 @@
 /**
  * Why the native module did not load: which cause class each raw error is read as, what each class tells the person, and
  * what "Copy diagnostics" carries. The messages are the ones Windows gives for these causes through `process.dlopen`
- * (Node appends the module's path after the system text). Runner: `node --test src/host/native-module-failure.test.ts`.
+ * (Node appends the module's path after the system text). Runner: `node --test src/wire/native-module-failure.test.ts`.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

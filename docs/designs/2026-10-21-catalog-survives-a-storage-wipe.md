@@ -41,10 +41,10 @@ Non-goals:
 ## Current State
 
 - `src/host/profile-catalog.ts`: one JSON document per local profile in `<globalStorage>/catalog/v1/`, committed by stage-and-rename under `catalog.lock` ([ADR-0034](../decisions/0034-store-sessions-in-one-profile-catalog.md)). A missing document is "a fresh install", created by the first commit; an unreadable one refuses writes. There is no second copy, journal or last-good file.
-- `src/host/pty-registry.ts`: broker records in `<globalStorage>/pty/`, created once by the broker (`claimPtyRecord`), immutable afterwards, protected by an owner-only ACL that `ensurePtyStateAccess` establishes and verifies ([ADR-0006](../decisions/0006-host-generated-key-peer-verified-pipe.md): the same-user boundary is the stated trust boundary).
+- `src/wire/pty-registry.ts`: broker records in `<globalStorage>/pty/`, created once by the broker (`claimPtyRecord`), immutable afterwards, protected by an owner-only ACL that `ensurePtyStateAccess` establishes and verifies ([ADR-0006](../decisions/0006-host-generated-key-peer-verified-pipe.md): the same-user boundary is the stated trust boundary).
 - `src/host/broker-processes.ts` and `src/wiring/process-wiring.ts`: the process rows (the Terminals group of the Sessions view; [ADR-0060](../decisions/0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md) removed the separate Processes view) are exactly the records of `pty/` whose broker process is alive and is the process the record describes. A broker without a record is invisible.
 - `src/host/session-kill.ts`: Kill ends a row's broker tree by `taskkill /T /F` after proving the recorded process identity (creation time); it needs no token.
-- `src/host/win32-native.ts`: in-process Win32 calls through the staged `koffi.node` ([ADR-0076](../decisions/0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md)): creation time, descendants, pipe client, security reads. No command-line read.
+- `src/wire/win32-native.ts`: in-process Win32 calls through the staged `koffi.node` ([ADR-0076](../decisions/0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md)): creation time, descendants, pipe client, security reads. No command-line read.
 - A restored editor that names a tab the catalog does not have is only logged and left as an explanation (`editor-panels.ts`).
 
 ## Proposed Design
@@ -163,7 +163,7 @@ The reader merges, on every read, brokers found this way whose `(pid, creation t
 | `src/host/catalog-loss.ts` (new) | The evidence aggregator, the notice kinds and their texts, the cross-window marker. |
 | `src/host/unmanaged-brokers.ts` (new) | Command-line splitting, broker recognition, the scanner, the pre-kill verification. |
 | `src/host/profile-catalog.ts` | The `recover` / `isReset` / `onRecovered` / `prepareRecovery` options, the last-known document, `recoverIfNeeded`, `openedWithoutDocument`, the missing-file heal and the equal-revision adoption in `refresh`. No behaviour change without them. |
-| `src/host/win32-native.ts` | `processTable`, `processCommandLine`. |
+| `src/wire/win32-native.ts` | `processTable`, `processCommandLine`. |
 | `src/host/broker-processes.ts`, `src/host/session-kill.ts`, `src/runtime/local-kill.ts`, `src/views/session-processes.ts`, `src/views/process-rows.ts`, `src/wiring/process-wiring.ts` | `source: "unmanaged"`, its rows, tooltip and Stop refusal; the Kill target, its `none` reconciliation and the pre-kill verification. |
 | `src/extension.ts`, `src/wiring/editor-panels.ts` | Compose: pass the hooks to the store, start the writer and the sweep, feed the evidence aggregator. |
 

@@ -22,7 +22,7 @@
  * accepts any association; nothing here is trusted as fact.
  */
 
-import { isPtyOwnerHint, type PtyOwnerHint } from "./pty-protocol.ts";
+import { isPtyOwnerHint, type PtyOwnerHint } from "../wire/pty-protocol.ts";
 
 /** Values an owner hint is read from: process identity plus `VSCODE_PID`. */
 export interface FolderShellOwnerSource {

@@ -35,7 +35,7 @@ import { CatalogError } from "./profile-catalog.ts";
 import type { CatalogStore } from "./profile-catalog.ts";
 import { isAbsoluteWorkspaceDirectory, normalizeWorkspaceDirectory } from "./session-files.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
-import { setWin32NativeForTest, startWin32Native, type NativeModuleAsset } from "./win32-native.ts";
+import { setWin32NativeForTest, startWin32Native, type NativeModuleAsset } from "../wire/win32-native.ts";
 import { isRpcHost, resolveSessionOrigin } from "./session-model.ts";
 import {
 	createNativeDeletionEvidenceStore,

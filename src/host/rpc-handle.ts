@@ -27,9 +27,9 @@
 
 import { randomBytes } from "node:crypto";
 import { BrokerHandle, PtyRequestError, type BrokerHandleEvent } from "./broker-handle.ts";
-import { PTY_PROTOCOL_VERSION, PTY_RPC_MAX_WRITE_BYTES, PtyProtocolError, PtyRpcFragmentAssembler, ptyRpcFragment, ptyRpcFragmentCount } from "./pty-protocol.ts";
-import type { PtyBrokerFrame, PtyBrokerRecord, PtyStatusPayload, PtyStopMode, PtyStopResult } from "./pty-protocol.ts";
-import type { PtyClientSideConnection } from "./pty-ipc.ts";
+import { PTY_PROTOCOL_VERSION, PTY_RPC_MAX_WRITE_BYTES, PtyProtocolError, PtyRpcFragmentAssembler, ptyRpcFragment, ptyRpcFragmentCount } from "../wire/pty-protocol.ts";
+import type { PtyBrokerFrame, PtyBrokerRecord, PtyStatusPayload, PtyStopMode, PtyStopResult } from "../wire/pty-protocol.ts";
+import type { PtyClientSideConnection } from "../wire/pty-ipc.ts";
 import type { InputReclaim, RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChannelTraffic, RpcChildStatus } from "../protocol/rpc.ts";
 
 /** How long one line write waits for the broker's acknowledgement. */

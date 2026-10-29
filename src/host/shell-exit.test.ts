@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { stopShellAndBroker, watchShellExit, type ShellExitSource, type ShellStopSource } from "./shell-exit.ts";
 import type { PtyHandleEvent } from "./pty-client.ts";
-import type { PtyStatusPayload, PtyStopResult } from "./pty-protocol.ts";
+import type { PtyStatusPayload, PtyStopResult } from "../wire/pty-protocol.ts";
 import { TabLifecycle } from "./tab-lifecycle.ts";
 
 function fixture(initial: ShellExitSource["state"] = "running", kind: ShellExitSource["kind"] = "folder-shell") {

@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "./control-protocol";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../wire/control-protocol";
 import { planControlLaunch } from "./launch-capability";
 import {
 	DEFAULT_OMP_PROFILE,
@@ -22,9 +22,9 @@ import {
 } from "./native-terminal";
 import type { NativeControlBootstrap, OmpBinary, OmpCommand } from "./native-terminal";
 import type { RuntimeFlagPlan } from "./runtime-flags";
-import { isPtyProcessAlive } from "./pty-identity";
+import { isPtyProcessAlive } from "../wire/pty-identity";
 import type { PtyBrokerClient, RpcAttachOutcome as BrokerRpcAttachOutcome } from "./pty-client";
-import type { PtyBrokerRuntime } from "./pty-protocol";
+import type { PtyBrokerRuntime } from "../wire/pty-protocol";
 import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
 import { HOST_STOP_TIMEOUT_MS, concurrentPinProof, decideStop, lazyNativeGenerationReader } from "./rpc-reconcile";

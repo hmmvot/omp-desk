@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { shellCleanupDescription, shellEditorTitle, watchShellOwnerStop } from "./shell-title.ts";
 import type { ShellOwnerStopSource } from "./shell-title.ts";
 import type { PtyHandleEvent } from "./pty-client.ts";
-import type { PtyOwnerStopStatus } from "./pty-protocol.ts";
+import type { PtyOwnerStopStatus } from "../wire/pty-protocol.ts";
 
 test("shell titles stay compact while cleanup descriptions reflect the verdict", () => {
 	assert.equal(shellEditorTitle("alpha"), "Terminal: alpha");

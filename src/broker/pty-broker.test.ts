@@ -3,9 +3,9 @@ import { describe, it } from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { PtyBroker, childEnvironment, parsePtyBrokerArgs } from "./pty-broker.ts";
 import { RPC_PACED_CLOSE_MS } from "./rpc-ring.ts";
-import type { PtyBrokerServer, PtyBrokerSideConnection } from "../host/pty-ipc.ts";
-import { PTY_PROTOCOL_VERSION, PTY_RUNTIME_VERSION } from "../host/pty-protocol.ts";
-import type { PtyClientFrame, PtyEventFrame, PtyStopResult } from "../host/pty-protocol.ts";
+import type { PtyBrokerServer, PtyBrokerSideConnection } from "../wire/pty-ipc.ts";
+import { PTY_PROTOCOL_VERSION, PTY_RUNTIME_VERSION } from "../wire/pty-protocol.ts";
+import type { PtyClientFrame, PtyEventFrame, PtyStopResult } from "../wire/pty-protocol.ts";
 
 const STOP_RESULT: PtyStopResult = {
 	verified: false, mode: "graceful", nativePid: 42, pidGone: true,

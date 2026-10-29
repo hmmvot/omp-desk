@@ -13,16 +13,16 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, stat, utimes } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { replaceFileAtomic } from "./atomic-file.ts";
-import { restrictPrivateStorage } from "./private-storage.ts";
-import type { PrivateStorageProbe } from "./private-storage.ts";
+import { replaceFileAtomic } from "../wire/atomic-file.ts";
+import { restrictPrivateStorage } from "../wire/private-storage.ts";
+import type { PrivateStorageProbe } from "../wire/private-storage.ts";
 import { parseCatalogDocument } from "./profile-catalog.ts";
 import type { CatalogDocument, CatalogRecovery } from "./profile-catalog.ts";
-import { queryPtyProcessIdentity } from "./pty-identity.ts";
-import type { PtyIdentityReading } from "./pty-identity.ts";
-import { parsePtyBrokerRecord } from "./pty-protocol.ts";
-import type { PtyBrokerRecord } from "./pty-protocol.ts";
-import { claimPtyRecord, ensurePtyStateAccess, listPtyRecords, ptyRecordPath, readPtyRecord } from "./pty-registry.ts";
+import { queryPtyProcessIdentity } from "../wire/pty-identity.ts";
+import type { PtyIdentityReading } from "../wire/pty-identity.ts";
+import { parsePtyBrokerRecord } from "../wire/pty-protocol.ts";
+import type { PtyBrokerRecord } from "../wire/pty-protocol.ts";
+import { claimPtyRecord, ensurePtyStateAccess, listPtyRecords, ptyRecordPath, readPtyRecord } from "../wire/pty-registry.ts";
 
 /** Replaces the root of the recovery folders; for tests and isolated environments, not a setting. */
 export const RECOVERY_ROOT_ENV = "OMP_DESK_RECOVERY_ROOT";

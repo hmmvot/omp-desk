@@ -16,13 +16,14 @@ const ALLOWED = {
   shared: [],
   chat: ["shared"],
   protocol: ["chat", "shared"],
-  host: ["broker", "omp", "protocol", "chat", "shared"],
-  broker: ["host", "omp", "protocol", "chat", "shared"],
-  omp: ["host", "broker", "protocol", "chat", "shared"],
-  views: ["host", "protocol", "chat", "shared"],
+  wire: ["protocol", "chat", "shared"],
+  host: ["wire", "broker", "omp", "protocol", "chat", "shared"],
+  broker: ["wire", "host", "omp", "protocol", "chat", "shared"],
+  omp: ["wire", "host", "broker", "protocol", "chat", "shared"],
+  views: ["wire", "host", "protocol", "chat", "shared"],
   webview: ["protocol", "chat", "shared"],
-  runtime: ["host", "broker", "omp", "protocol", "chat", "shared"],
-  wiring: ["host", "views", "runtime", "protocol", "chat", "shared"],
+  runtime: ["wire", "host", "broker", "omp", "protocol", "chat", "shared"],
+  wiring: ["wire", "host", "views", "runtime", "protocol", "chat", "shared"],
 };
 // The bundle entry may import every layer except `webview` (page code runs in the webview, never in the host).
 const EXTENSION_ALLOWED = Object.keys(ALLOWED).filter((layer) => layer !== "webview");
@@ -221,13 +222,13 @@ for (const start of nodes) {
   }
 }
 
-// R-native-1: only `src/host/win32-native.ts` loads a native addon by hand (`process.dlopen`), so the FFI surface
+// R-native-1: only `src/wire/win32-native.ts` loads a native addon by hand (`process.dlopen`), so the FFI surface
 // of the extension is one reviewed module (ADR-0076). Tests and their support module are exempt.
-const DLOPEN_ALLOWED = new Set(["src/host/win32-native.ts", "src/host/win32-test-support.ts"]);
+const DLOPEN_ALLOWED = new Set(["src/wire/win32-native.ts", "src/host/win32-test-support.ts"]);
 for (const rel of nodes) {
   if (isTestFile(rel) || DLOPEN_ALLOWED.has(rel)) continue;
   const match = /\.dlopen\s*\(/.exec(texts.get(rel) ?? "");
-  if (match !== null) findings.push(`${rel}:${lineOf(texts.get(rel), match.index)} loads a native addon: only src/host/win32-native.ts may call dlopen`);
+  if (match !== null) findings.push(`${rel}:${lineOf(texts.get(rel), match.index)} loads a native addon: only src/wire/win32-native.ts may call dlopen`);
 }
 
 // R-draft-1 / R-draft-2: the Draft module (docs/designs/2026-10-23-composer-draft-module.md, ADR-0077 amendment).

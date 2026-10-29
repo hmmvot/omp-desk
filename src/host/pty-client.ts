@@ -59,11 +59,11 @@ import {
 	type PtyOwnerStopStatus,
 	type PtySnapshotMeta,
 	type PtyStatusPayload,
-} from "./pty-protocol.ts";
+} from "../wire/pty-protocol.ts";
 import { BrokerHandle, type BrokerHandleEvent, type SnapshotCollector } from "./broker-handle.ts";
-import { isPtyProcessAlive, queryPtyProcessIdentity, type PtyIdentityReading } from "./pty-identity.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, type PtyIdentityReading } from "../wire/pty-identity.ts";
 import { proveBunRuntime, type BunProofResult } from "./pty-bun-proof.ts";
-import { connectPtyBroker, type PtyClientSideConnection, type PtyConnectTimings } from "./pty-ipc.ts";
+import { connectPtyBroker, type PtyClientSideConnection, type PtyConnectTimings } from "../wire/pty-ipc.ts";
 import {
 	acquirePtySlotLock,
 	ensurePtyStateAccess,
@@ -74,7 +74,7 @@ import {
 	releasePtySlotLock,
 	type PtyRecordListing,
 	type PtyRecordLookup,
-} from "./pty-registry.ts";
+} from "../wire/pty-registry.ts";
 import {
 	discardReusedPtyProof,
 	ensurePtyRuntime,
@@ -86,8 +86,8 @@ import {
 	type PtyRuntimeReadiness,
 	type ReusedPtyProof,
 } from "./pty-runtime.ts";
-import { PTY_RUNTIME_VERSION, attestationOf } from "./pty-protocol.ts";
-import type { PrivateStorageProbe } from "./private-storage.ts";
+import { PTY_RUNTIME_VERSION, attestationOf } from "../wire/pty-protocol.ts";
+import type { PrivateStorageProbe } from "../wire/private-storage.ts";
 import type { Logger } from "../shared/logger.ts";
 import {
 	CHAT_BROKER_RUNTIME_SETTING,
@@ -107,7 +107,7 @@ import {
 import { verifyExecutableTrust, type ExecutableTrustProbe } from "./executable-trust.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import { timedStep, type StepSink } from "./session-restore-trace.ts";
-import { startLoopLagGauge } from "./loop-gauge.ts";
+import { startLoopLagGauge } from "../wire/loop-gauge.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
 

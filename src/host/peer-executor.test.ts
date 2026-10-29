@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { identifyPeerExecutor, proveExecutorGone } from "./peer-executor.ts";
 import type { PeerExecutorProbe } from "./peer-executor.ts";
-import type { PtyGoneReading, PtyIdentityReading } from "./pty-identity.ts";
+import type { PtyGoneReading, PtyIdentityReading } from "../wire/pty-identity.ts";
 
 function probe(options: { readonly read?: PtyIdentityReading | Error; readonly gone?: PtyGoneReading | Error } = {}): PeerExecutorProbe & { readonly waited: Array<{ pid: number; creationTime: string; timeoutMs: number }> } {
 	const waited: Array<{ pid: number; creationTime: string; timeoutMs: number }> = [];

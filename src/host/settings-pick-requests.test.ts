@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SettingsRefusal } from "./omp-settings-core.ts";
+import { SettingsRefusal } from "../wire/omp-settings-core.ts";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests.ts";
 
 test("pick-model requests accept only list purposes with bounded current values and exclusions", () => {

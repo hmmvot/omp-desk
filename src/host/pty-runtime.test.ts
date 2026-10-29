@@ -24,10 +24,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { createHash } from "node:crypto";
-import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import type { PrivateStorageCommandResult, PrivateStorageProbe } from "../wire/private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
-import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "./runtime-assets.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "../wire/runtime-assets.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 import type { PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
 import {

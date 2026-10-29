@@ -31,7 +31,7 @@
  */
 import * as path from "node:path";
 import { silentLogger, type Logger } from "../shared/logger.ts";
-import type { Win32Native } from "./win32-native.ts";
+import type { Win32Native } from "../wire/win32-native.ts";
 
 /** First 64-bit seed OMP's native lock mixes into the path hash. The bytes spell `OMP-LOCK`. */
 const SEED_FIRST = 0x4f4d502d4c4f434bn;

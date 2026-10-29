@@ -22,10 +22,10 @@ import { CatalogLossReporter, regressedNotice, restoredNotice } from "../host/ca
 import type { LossEvidence, LossNotice, LossNoticeAction } from "../host/catalog-loss.ts";
 import { catalogPaths, createCatalogStore } from "../host/profile-catalog.ts";
 import type { CatalogRecordMerger, CatalogStore } from "../host/profile-catalog.ts";
-import { listPtyRecords } from "../host/pty-registry.ts";
+import { listPtyRecords } from "../wire/pty-registry.ts";
 import { SESSION_INDEX_LOCAL_KEY } from "../host/session-index.ts";
 import { createUnmanagedBrokerScanner, nativeScanPorts, processKey } from "../host/unmanaged-brokers.ts";
-import { win32Native } from "../host/win32-native.ts";
+import { win32Native } from "../wire/win32-native.ts";
 import type { Logger } from "../shared/logger.ts";
 
 /** What the window keeps of the recovery after the catalog is open. */

@@ -1,7 +1,7 @@
 /**
  * Tests for the PTY broker's wire and record contract.
  *
- * Runner: `node --test src/host/pty-protocol.test.ts`
+ * Runner: `node --test src/wire/pty-protocol.test.ts`
  *
  * What matters here: a record is accepted only when every field is usable, a
  * handshake can only be produced by the side that holds the token, every frame is

@@ -2,7 +2,7 @@
  * The broker's owner-watch client (ADR-0030): what it accepts from the staged helper,
  * and what it refuses to read as an owner having exited.
  *
- * Runner: `node --test src/host/pty-owner-watch.test.ts`
+ * Runner: `node --test src/wire/pty-owner-watch.test.ts`
  *
  * The helper is a long-lived process whose whole value is that it holds a handle on a
  * live process. That makes its *failure modes* part of the safety argument: a helper

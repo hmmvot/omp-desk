@@ -34,7 +34,7 @@ import type { FakeOmp } from "./host/provider-login-fake-omp.ts";
 import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "./protocol/messages.ts";
 import type { GuestTerminalFontMessage } from "./protocol/messages.ts";
 import { URI } from "vscode-uri";
-import type { TurnNotice } from "./host/notifications.ts";
+import type { TurnNotice } from "./wire/notifications.ts";
 import { createOmpHostControlAdapter, type OmpExtensionContext } from "./omp/host-control.ts";
 import { parseChatWebviewMessage, type ChatDisplayPreferences, type ChatWebviewMessage } from "./protocol/chat-messages.ts";
 

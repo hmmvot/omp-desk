@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PtyHandle } from "./pty-client.ts";
-import type { PtyBrokerRecord } from "./pty-protocol.ts";
-import { isPtyKind } from "./pty-protocol.ts";
+import type { PtyBrokerRecord } from "../wire/pty-protocol.ts";
+import { isPtyKind } from "../wire/pty-protocol.ts";
 import { admitStatsLaunch, compatibleStatsResponse, ensureStatsDashboard, planStatsPreload, statsLaunchSpec, statsPreloadSupported } from "./stats-dashboard.ts";
 import type { StatsDashboardPorts, StatsProbe } from "./stats-dashboard.ts";
 import { statsWebviewHtml } from "./stats-webview.ts";

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
+import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "../wire/windows-powershell.ts";
 
 let discovery: Promise<readonly string[]> | undefined;
 

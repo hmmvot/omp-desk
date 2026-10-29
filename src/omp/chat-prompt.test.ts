@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CHAT_PROMPT, CHAT_PROMPT_INJECTIONS, HTML_PAGE_INJECTION, LINK_REMINDER, MAX_CHAT_PROMPT_CHARS, MAX_HTML_PAGE_INJECTION_CHARS, MAX_INJECTION_CHARS, MAX_LINK_REMINDER_CHARS, MAX_TOOL_INTENT_INJECTION_CHARS, TOOL_INTENT_INJECTION, chatPromptFor, registerChatPrompt, renderChatPrompt } from "./chat-prompt.ts";
-import { HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../host/control-protocol.ts";
+import { HTML_PAGES_ENV, LINK_REMINDER_ENV, TOOL_INTENT_ENV } from "../wire/control-protocol.ts";
 import type { ChatPromptContext } from "./chat-prompt.ts";
 
 function bindEvent(name: string, env: Record<string, string | undefined> = {}): ((event: unknown, ctx: ChatPromptContext) => unknown) | undefined {

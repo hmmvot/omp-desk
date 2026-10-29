@@ -1,7 +1,7 @@
 /**
  * Tests for the durable broker records.
  *
- * Runner: `node --test src/host/pty-registry.test.ts`
+ * Runner: `node --test src/wire/pty-registry.test.ts`
  *
  * A record is the only thing that survives a window, so what matters is that a slot
  * can be occupied exactly once, that a record this build cannot read is never treated
@@ -21,8 +21,8 @@ import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
 import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
-import { installedAddonAsset } from "./win32-test-support.ts";
-import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
+import { installedAddonAsset } from "../host/win32-test-support.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "../host/private-storage-test-support.ts";
 import {
 	acquirePtySlotLock,
 	claimPtyRecord,

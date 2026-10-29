@@ -27,9 +27,9 @@
 import { randomUUID } from "node:crypto";
 import { link, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
-import { isPtyProcessAlive } from "./pty-identity.ts";
-import { RUNTIME_ASSET_DIRECTORY } from "./runtime-assets.ts";
+import { readBoundedFile, replaceFileAtomic } from "../wire/atomic-file.ts";
+import { isPtyProcessAlive } from "../wire/pty-identity.ts";
+import { RUNTIME_ASSET_DIRECTORY } from "../wire/runtime-assets.ts";
 import { isRecord } from "../shared/guards.ts";
 
 /** Directory below `runtime/` holding the locks and outcomes of running checks. Apart from the proofs, which it must never mix with. */

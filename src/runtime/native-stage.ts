@@ -13,9 +13,9 @@
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { stageRuntimeAssets } from "../host/runtime-assets.ts";
+import { stageRuntimeAssets } from "../wire/runtime-assets.ts";
 import { recordNativeProof } from "../host/native-proof.ts";
-import { startWin32Native, win32NativeFailure } from "../host/win32-native.ts";
+import { startWin32Native, win32NativeFailure } from "../wire/win32-native.ts";
 
 /** Where the child's time went, in milliseconds: its process age when staging began (runtime boot and module load), loading the packaged module, staging the copy. */
 export interface NativeStageTiming {

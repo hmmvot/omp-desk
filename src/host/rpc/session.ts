@@ -147,7 +147,7 @@ import {
 	type HistorySnapshot,
 } from "./history-reader.ts";
 import { proveContinuation, type ContinuationProof } from "../session-chain.ts";
-import { meterWork } from "../loop-lag.ts";
+import { meterWork } from "../../wire/loop-lag.ts";
 
 /** Time and timers; injectable so the state machine is deterministic in tests. */
 export interface RpcSessionTimers {

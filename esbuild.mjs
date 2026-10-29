@@ -243,7 +243,7 @@ const shared = {
  *
  * One file per build: the architecture of `OMP_DESK_TARGET`, else of this machine, so a
  * platform-specific VSIX never carries another architecture's binary. The extension stages it
- * like every other file it loads (`src/host/runtime-assets.ts`). `ensureKoffiAddon` refuses a
+ * like every other file it loads (`src/wire/runtime-assets.ts`). `ensureKoffiAddon` refuses a
  * file that is not the pinned bytes or is built for another architecture, and never builds
  * koffi from source.
  */

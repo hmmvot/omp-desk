@@ -23,10 +23,10 @@ import type { BrokerStopPorts, BrokerStopTarget } from "./broker-process-stop.ts
 import type { Logger } from "../shared/logger.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import type { PtyHandle } from "./pty-client.ts";
-import { isPtyProcessAlive, waitForPtyProcessGone } from "./pty-identity.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { isPtyProcessAlive, waitForPtyProcessGone } from "../wire/pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
-import { readPtyRecord } from "./pty-registry.ts";
+import { readPtyRecord } from "../wire/pty-registry.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
