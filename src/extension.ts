@@ -198,6 +198,8 @@ import { registerKeyHints, type KeyHintsHandle } from "./wiring/key-hints-wiring
 import type { ContextSession, ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { HandOverResult, WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
+import { createFileWindow } from "./wiring/file-window";
+import type { FileWindow } from "./wiring/file-window";
 import { registerSessionActions } from "./wiring/session-actions";
 import { adoptSessionTitle } from "./wiring/session-title";
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
@@ -657,6 +659,8 @@ interface WindowState {
   readonly requestSelections: Set<string>;
   /** Hands sessions and launches to the other windows of the profile, serves their requests and keeps the file window (ADR-0056, ADR-0057). */
   readonly routing: WindowRouting;
+  /** The Ctrl+Shift+M file window: files from Chat links open in it while it lasts. */
+  readonly fileWindow: FileWindow;
 
   // Editor panels and bridge
   /**
@@ -1092,7 +1096,6 @@ function windowRoutingDeps(): WindowRoutingDeps {
     liveEditorSlots: () => (windowState().editorSlotPruner?.complete === true ? windowState().bridgeHost.editorMembership().map(entry => entry.editorId) : null),
     selectEditorTab,
     revealExistingTab,
-    isSessionTabInput: input => windowState().editorPanels.isSessionTabInput(input),
     electLocalController,
     handOverSession,
     showRestoredOutsideHome,
@@ -1350,6 +1353,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     windowRegistry: undefined,
     editorSlotPruner: undefined,
     routing: registerWindowRouting(windowRoutingDeps()),
+    fileWindow: createFileWindow({ log, info: showInfo, isSessionTabInput: input => windowState().editorPanels.isSessionTabInput(input) }),
     resolveSessionFolders: async () => {},
     requestSelections: new Set<string>(),
     // Editor panels and bridge
@@ -2271,7 +2275,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.switchSessionViewTerminal", () => switchActiveSessionView(context, index, "terminal")),
     registerDeskCommand("ompDesk.copyTerminalScreen", copyActiveTerminalScreen),
     registerDeskCommand("ompDesk.redrawTerminal", redrawActiveTerminal),
-    registerDeskCommand("ompDesk.moveFileToNewWindow", s.routing.moveFileToNewWindow),
+    registerDeskCommand("ompDesk.moveFileToNewWindow", s.fileWindow.toggle),
     registerDeskCommand("ompDesk.reloadAllWindows", () => pendingEntry("window", "reload-windows", { origin: "command", step: "working" }, () => s.routing.reloadAllWindows())),
     registerDeskCommand("ompDesk.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
     registerDeskCommand("ompDesk.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
@@ -10837,7 +10841,7 @@ async function searchSymbolFromSelection(query: string, tabId: string): Promise<
   const resolver = symbolLinkResolver();
   await searchSymbol(query, { cwd, roots: symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)) }, {
     find: (symbol, scope) => resolver.find(symbol, scope),
-    open: location => openTerminalFile(vscode, location, s.routing.fileWindowColumn()),
+    open: location => openTerminalFile(vscode, location, s.fileWindow.column()),
     pick: async choices => {
       const picked = await vscode.window.showQuickPick(choices.map(choice => ({ label: choice.label, description: choice.description, detail: choice.detail, entry: choice.entry })), { placeHolder: "Choose a definition", matchOnDescription: true, matchOnDetail: true });
       return picked?.entry;
@@ -10979,7 +10983,7 @@ async function handleTerminalGuestMessage(
         cwd,
         isCurrent,
         reply: message => pushTerminalTo(state.slotId, message),
-        openFile: location => openTerminalFile(vscode, location, s.routing.fileWindowColumn()),
+        openFile: location => openTerminalFile(vscode, location, s.fileWindow.column()),
         revealInExplorer: target => revealPathInExplorer(vscode, target),
         revealInOs: target => revealPathInOs(target),
         warn: message => { log.warn(`terminal link: ${message}`); showWarning(message); },

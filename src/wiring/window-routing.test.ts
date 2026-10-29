@@ -226,7 +226,6 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		liveEditorSlots: () => (state.slotsUnknown ? null : [...state.editorTabs]),
 		selectEditorTab: async slot => { selected.push(slot); return state.selectResult; },
 		revealExistingTab: async (_index, tabId) => { revealed.push(tabId); },
-		isSessionTabInput: input => input !== null && typeof input === "object" && "session" in input,
 		electLocalController: async (_index, tabId) => { elected.push(tabId); },
 		showRestoredOutsideHome: async (_index, tabId) => { outsideHome.push(tabId); },
 		openSession: async (...args) => { opened.push(["open-session", ...args.slice(2)]); return true; },
@@ -1771,49 +1770,5 @@ describe("reloading every window", () => {
 				w.routing.dispose();
 			}
 		});
-	});
-});
-
-describe("the file window", () => {
-	const fileTab = (group: StubTabGroup, label: string) => ({ label, input: new stub.TabInputText(URI.file(`C:/work/${label}`)), group });
-	const groupOf = (viewColumn: number, ...labels: string[]): StubTabGroup => {
-		const group: StubTabGroup = { viewColumn, tabs: [], activeTab: undefined };
-		group.tabs = labels.map(label => fileTab(group, label));
-		group.activeTab = group.tabs[0];
-		return group;
-	};
-
-	it("says so when no file is open next to the chat", async () => {
-		const w = await world();
-		const chat = { viewColumn: 1, tabs: [{ label: "chat", input: { session: true }, group: undefined as never }], activeTab: undefined } as StubTabGroup;
-		stub.window.tabGroups.all = [chat];
-		stub.window.tabGroups.activeTabGroup = chat;
-		await w.routing.moveFileToNewWindow();
-		assert.deepEqual(w.informed, ["No file is open next to the chat."]);
-		assert.equal(w.routing.fileWindowColumn(), undefined, "no file window: VS Code chooses");
-	});
-
-	it("opens the files group in a window of its own through VS Code's size-taking command, keeps it on top, and remembers it", async () => {
-		const w = await world();
-		const chat = { viewColumn: 1, tabs: [{ label: "chat", input: { session: true }, group: undefined as never }], activeTab: undefined } as StubTabGroup;
-		const files = groupOf(2, "a.ts", "b.ts");
-		stub.window.tabGroups.all = [chat, files];
-		stub.window.tabGroups.activeTabGroup = files;
-		const auxiliary = groupOf(3);
-		stub.commands.handler = (command: unknown) => {
-			if (command === "_workbench.open") stub.window.tabGroups.all = [chat, files, auxiliary];
-			return undefined;
-		};
-		try {
-			await w.routing.moveFileToNewWindow();
-			const commands = w.calls.map(call => call[0]);
-			assert.equal(commands[0], "_workbench.open");
-			assert.equal((w.calls[0]?.[2] as unknown[])[0], -3, "the auxiliary window target");
-			assert.ok(commands.includes("workbench.action.enableWindowAlwaysOnTop"));
-			assert.equal(w.routing.fileWindowColumn(), 3, "files from the chat open in the file window while it lasts");
-		} finally {
-			stub.commands.handler = null;
-			stub.window.tabGroups.all = [];
-		}
 	});
 });

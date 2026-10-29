@@ -2,21 +2,19 @@
  * What this window does with the other windows of the profile: it publishes itself in the window
  * registry (ADR-0056), keeps the registry's picture current, hands a session or a launch to the
  * window that holds it or has its folder open (ADR-0056, ADR-0057), serves the requests other windows
- * address to it, and owns the file window it opened for files from the chat.
+ * address to it.
  *
- * The policies are in `window-registry.ts`, `window-requests.ts`, `holder-liveness.ts` and
- * `file-window.ts`; this module sequences them. It reads and writes nothing of the extension's own
+ * The policies are in `window-registry.ts`, `window-requests.ts` and `holder-liveness.ts`; this
+ * module sequences them. It reads and writes nothing of the extension's own
  * state except through {@link WindowRoutingDeps}: the window registry, the launcher folders and rows,
  * the tab records and the launch paths are all the extension's, and arrive as getters and callbacks.
  * What it keeps itself is only what no other part of the extension reads: the moment this window was
- * last focused, the two request watches, the Unity project cache, the older-build windows already
- * announced and the file window.
+ * last focused, the two request watches, the Unity project cache and the older-build windows already
+ * announced.
  */
 
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { EDITOR_GROUP_FOCUS_COMMANDS, chatGroupColumn, filesGroupColumn } from "../host/chat-layout.ts";
-import { appearedGroup, FILE_WINDOW_SIZE, FileWindowTracker } from "../host/file-window.ts";
 import { holderSeemsAlive } from "../host/holder-liveness.ts";
 import { homeAllows } from "../host/session-index.ts";
 import type { SessionIndex } from "../host/session-index.ts";
@@ -84,8 +82,6 @@ const WINDOW_FOCUS_WAIT_MS = 1_500;
 const WINDOW_REQUEST_WATCH_DEBOUNCE_MS = 30;
 /** What each window remembers of which Unity project a folder's launches run in: one project per folder, shared by every window of the profile. */
 const UNITY_CHOICE_KEY = "omp.unityProjectChoice.v1";
-/** VS Code's editor-group target that opens an editor in a new auxiliary window (`AUX_WINDOW_GROUP`). */
-const AUX_WINDOW_GROUP = -3;
 /** The workbench command Developer: Reload Window runs; it restarts this window's extension host. */
 const RELOAD_WINDOW_COMMAND = "workbench.action.reloadWindow";
 
@@ -155,8 +151,6 @@ export interface RoutingEditorPort {
 	/** Make VS Code show the slot's tab; `false` when it did not become active. */
 	selectEditorTab(slot: string): Promise<boolean>;
 	revealExistingTab(index: SessionIndex, tabId: string, panel: vscode.WebviewPanel): Promise<void>;
-	/** Whether a tab input is a session editor of this extension. */
-	isSessionTabInput(input: unknown): boolean;
 	/** The election of the editor that holds a tab that is already connected here. */
 	electLocalController(index: SessionIndex, tabId: string): Promise<void>;
 	/** Show a restored editor of a session another window is home for: its saved history, read-only, with no claim and no start (ADR-0080). */
@@ -285,10 +279,6 @@ export interface WindowRouting {
 	openRestoredTabIfUncovered(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void>;
 	/** An explicit open supersedes another window's request to show this tab only: forget the mark. `true` when there was one. */
 	consumeRequestedSelection(tabId: string): boolean;
-	/** The view column files from the chat open in: the file window's group while that window is open, else VS Code's choice. */
-	fileWindowColumn(): number | undefined;
-	/** `ompDesk.moveFileToNewWindow`: a toggle that moves the files group into a window of its own, or back. */
-	moveFileToNewWindow(): Promise<void>;
 	/** Stop watching the request directories. */
 	dispose(): void;
 }
@@ -340,7 +330,6 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 	const unityProjects = new UnityProjectCache();
 	/** Windows on an older build already announced, so that the user is told once per window. */
 	const olderBuildNoticed = new Set<string>();
-	const fileWindow = new FileWindowTracker<vscode.TabGroup>();
 
 	/** Working directories of the sessions this window runs or is launching. */
 	function localLiveSessionCwds(index: SessionIndex): string[] {
@@ -1376,221 +1365,6 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		return deps.requestSelections().delete(tabId);
 	}
 
-	/** The view column files from the chat open in: the file window's group while that window is open, else VS Code's choice. */
-	function fileWindowColumn(): number | undefined {
-		return fileWindow.column(vscode.window.tabGroups.all) ?? undefined;
-	}
-
-	/** VS Code's own always-on-top command, for the window that is focused: the file window VS Code has just opened. */
-	async function keepFileWindowOnTop(): Promise<void> {
-		try {
-			await vscode.commands.executeCommand("workbench.action.enableWindowAlwaysOnTop");
-		} catch (error) {
-			deps.log.warn(`file window: it could not be kept on top: ${messageOf(error)}`);
-		}
-	}
-
-	/**
-	 * Ctrl+Shift+M from anywhere, a toggle. Without a file window it moves every editor of the group next to the chat into
-	 * a new one, kept on top of other windows; files opened from Chat links go into that window until it is closed. With a
-	 * file window it brings all of its tabs back to the group next to the chat and closes the window.
-	 */
-	async function moveFileToNewWindow(): Promise<void> {
-		const groups = vscode.window.tabGroups;
-		const window = fileWindow.current(groups.all);
-		if (window !== null) {
-			await returnFilesFromWindow(window);
-			return;
-		}
-		const column = filesGroupColumn(groups.all, groups.activeTabGroup.viewColumn, deps.isSessionTabInput);
-		const source = groups.all.find(group => group.viewColumn === column);
-		if (source === undefined) {
-			deps.info("No file is open next to the chat.");
-			return;
-		}
-		// The larger window needs every tab to be reopened by its file; any other tab moves the whole group as VS Code does.
-		if (source.tabs.every(tab => tab.input instanceof vscode.TabInputText && tab.input.uri.scheme !== "untitled") &&
-			await openGroupInSizedFileWindow(source)) return;
-		await moveGroupToNewWindow(source);
-	}
-
-	/** Focus an editor group, because VS Code's group commands act on the active group. `false` past the eighth group, which has no focus command. */
-	async function focusEditorGroup(group: vscode.TabGroup): Promise<boolean> {
-		if (group.viewColumn === vscode.window.tabGroups.activeTabGroup.viewColumn) return true;
-		const focusGroup = EDITOR_GROUP_FOCUS_COMMANDS[group.viewColumn - 1];
-		if (focusGroup === undefined) return false;
-		await vscode.commands.executeCommand(focusGroup);
-		return true;
-	}
-
-	/**
-	 * Move the whole group with VS Code's own Move Editor Group into New Window: every tab, its order and its state, in
-	 * a window of VS Code's default size (the command takes no bounds).
-	 */
-	async function moveGroupToNewWindow(source: vscode.TabGroup): Promise<void> {
-		if (!await focusEditorGroup(source)) {
-			deps.info("The file group is beyond the eighth editor group; focus it and use View: Move Editor Group into New Window.");
-			return;
-		}
-		const before = [...vscode.window.tabGroups.all];
-		await vscode.commands.executeCommand("workbench.action.moveEditorGroupToNewWindow");
-		fileWindow.adopt(appearedGroup(before, vscode.window.tabGroups.all));
-		await keepFileWindowOnTop();
-	}
-
-	/**
-	 * Reopen one tab's editor in `column` by its input, with its selection when it is a text file. `false` for an editor
-	 * that cannot be reopened that way (unsaved files, webviews, terminals), which then stays where it was.
-	 */
-	async function reopenTabInColumn(tab: vscode.Tab, column: number): Promise<boolean> {
-		const input = tab.input;
-		const options = { viewColumn: column, preview: false };
-		try {
-			if (input instanceof vscode.TabInputText) {
-				if (input.uri.scheme === "untitled") return false;
-				const selection = vscode.window.visibleTextEditors.find(editor =>
-					editor.viewColumn === tab.group.viewColumn && editor.document.uri.toString() === input.uri.toString())?.selection;
-				await vscode.commands.executeCommand("vscode.open", input.uri, { ...options, selection });
-			} else if (input instanceof vscode.TabInputTextDiff) {
-				await vscode.commands.executeCommand("vscode.diff", input.original, input.modified, undefined, options);
-			} else if (input instanceof vscode.TabInputCustom) {
-				await vscode.commands.executeCommand("vscode.openWith", input.uri, input.viewType, options);
-			} else if (input instanceof vscode.TabInputNotebook) {
-				await vscode.commands.executeCommand("vscode.openWith", input.uri, input.notebookType, options);
-			} else {
-				return false;
-			}
-			return true;
-		} catch (error) {
-			deps.log.warn(`file window: a tab could not be reopened there: ${messageOf(error)}`);
-			return false;
-		}
-	}
-
-	/** Whether two tabs show the same editor, for finding where a reopened tab landed. */
-	function sameTabEditor(a: vscode.Tab, b: vscode.Tab): boolean {
-		return a.label === b.label && a.input?.constructor === b.input?.constructor;
-	}
-
-	/**
-	 * The main-window group a just-reopened `tab` landed in, excluding the file window and chat groups. VS Code reports the
-	 * new tab to the extension host a moment after the open command resolves, so this looks a few times.
-	 */
-	async function groupHoldingReopened(tab: vscode.Tab, window: vscode.TabGroup): Promise<vscode.TabGroup | null> {
-		for (let attempt = 0; attempt < 20; attempt++) {
-			const found = vscode.window.tabGroups.all.find(group => group !== window && !group.tabs.some(other => deps.isSessionTabInput(other.input)) &&
-				group.tabs.some(other => sameTabEditor(other, tab)));
-			if (found !== undefined) return found;
-			const { promise, resolve } = Promise.withResolvers<void>();
-			setTimeout(resolve, 50);
-			await promise;
-		}
-		return null;
-	}
-
-	/**
-	 * Bring every tab of the file window back into the group next to the chat, in order, then close the originals; VS Code
-	 * closes the emptied window. That group is the existing files group, else a new one to the right of the chat group:
-	 * the first tab is opened into the chat group by its exact column, which activates the main window's group whichever
-	 * window the key was pressed in, and moved into a new group on its right. A tab that cannot be reopened stays in the
-	 * window, which is then still remembered, and the user is told.
-	 */
-	async function returnFilesFromWindow(window: vscode.TabGroup): Promise<void> {
-		const groups = vscode.window.tabGroups;
-		const candidates = groups.all.filter(group => group !== window);
-		const tabs = [...window.tabs];
-		const active = window.activeTab;
-		const filesColumn = filesGroupColumn(candidates, groups.activeTabGroup.viewColumn, deps.isSessionTabInput);
-		let target = candidates.find(group => group.viewColumn === filesColumn) ?? null;
-		deps.log.debug(`file window: return of ${tabs.length} tab(s) from column ${window.viewColumn}; active column ${groups.activeTabGroup.viewColumn}, files group ${target === null ? "missing" : `at column ${target.viewColumn}`}`);
-		const moved: vscode.Tab[] = [];
-		const kept: vscode.Tab[] = [];
-		for (const tab of tabs) {
-			if (target === null) {
-				// The files group does not exist yet: open the first reopenable tab next to the chat group, then follow it.
-				const chatColumn = chatGroupColumn(candidates, groups.activeTabGroup.viewColumn, deps.isSessionTabInput);
-				const chat = candidates.find(group => group.viewColumn === chatColumn);
-				// `ViewColumn.Beside` is relative to the focused window's active group, which is the file window's own when the key
-				// was pressed there. An exact column is not: the first tab is opened into the chat group (VS Code accepts that for a
-				// group that holds editors), which makes it the active group of the main window, and is then moved into a new group
-				// on its right, so the chat group ends up with no file in it.
-				if (!await reopenTabInColumn(tab, chat?.viewColumn ?? candidates[0]?.viewColumn ?? vscode.ViewColumn.One)) {
-					kept.push(tab);
-					continue;
-				}
-				if (chat !== undefined) {
-					for (let attempt = 0; attempt < 40 && !chat.tabs.some(other => sameTabEditor(other, tab)); attempt++) {
-						const { promise, resolve } = Promise.withResolvers<void>();
-						setTimeout(resolve, 50);
-						await promise;
-					}
-					await vscode.commands.executeCommand("workbench.action.moveEditorToRightGroup");
-				}
-				target = await groupHoldingReopened(tab, window);
-				if (target === null) {
-					deps.log.warn("file window: the reopened file was not found in the main window; the tabs stay in the file window");
-					deps.info("The files could not be moved back to the main window.");
-					return;
-				}
-				moved.push(tab);
-				continue;
-			}
-			(await reopenTabInColumn(tab, target.viewColumn) ? moved : kept).push(tab);
-		}
-		if (target !== null && active !== undefined && moved.includes(active) && active !== moved[moved.length - 1]) {
-			await reopenTabInColumn(active, target.viewColumn);
-		}
-		if (moved.length > 0) await vscode.window.tabGroups.close(moved);
-		if (kept.length === 0) {
-			fileWindow.adopt(null);
-			return;
-		}
-		deps.info(`${kept.length} editor${kept.length === 1 ? "" : "s"} could not be moved back to the main window (unsaved files and custom views stay in the file window).`);
-	}
-
-	/**
-	 * Open the group's text files in a new window of `FILE_WINDOW_SIZE`. VS Code offers no command to size the window its
-	 * own Move Editor Group into New Window opens, but opening an editor into `AUX_WINDOW_GROUP` takes the window's bounds,
-	 * so the first file is opened this way and the rest follow into that window's group. `false` when VS Code refused the
-	 * first file, so the caller can move the group instead.
-	 */
-	async function openGroupInSizedFileWindow(source: vscode.TabGroup): Promise<boolean> {
-		const tabs = [...source.tabs];
-		const first = tabs[0];
-		if (first === undefined || !(first.input instanceof vscode.TabInputText)) return false;
-		const uri = first.input.uri;
-		const selection = vscode.window.visibleTextEditors.find(editor =>
-			editor.viewColumn === source.viewColumn && editor.document.uri.toString() === uri.toString())?.selection;
-		const range = selection === undefined ? undefined : {
-			startLineNumber: selection.start.line + 1, startColumn: selection.start.character + 1,
-			endLineNumber: selection.end.line + 1, endColumn: selection.end.character + 1,
-		};
-		const before = [...vscode.window.tabGroups.all];
-		try {
-			// The workbench's own open command; the public `vscode.open` drops the `auxiliary` option.
-			await vscode.commands.executeCommand("_workbench.open", uri, [AUX_WINDOW_GROUP, { pinned: true, selection: range, auxiliary: { bounds: FILE_WINDOW_SIZE } }]);
-		} catch (error) {
-			deps.log.warn(`file window: ${uri.fsPath} could not be opened there: ${messageOf(error)}`);
-			return false;
-		}
-		const created = appearedGroup(before, vscode.window.tabGroups.all);
-		if (created === null) {
-			deps.log.warn("file window: opening the file created no window; the files stay where they were");
-			return true;
-		}
-		fileWindow.adopt(created);
-		await keepFileWindowOnTop();
-		// The first tab is already there, in order; the others follow it, then the tab that was active is shown again.
-		const moved: vscode.Tab[] = [first];
-		for (const tab of tabs.slice(1)) {
-			if (await reopenTabInColumn(tab, created.viewColumn)) moved.push(tab);
-		}
-		const active = source.activeTab;
-		if (active !== undefined && active !== moved[moved.length - 1]) await reopenTabInColumn(active, created.viewColumn);
-		await vscode.window.tabGroups.close(moved);
-		return true;
-	}
-
 	return {
 		publishSnapshot: publishWindowSnapshot,
 		refresh: refreshWindowRegistry,
@@ -1648,8 +1422,6 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		serveHandoverRequest,
 		openRestoredTabIfUncovered,
 		consumeRequestedSelection,
-		fileWindowColumn,
-		moveFileToNewWindow,
 		dispose() {
 			windowRequestWatch?.dispose();
 			windowRequestWatch = undefined;
