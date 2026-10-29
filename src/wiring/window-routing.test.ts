@@ -152,7 +152,6 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		catalogRefreshes: 0,
 		/** Runs when the routing re-reads the catalog: a test changes what the index records, as another window's commit would. */
 		afterCatalogRefresh: null as (() => void) | null,
-		listed: [] as Array<{ item: { state: string; tabId: string }; folder: string }>,
 	};
 	const registry: FakeRegistry = {
 		setSnapshot: snapshot => { state.published.push(snapshot); return true; },
@@ -185,7 +184,8 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	const handOvers: Array<{ request: { tabId: string; incarnation: string; binding: string | null }; asker: string }> = [];
 	const refreshedOwnership: string[][] = [];
 	const refreshedLauncher: number[] = [];
-	const providerRefreshes: unknown[] = [];
+	const heartbeats: number[] = [];
+	const windowChanges: Array<{ departed: string[]; arrived: boolean }> = [];
 	const modelRefreshes: number[] = [];
 	const requestSelections = new Set<string>();
 	const fake: FakeIndex = {
@@ -214,8 +214,8 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		launcherProvider: () => ({
 			lastActivityOf: tabId => state.activity.get(tabId) ?? null,
 			refreshOwnership: tabIds => { refreshedOwnership.push([...tabIds]); },
-			refresh: options => { providerRefreshes.push(options); },
-			listedSessions: () => state.listed as never,
+			refreshOwnershipForWindows: change => { windowChanges.push({ departed: [...change.departed], arrived: change.arrived }); },
+			heartbeat: sweepAfterMs => { heartbeats.push(sweepAfterMs); },
 		}),
 		sessionsViewVisible: () => state.viewVisible,
 		refreshLauncher: () => { refreshedLauncher.push(Date.now()); },
@@ -246,7 +246,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	stub.window.state.focused = true;
 	return {
 		storageDir, served, state, deps, routing, registry, registryHandle, fake, index: fake as never, calls: stub.commands.calls, drafts, resumed, opened, selected, revealed, elected, openedTabs, outsideHome,
-		warnings, informed, errors, handOvers, get logged(): string[] { return lines.map(line => line.message); }, lines, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
+		warnings, informed, errors, handOvers, get logged(): string[] { return lines.map(line => line.message); }, lines, released, refreshedOwnership, refreshedLauncher, heartbeats, windowChanges, modelRefreshes, requestSelections,
 	};
 }
 
@@ -416,30 +416,54 @@ describe("keeping the registry's picture current", () => {
 	});
 
 	describe("the heartbeat", () => {
-		it("re-probes the session folders, and observes every row again while the Sessions view is visible", async () => {
+		it("re-probes the session folders and rescans, and gives the launcher its own recovery with the sweep age while the Sessions view is visible", async () => {
 			const w = await world();
 			let probes = 0;
 			w.state.sessionFolders = async () => { probes++; };
 			w.state.viewVisible = true;
 			w.routing.heartbeat();
 			assert.equal(probes, 1);
-			assert.deepEqual(w.providerRefreshes, [{ ownership: true }]);
-			assert.deepEqual(w.refreshedOwnership, []);
+			assert.deepEqual(w.heartbeats, [180_000], "a sweep of every row at most every three minutes");
+			assert.deepEqual(w.refreshedOwnership, [], "no row is asked about by the routing itself");
 		});
 
-		it("observes only the rows another window holds or that are still Checking while the view is hidden", async () => {
+		it("does nothing for the rows while the view is hidden, and still re-probes the session folders", async () => {
 			const w = await world();
-			w.state.listed = [
-				{ item: { state: "otherWindow", tabId: "tab:other" }, folder: FOLDER },
-				{ item: { state: "running", tabId: "tab:own" }, folder: FOLDER },
-				{ item: { state: "checking", tabId: "tab:checking" }, folder: FOLDER },
-			];
+			let probes = 0;
+			w.state.sessionFolders = async () => { probes++; };
 			w.routing.heartbeat();
-			assert.deepEqual(w.providerRefreshes, []);
-			assert.deepEqual(w.refreshedOwnership, [["tab:other", "tab:checking"]]);
-			w.state.listed = [{ item: { state: "running", tabId: "tab:own" }, folder: FOLDER }];
 			w.routing.heartbeat();
-			assert.equal(w.refreshedOwnership.length, 1, "nothing to repair");
+			assert.equal(probes, 2);
+			assert.deepEqual(w.heartbeats, []);
+			assert.deepEqual(w.refreshedOwnership, []);
+		});
+	});
+
+	describe("a window that opens or closes", () => {
+		const peers = (w: World, ...holderIds: string[]) => {
+			w.registry.windows = () => [{ holderId: "this-window", here: true }, ...holderIds.map(holderId => ({ holderId, here: false }))];
+		};
+
+		it("has the launcher observe the rows its claims can decide, once per change, and not when only what a window shows changed", async () => {
+			const w = await world();
+			peers(w, "b");
+			w.routing.registryChanged();
+			assert.deepEqual(w.windowChanges, [{ departed: [], arrived: true }], "b opened");
+			// b changed the folders or row statuses it publishes: the same windows are open.
+			w.routing.registryChanged();
+			w.routing.registryChanged();
+			assert.equal(w.windowChanges.length, 1, "no re-observation for a window that only shows something else");
+			peers(w, "b", "c");
+			w.routing.registryChanged();
+			assert.deepEqual(w.windowChanges.at(-1), { departed: [], arrived: true });
+			peers(w, "c");
+			w.routing.registryChanged();
+			assert.deepEqual(w.windowChanges.at(-1), { departed: ["b"], arrived: false }, "b closed");
+			peers(w, "d");
+			w.routing.registryChanged();
+			assert.deepEqual(w.windowChanges.at(-1), { departed: ["c"], arrived: true }, "one closed and another opened in the same read");
+			assert.equal(w.windowChanges.length, 4);
+			assert.equal(w.refreshedLauncher.length, 6, "the launcher is repainted for every change the registry reports");
 		});
 	});
 });

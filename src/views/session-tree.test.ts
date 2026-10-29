@@ -36,6 +36,7 @@ import type {
 	SessionItemState,
 	RowPending,
 	SessionLauncherFacts,
+	SessionOwnershipFacts,
 	SessionTreeItem,
 	SessionLauncherSource,
 	SessionTreeProvider,
@@ -817,6 +818,161 @@ describe("launcher tree", () => {
 		assert.deepEqual(observed, ["tab:one"]);
 		provider.dispose();
 	});
+
+	describe("re-observation that follows events, with a heartbeat only for what no event announces", () => {
+		const TABS = Array.from({ length: 12 }, (_, i) => `tab:${String(i).padStart(2, "0")}`);
+		const settle = async () => { for (let i = 0; i < 6; i++) await nextTurn(); };
+
+		/** Twelve saved rows: tab:00 is an outside OMP's, tab:01 a writer under a broker no window drives, tab:02 held by window `w1`, tab:03 by `w2`, the rest stopped. */
+		async function listed() {
+			const observed = new Map<string, number>();
+			const facts = new Map<string, SessionOwnershipFacts>([
+				["tab:00", { externalOmp: true, ownershipChecked: true }],
+				["tab:01", { ownedWriterPid: 4321, ownershipChecked: true }],
+				["tab:02", { heldElsewhere: true, heldBy: "w1", ownershipChecked: true }],
+				["tab:03", { heldElsewhere: true, heldBy: "w2", ownershipChecked: true }],
+			]);
+			const failing = new Set<string>();
+			/** A tab whose observation waits for the promise here. */
+			const holding = new Map<string, Promise<void>>();
+			const rows = TABS.map((tabId, i) => entry({ tabId, cwd: ALPHA, kind: "session", sessionFile, availability: "saved", ordinal: i }));
+			const clock = { now: 0 };
+			const provider = providerFor({
+				folders: () => [folder("folder:alpha", ALPHA)],
+				entries: () => rows,
+				activeTabId: () => null,
+				facts: () => NO_FACTS,
+				observeOwnership: async tabId => {
+					observed.set(tabId, (observed.get(tabId) ?? 0) + 1);
+					await holding.get(tabId);
+					if (failing.has(tabId)) throw new Error("fixture: unreadable claim");
+					return facts.get(tabId) ?? { ownershipChecked: true };
+				},
+			}, { now: () => clock.now, onObservationError: () => {} });
+			await rootsOf(provider);
+			await settle();
+			assert.deepEqual([...observed.values()], TABS.map(() => 1), "every row is observed once when it first shows");
+			observed.clear();
+			const probes = (): string[] => [...observed.keys()].sort();
+			const total = (): number => [...observed.values()].reduce((sum, count) => sum + count, 0);
+			return { provider, observed, facts, failing, holding, rows, clock, settle, probes, total };
+		}
+
+		it("a heartbeat observes again only the rows whose end no event announces, where it used to observe every row", async t => {
+			const w = await listed();
+			// Before: the heartbeat was refresh({ ownership: true }), four times a minute.
+			for (let beat = 0; beat < 4; beat++) { w.provider.refresh({ ownership: true }); await w.settle(); }
+			const before = w.total();
+			w.observed.clear();
+			for (let beat = 0; beat < 4; beat++) { w.clock.now += 15_000; w.provider.heartbeat(180_000); await w.settle(); }
+			const after = w.total();
+			t.diagnostic(`observations (two claim reads, a holder check, a broker reconcile and a lease probe each) per minute with ${TABS.length} rows: ${before} before, ${after} after`);
+			assert.equal(before, TABS.length * 4);
+			assert.deepEqual(w.probes(), ["tab:00", "tab:01"], "the outside OMP's row and the broker-driven writer's row only");
+			assert.equal(after, 2 * 4);
+			w.provider.dispose();
+		});
+
+		it("sweeps every row once the last look at all of them is older than the sweep, and a look at all of them (showing the view) restarts the count", async () => {
+			const w = await listed();
+			w.clock.now = 179_999;
+			w.provider.heartbeat(180_000);
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:00", "tab:01"], "not yet");
+			w.observed.clear();
+			w.clock.now = 180_000;
+			w.provider.heartbeat(180_000);
+			await w.settle();
+			assert.deepEqual(w.probes(), TABS, "the safety sweep looks at every row");
+			w.observed.clear();
+			w.clock.now = 359_999;
+			w.provider.heartbeat(180_000);
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:00", "tab:01"], "the sweep counts from the one before");
+			w.observed.clear();
+			w.clock.now = 400_000;
+			w.provider.refresh({ ownership: true });
+			await w.settle();
+			w.observed.clear();
+			w.clock.now = 400_000 + 179_999;
+			w.provider.heartbeat(180_000);
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:00", "tab:01"], "showing the view counted as a look at every row");
+			w.provider.dispose();
+		});
+
+		it("repeats an observation that failed on the next heartbeat, and a row never observed with it", async () => {
+			const w = await listed();
+			w.failing.add("tab:07");
+			w.provider.refreshOwnership(new Set(["tab:07"]));
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:07"]);
+			w.observed.clear();
+			w.failing.delete("tab:07");
+			w.clock.now += 15_000;
+			w.provider.heartbeat(180_000);
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:00", "tab:01", "tab:07"]);
+			w.observed.clear();
+			w.clock.now += 15_000;
+			w.provider.heartbeat(180_000);
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:00", "tab:01"], "a repaired row is settled again");
+			w.provider.dispose();
+		});
+
+		it("a claim change observes the named rows only, and a burst of changes costs one observation per row", async () => {
+			const w = await listed();
+			for (let i = 0; i < 100; i++) w.provider.refreshOwnership(new Set(["tab:05", "tab:06"]));
+			await w.settle();
+			assert.deepEqual([...w.observed], [["tab:05", 1], ["tab:06", 1]]);
+			w.provider.dispose();
+		});
+
+		it("changes that arrive while a row is being observed fold into one more observation, never one each", async () => {
+			const w = await listed();
+			const gate = Promise.withResolvers<void>();
+			w.holding.set("tab:05", gate.promise);
+			w.provider.refreshOwnership(new Set(["tab:05"]));
+			await w.settle();
+			assert.equal(w.observed.get("tab:05"), 1, "the observation is in flight");
+			for (let i = 0; i < 50; i++) { w.provider.refreshOwnership(new Set(["tab:05"])); await nextTurn(); }
+			assert.equal(w.observed.get("tab:05"), 1, "nothing starts while one is in flight");
+			w.holding.delete("tab:05");
+			gate.resolve();
+			await w.settle();
+			assert.equal(w.observed.get("tab:05"), 2, "the fifty changes became one more observation");
+			w.provider.dispose();
+		});
+
+		it("a change of a row's catalog record observes that row, and a change that leaves its record as it was observes nothing", async () => {
+			const w = await listed();
+			// Another window's commit recorded a host for tab:08 (the row's identity changes) and touched tab:09 without changing what is observed.
+			w.rows[8] = { ...w.rows[8]!, host: { startedAt: "2026-09-25T10:06:00.000Z", pid: 7 } as never };
+			w.rows[9] = { ...w.rows[9]!, lastActiveAt: "2026-09-25T10:07:00.000Z" };
+			w.provider.refresh();
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:08"]);
+			w.provider.dispose();
+		});
+
+		it("a window that closed re-observes the rows it held, one that opened every row not held, and nothing else", async () => {
+			const w = await listed();
+			w.provider.refreshOwnershipForWindows({ departed: new Set(["w1"]), arrived: false });
+			await w.settle();
+			assert.deepEqual(w.probes(), ["tab:02"], "only the row w1 held");
+			w.observed.clear();
+			w.provider.refreshOwnershipForWindows({ departed: new Set(), arrived: true });
+			await w.settle();
+			assert.deepEqual(w.probes(), TABS.filter(tabId => tabId !== "tab:02" && tabId !== "tab:03"), "every row not shown as held by a window");
+			w.observed.clear();
+			w.provider.refreshOwnershipForWindows({ departed: new Set(), arrived: false });
+			await w.settle();
+			assert.deepEqual(w.probes(), [], "a registry change that opened and closed nothing");
+			w.provider.dispose();
+		});
+	});
+
 
 	it("marks a pinned folder with the pin icon and offers exactly Unpin, and an unpinned one exactly Pin", async () => {
 		const pinned = folder("folder:alpha", ALPHA, false, { pinned: true, open: true });

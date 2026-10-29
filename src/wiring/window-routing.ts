@@ -80,6 +80,13 @@ import type { SessionProcesses } from "./process-wiring.ts";
 const WINDOW_FOCUS_WAIT_MS = 1_500;
 /** A request is read as soon as its file shows up (the watch's default of 150 ms folds bursts of events a person is waiting behind). */
 const WINDOW_REQUEST_WATCH_DEBOUNCE_MS = 30;
+/**
+ * How old the last look at every row may get while the Sessions view stays visible before the heartbeat looks at all of
+ * them again. Claims, the live windows and the catalog announce what changes a row, and focus and showing the view look
+ * at every row; this only covers a platform that dropped an event while a window stayed in front, so it is rare. Three
+ * minutes is twelve heartbeats: a claim missed by its watch shows within three minutes at the latest.
+ */
+const ROW_SWEEP_MS = 180_000;
 /** What each window remembers of which Unity project a folder's launches run in: one project per folder, shared by every window of the profile. */
 const UNITY_CHOICE_KEY = "omp.unityProjectChoice.v1";
 /** The workbench command Developer: Reload Window runs; it restarts this window's extension host. */
@@ -98,7 +105,7 @@ export interface RoutedFolder {
 }
 
 /** The launcher rows the routing repaints, asks to re-observe, or reads the activity of. */
-export type RoutingLauncher = Pick<SessionTreeProvider, "lastActivityOf" | "refreshOwnership" | "refresh" | "listedSessions">;
+export type RoutingLauncher = Pick<SessionTreeProvider, "lastActivityOf" | "refreshOwnership" | "refreshOwnershipForWindows" | "heartbeat">;
 
 /** The window's own records the routing reads. */
 export interface RoutingWindowFacts {
@@ -327,6 +334,8 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 	let windowFocusedAt: string | null = null;
 	let windowRequestWatch: RequestWatch | undefined;
 	let pendingLaunchWatch: RequestWatch | undefined;
+	/** The other live windows the registry showed at its last change, to tell a window that opened or closed from one that only changed what it shows. */
+	let openPeers = new Set<string>();
 	const unityProjects = new UnityProjectCache();
 	/** Windows on an older build already announced, so that the user is told once per window. */
 	const olderBuildNoticed = new Set<string>();
@@ -397,10 +406,18 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 		}, error => deps.log.warn(`window registry: ${messageOf(error)}`));
 	}
 
-	/** The folders other windows have open changed: re-resolve their session folders and repaint. */
+	/**
+	 * What the registry shows changed: re-resolve the session folders and repaint. When the windows that are open
+	 * changed (not merely what one of them shows), the rows a claim of such a window can decide are observed again.
+	 */
 	function windowRegistryChanged(): void {
 		void deps.resolveSessionFolders();
 		deps.refreshLauncher();
+		const now = new Set(otherWindows().map(window => window.holderId));
+		const departed = new Set([...openPeers].filter(holderId => !now.has(holderId)));
+		const arrived = [...now].some(holderId => !openPeers.has(holderId));
+		openPeers = now;
+		if (departed.size > 0 || arrived) deps.launcherProvider()?.refreshOwnershipForWindows({ departed, arrived });
 	}
 
 	/** Every folder open in a live window of the profile, for the session-folder probe. */
@@ -410,26 +427,19 @@ export function registerWindowRouting(rawDeps: WindowRoutingDeps): WindowRouting
 
 	/**
 	 * Registry heartbeat (every 15 s): session folders are re-probed whatever the registry saw, and the
-	 * request directory is read again (the recovery for a watch event the platform dropped). While
-	 * the Sessions view is visible every row's ownership and conversation activity is observed
-	 * again, so a claim change whose notification was missed, a failed observation and a file
-	 * change are all repaired within one heartbeat plus one observation. A hidden view re-observes
-	 * only the rows shown as held by another window or still Checking and is otherwise brought up
-	 * to date when it is shown (nobody is looking at it before that).
+	 * request directory is read again (the recovery for a watch event the platform dropped). While the
+	 * Sessions view is visible the launcher runs its own recovery (`SessionTreeProvider.heartbeat`): every
+	 * row's files are checked again, the rows whose ownership no event announces (an outside OMP, a writer
+	 * under a broker no window drives, a failed observation) are observed again, and the others only when
+	 * the last look at every row is older than {@link ROW_SWEEP_MS}. A claim change, a change of the live
+	 * windows and a change of a row's catalog record re-observe their own rows as they happen. A hidden view
+	 * does nothing here and is brought up to date when it is shown (nobody is looking at it before that).
 	 */
 	function windowRegistryHeartbeat(): void {
 		void deps.resolveSessionFolders();
 		windowRequestWatch?.rescan();
 		pendingLaunchWatch?.rescan();
-		const provider = deps.launcherProvider();
-		if (deps.sessionsViewVisible()) {
-			provider?.refresh({ ownership: true });
-			return;
-		}
-		const stale = (provider?.listedSessions() ?? [])
-			.filter(({ item }) => item.state === "otherWindow" || item.state === "checking")
-			.map(({ item }) => item.tabId);
-		if (stale.length > 0) provider?.refreshOwnership(new Set(stale));
+		if (deps.sessionsViewVisible()) deps.launcherProvider()?.heartbeat(ROW_SWEEP_MS);
 	}
 
 	/** Whether a live claim of another window of this extension holds the session right now (one claim read). */

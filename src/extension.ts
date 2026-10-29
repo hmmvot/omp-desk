@@ -657,7 +657,7 @@ interface WindowState {
    * or claims a session, however late VS Code revives the editor.
    */
   readonly requestSelections: Set<string>;
-  /** Hands sessions and launches to the other windows of the profile, serves their requests and keeps the file window (ADR-0056, ADR-0057). */
+  /** Hands sessions and launches to the other windows of the profile and serves their requests (ADR-0056, ADR-0057). */
   readonly routing: WindowRouting;
   /** The Ctrl+Shift+M file window: files from Chat links open in it while it lasts. */
   readonly fileWindow: FileWindow;
@@ -2224,8 +2224,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // The launcher re-reads on the events that can change a row — this window
     // regaining focus, the view being opened, and the terminal/panel/restore
     // lifecycle — after every index or folder mutation, and, while the view is
-    // visible, on the window registry's 15 s heartbeat (a recovery for what no
-    // event announced, ADR-0056). Opening the view never discovers anything: a
+    // visible, on the registry's 15 s heartbeat for the rows whose end no event announces (an outside OMP, a writer under a
+    // broker no window drives, a failed observation) and a sweep of every row every 3 minutes (a recovery for an event the
+    // platform dropped, ADR-0056). Opening the view never discovers anything: a
     // folder's sessions are found only when the user asks to resume one.
     view.onDidChangeVisibility(event => {
       // A hidden view stops polling its processes; a shown one reads them at once.

@@ -195,6 +195,8 @@ interface RowObservation {
 	value: SessionOwnershipFacts | null;
 	dirty: boolean;
 	inFlight: boolean;
+	/** The last observation threw; it is repeated by the next heartbeat. */
+	failed: boolean;
 }
 
 /** The session file's header, re-checked by `fstat` on every ownership refresh and read again only when the file changed. */
@@ -853,6 +855,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#ownershipActive = 0;
 	#headersActive = 0;
 	#conversationsActive = 0;
+	/** When every row's ownership was last asked to be observed again; the safety sweep of {@link heartbeat} counts from it. */
+	#fullObservationAt: number;
 	#revealLocks = 0;
 	#projectionPending = false;
 	/** A read changed what a row shows; the next enrichment turn projects once for every such read. */
@@ -905,6 +909,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	} = {}) {
 		this.#source = source;
 		this.#now = options.now ?? (() => Date.now());
+		this.#fullObservationAt = this.#now();
 		this.#onObservationError = options.onObservationError ?? console.error;
 	}
 
@@ -954,6 +959,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	refresh(options: { readonly ownership?: boolean } = {}): void {
 		if (this.#disposed) return;
 		if (options.ownership === true) {
+			this.#fullObservationAt = this.#now();
 			for (const observation of this.#observations.values()) observation.dirty = true;
 			// A transcript that appeared, vanished or changed its title is read again too.
 			for (const header of this.#headers.values()) header.dirty = true;
@@ -995,6 +1001,53 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			marked = true;
 		}
 		if (marked) this.#scheduleEnrichment();
+	}
+
+	/**
+	 * Re-observe the rows a change in the set of live windows can affect, and nothing else (ADR-0056: the registry is
+	 * advisory, and its membership only decides who is believed to hold a claim). A window that closed or died changes
+	 * the rows its claims held; one that appeared can be the holder of a claim read before its record was. A change that
+	 * only edits what a window shows (its folders, its rows' statuses) is not a reason, and the caller does not call.
+	 * Unsettled rows (never observed, or the last observation failed) go with either change.
+	 */
+	refreshOwnershipForWindows(change: { readonly departed: ReadonlySet<string>; readonly arrived: boolean }): void {
+		if (this.#disposed) return;
+		let marked = false;
+		for (const observation of this.#observations.values()) {
+			const value = observation.value;
+			const affected = value === null || observation.failed ||
+				(change.arrived && value.heldElsewhere !== true) ||
+				(value.heldBy != null && change.departed.has(value.heldBy));
+			if (!affected) continue;
+			observation.dirty = true;
+			marked = true;
+		}
+		if (marked) this.#scheduleEnrichment();
+	}
+
+	/**
+	 * The recovery for what no event announced, run on the registry's heartbeat while the view is visible.
+	 *
+	 * Every row's file is checked again (one `fstat` for its header and one for its conversation, nothing read when
+	 * unchanged). Ownership is observed again only for a row whose observation can change with no event: never
+	 * observed or failed, an OMP outside this extension holding its lease, or a writer under a broker that no window
+	 * drives (its end is not announced by a claim, the registry or the catalog). The rest is event driven: a claim file
+	 * change ({@link refreshOwnership}), a change of the live windows ({@link refreshOwnershipForWindows}) and a
+	 * change of the row's own catalog record (the row's identity). A heartbeat that finds the last observation of every
+	 * row older than `sweepAfterMs` observes every row, the safety net for an event the platform dropped.
+	 */
+	heartbeat(sweepAfterMs: number): void {
+		if (this.#disposed) return;
+		if (this.#now() - this.#fullObservationAt >= sweepAfterMs) {
+			this.refresh({ ownership: true });
+			return;
+		}
+		for (const observation of this.#observations.values()) {
+			const value = observation.value;
+			if (value === null || observation.failed || value.externalOmp === true || value.ownedWriterPid != null) observation.dirty = true;
+		}
+		for (const header of this.#headers.values()) header.dirty = true;
+		this.refresh();
 	}
 
 	/** The state the view currently shows for this row, or `undefined` when it shows none. */
@@ -1134,7 +1187,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				const identity = this.#identity(entry);
 				let observation = this.#observations.get(entry.tabId);
 				if (observation === undefined) {
-					observation = { identity, value: null, dirty: true, inFlight: false };
+					observation = { identity, value: null, dirty: true, inFlight: false, failed: false };
 					this.#observations.set(entry.tabId, observation);
 				} else if (observation.identity !== identity) {
 					observation.identity = identity;
@@ -1430,9 +1483,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				observation.identity === identity && this.#identity(current) === identity &&
 				!this.#source.facts(tabId).running) {
 				observation.value = value;
+				observation.failed = false;
 				this.#projectionDue = true;
 			}
 		} catch (error) {
+			// A row whose observation failed is retried by the next heartbeat: no event announces that a failed read would now succeed.
+			observation.failed = true;
 			if (!this.#disposed) this.#onObservationError(error);
 		} finally {
 			observation.inFlight = false;
