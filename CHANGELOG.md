@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-10-29
+
 ### Changed
 
 - **A stall of the extension host names the Desk work that filled it.** The line `event loop blocked for … ms` could only say that no marked Desk operation was running, although a reply streamed through one window's two Chat tabs makes thousands of short steps a second (a read of the broker socket, a coalesced reply update, the delivery of an output to the page). Those steps now add their time to a total per name, and the line reports `metered Desk work in that time: broker socket read 120 times, 31000 ms in all, longest 640 ms; …` for `broker socket read`, `chat reply flush`, `chat output delivery`, `chat publish`, `chat history apply` and `chat transcript rebuild`. The totals are inclusive (a read contains the delivery it caused). A stall with none of that work in it still says that no Desk work was running, so the time went to another extension or to VS Code.
@@ -592,7 +594,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.12...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.13...HEAD
+[0.4.13]: https://github.com/hmmvot/omp-desk/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/hmmvot/omp-desk/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/hmmvot/omp-desk/compare/v0.4.10...v0.4.11
 [0.4.10]: https://github.com/hmmvot/omp-desk/compare/v0.4.9...v0.4.10
