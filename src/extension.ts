@@ -9393,7 +9393,7 @@ function packageChangedOnDisk(): boolean {
 
 const RELOAD_WINDOW_LABEL = "Reload Window";
 /** Why a launch is refused after a reinstall: a fixed sentence, no path or file name. */
-const UPDATED_ON_DISK_ERROR = "OMP was updated while this window was open. Reload the window to finish updating, then try again.";
+const UPDATED_ON_DISK_ERROR = "OMP Desk was updated while this window was open. Reload the window to finish updating, then try again.";
 
 /**
  * Register one panel's own listeners for one editor slot (ADR-0025).

@@ -1912,7 +1912,7 @@ describe("native replacement lifecycle", () => {
       const launched = await harness.localLauncher(saved.context, index).launch({ tabId: TAB, sessionFile: resumed.sessionFile, sessionId: "session-1", cwd: root, scope: index.row.scope, ownerGeneration: OWNER, claimPath: "" });
       assert.equal(launched.state, "not-started", JSON.stringify(launched));
       const reason = "reason" in launched && typeof launched.reason === "string" ? launched.reason : "";
-      assert.match(reason, /Reload the window to finish updating/);
+      assert.match(reason, /^OMP Desk was updated while this window was open\. Reload the window to finish updating/);
       assert.equal(launches, 0, "no broker or child was asked for: the drifted bundle would start a host this window cannot serve");
     } finally {
       harness.window().packageDrift = null;
