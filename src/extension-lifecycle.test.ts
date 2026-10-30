@@ -483,10 +483,12 @@ before(async () => {
         // The root-absence reader is shared by the native and RPC runtime modules.
       ]) {
         // `extension.ts` and the harness import `./host/<name>`; the runtime layer imports `../host/<name>.ts`: both are the same module.
-        builder.onResolve({ filter: new RegExp(`^(?:\\./|\\.\\./)host/${name}(?:\\.ts)?$`) }, () => ({ path: name!, namespace: "native-fixture" }));
+        // `control-protocol` moved to src/wire (ADR-0065 A10); the others are still in src/host.
+        const folder = name === "control-protocol" ? "wire" : "host";
+        builder.onResolve({ filter: new RegExp(`^(?:\\./|\\.\\./)${folder}/${name}(?:\\.ts)?$`) }, () => ({ path: name!, namespace: "native-fixture" }));
         if (name === "rpc-reconcile") builder.onResolve({ filter: /^\.\/rpc-reconcile$/ }, () => ({ path: name, namespace: "native-fixture" }));
         builder.onLoad({ filter: new RegExp(`^${name}$`), namespace: "native-fixture" }, () => ({
-          contents: `export * from ${JSON.stringify(path.join(path.dirname(entry), "host", `${name}.ts`))}; ${extra}`,
+          contents: `export * from ${JSON.stringify(path.join(path.dirname(entry), folder, `${name}.ts`))}; ${extra}`,
           loader: "js", resolveDir: path.dirname(entry),
         }));
       }
