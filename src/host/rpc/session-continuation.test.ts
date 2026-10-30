@@ -273,7 +273,7 @@ describe("a continuation while attached", () => {
 		assert.equal(session.phase, "live", "the wait for the new file is not a failure");
 		assert.equal(accepted.length, 0);
 		await writeFile(secondPath, sessionText("BBB", "AAA"));
-		await pump(timers, () => accepted.length > 0);
+		await pump(timers, () => accepted.length > 0 && outputs.some(output => output.type === "state" && output.payload.sessionId === "BBB"));
 		assert.equal(accepted.length, 1, "the post-settle read and the state read share one acceptance");
 		assert.deepEqual(accepted[0], { fromFile: first, toFile: secondPath, fromId: "AAA", toId: "BBB", hops: 1 });
 		assert.equal(session.phase, "live");
