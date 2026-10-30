@@ -218,6 +218,10 @@ export interface RpcSessionOptions {
 	attachTimeoutMs?: number;
 	/** How long a reattach may keep trying before the tab shows the failure and its Reconnect (default 120 s). */
 	reattachBudgetMs?: number;
+	/** How long a reattach whose state answer is still out, with lines arriving, waits before it shows the conversation live and read-only (default 2 s). */
+	resyncLiveAfterMs?: number;
+	/** How long the reads of an attach keep waiting while lines keep arriving, however slow OMP is to answer (default 5 min); a link that delivers nothing fails them at `commandTimeoutMs`. */
+	starvedReadMs?: number;
 	/** Delays between background retries of a failed (recoverable) session; the list length is the retry budget. */
 	autoRecoveryDelaysMs?: readonly number[];
 	/** How often the liveness watchdog looks at the silence of a live connection. */
@@ -582,6 +586,18 @@ export interface RpcSessionDiagnostics {
 
 const DEFAULT_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+/**
+ * OMP answers a command in the order of its output, so the answer to a read made while it streams heavily is queued behind the flood
+ * and comes when the flood has been written, however long that takes (a stream of 7-20 MB a minute held it back for tens of minutes).
+ * A link that keeps delivering lines is not a lost child: the reads of an attach keep waiting while lines arrive, up to this long.
+ */
+const DEFAULT_STARVED_READ_MS = 300_000;
+/** A reattach whose state answer is still out after this long, with lines still arriving, shows the conversation live and read-only instead of "Connecting". */
+const DEFAULT_RESYNC_LIVE_AFTER_MS = 2_000;
+/** Why a reattached session that OMP has not yet proven is live but read-only. */
+const STATE_UNCONFIRMED = "Waiting for OMP to confirm this session; sending is paused until it does.";
+/** What `#stateOrStalled` resolves instead of the state when the answer is out while lines keep arriving. */
+const STATE_STALLED = Symbol("state-stalled");
 const DEFAULT_RECONCILE_INTERVAL_MS = 500;
 const DEFAULT_RECONCILE_ATTEMPTS = 3;
 const DEFAULT_REATTACH_DELAYS_MS: readonly number[] = [250, 500, 1_000, 2_000, 4_000, 5_000, 5_000, 5_000, 5_000, 5_000];
@@ -864,6 +880,10 @@ export class RpcSession {
 	#reattaching = false;
 	#establishing = false;
 	#dropDuringEstablish = false;
+	/** A reattached session is shown live and read-only while its state read is out; identity is proved only by the answer. */
+	#awaitingProof = false;
+	/** One `#resync` is running: a scheduled one must not start a second. */
+	#resyncRunning = false;
 	#disposed = false;
 	#ended = false;
 	#stderr = "";
@@ -2358,6 +2378,9 @@ export class RpcSession {
 		this.#frames.reset();
 		this.#disarmWatchdog();
 		this.#linesSinceAttach = 0;
+		this.#awaitingProof = false;
+		// The attach proves identity again: nothing that needs the proof is accepted until its state answer is read.
+		if (kind === "reattach") this.#identityVerified = false;
 		this.#setPhase(kind === "start" ? "starting" : "attaching", null);
 		let result: RpcAttachResult;
 		this.#ringGap = false;
@@ -2394,11 +2417,63 @@ export class RpcSession {
 			// A broker that holds `ready` but no answer to its protocol negotiation is not "not ready": the child is up and its chat protocol never came.
 			if (!ok) throw new SessionFailure(result.negotiating ? "negotiation-timeout" : "ready-timeout");
 		}
-		await this.#resync(kind === "start");
+		await this.#resync(kind === "start", kind === "reattach");
 	}
 
-	/** Bind identity from `get_state`, take the delta since the cursor, and go live with one snapshot. */
-	async #resync(bind: boolean): Promise<void> {
+	/**
+	 * The state read, or {@link STATE_STALLED} once it has been out for the grace while lines keep arriving. OMP writes its answer
+	 * in the order of its output, so under a heavy stream it comes after everything it had queued, which can take far longer than
+	 * any deadline; a link that delivers is not a lost child. A read that is merely slow, or whose link is quiet, is waited for
+	 * as before (and fails at the command deadline when the link is silent).
+	 */
+	#stateOrStalled(read: Promise<ParsedState | null>): Promise<ParsedState | null | typeof STATE_STALLED> {
+		const grace = this.#options.resyncLiveAfterMs ?? DEFAULT_RESYNC_LIVE_AFTER_MS;
+		const { promise, resolve } = Promise.withResolvers<ParsedState | null | typeof STATE_STALLED>();
+		let timer: unknown = null;
+		const look = (): void => {
+			timer = null;
+			if (this.#linesSinceAttach > 0 && this.#timers.now() - this.#lastActivityAt < grace) resolve(STATE_STALLED);
+			else timer = this.#timers.setTimeout(look, grace);
+		};
+		timer = this.#timers.setTimeout(look, grace);
+		void read.then(state => {
+			if (timer !== null) this.#timers.clearTimeout(timer);
+			timer = null;
+			resolve(state);
+		});
+		return promise;
+	}
+
+	/**
+	 * Show the conversation live, read-only, while OMP's state answer is still out: the replay is folded, a gap in the broker's
+	 * ring is read from the session file (local I/O, never OMP), and everything that needs the session proven (a send, a Stop, the
+	 * tools, the readbacks) stays refused until the answer proves it. Resolves whether the tab was shown.
+	 */
+	async #showLiveUnconfirmed(askedAt: number, answered: () => boolean): Promise<boolean> {
+		await this.#readRingGap();
+		if (this.#disposed || this.#ended || this.#dropDuringEstablish || answered() || this.#model.phase !== "resyncing") return false;
+		this.#awaitingProof = true;
+		this.#options.log?.info(`OMP has not answered get_state for ${Math.round(this.#timers.now() - askedAt)} ms, but lines keep arriving (last seq ${this.#lastSeq}, ${this.#linesSinceAttach} since the attach): the tab is shown live and read-only until it does`);
+		this.#model = setChatPhase(this.#model, "live", null, STATE_UNCONFIRMED);
+		this.#publish(true);
+		return true;
+	}
+
+	/**
+	 * Bind identity from `get_state`, take the delta since the cursor, and go live with one snapshot. A `reattach` whose state
+	 * answer is out for a while with lines still arriving does not wait in "Connecting": see `#stateOrStalled`.
+	 */
+	async #resync(bind: boolean, reattach = false): Promise<void> {
+		this.#resyncRunning = true;
+		try {
+			await this.#resyncOnce(bind, reattach);
+		} finally {
+			this.#resyncRunning = false;
+			this.#awaitingProof = false;
+		}
+	}
+
+	async #resyncOnce(bind: boolean, reattach: boolean): Promise<void> {
 		this.#resyncs += 1;
 		this.#setPhase("resyncing", null);
 		const v2 = this.#rpcProtocol === 2 || (this.#rpcProtocol === null && this.#supportsV2);
@@ -2407,12 +2482,34 @@ export class RpcSession {
 			this.#fail("state-unavailable");
 			return;
 		}
-		const statePromise = this.#fetchState();
-		const agentsPromise = this.#fetchAgents();
-		const askDialogPromise = this.#enableAskDialog();
+		const askedAt = this.#timers.now();
+		const statePromise = this.#fetchState(true);
+		let answered = false;
+		void statePromise.then(() => { answered = true; });
+		const agentsPromise = this.#fetchAgents(true);
+		const askDialogPromise = this.#enableAskDialog(true);
 		await this.#paint;
-		const state = await statePromise;
+		let state: ParsedState | null | typeof STATE_STALLED = reattach ? await this.#stateOrStalled(statePromise) : await statePromise;
 		if (this.#disposed || this.#ended) return;
+		if (state === STATE_STALLED) {
+			const shown = await this.#showLiveUnconfirmed(askedAt, () => answered);
+			if (this.#disposed || this.#ended) return;
+			try {
+				state = await statePromise;
+			} finally {
+				this.#awaitingProof = false;
+			}
+			if (this.#disposed || this.#ended) return;
+			if (state === null && this.#dropDuringEstablish) {
+				// The link closed while the answer was out: it cannot come, and the attach is retried on its own schedule, not after the read's deadline.
+				this.#dropDuringEstablish = false;
+				this.#setPhase("attaching", null);
+				throw new SessionFailure("attach-failed", "the broker connection closed before OMP answered the state read");
+			}
+			// Something else ended the live-but-unconfirmed phase meanwhile (a failure, a stop): it has said why.
+			if (shown && this.#model.phase !== "live") return;
+			if (state !== null) this.#options.log?.info(`OMP answered get_state ${Math.round(this.#timers.now() - askedAt)} ms after it was asked: the session is confirmed`);
+		}
 		if (state === null) throw new SessionFailure("state-failed");
 		if (!(await this.#followContinuation(state, bind)) || this.#disposed || this.#ended) return;
 		const mismatch = this.#identityMismatch(state, bind);
@@ -2473,16 +2570,20 @@ export class RpcSession {
 	 * the file trails by.
 	 */
 	async #reconcileAfterAttach(): Promise<void> {
-		const gap = this.#ringGap;
-		this.#ringGap = false;
-		if (gap) {
-			const fromFile = await this.#rebuildFromDisk();
-			if (this.#disposed || this.#ended) return;
-			this.#options.log?.info(fromFile
-				? `the broker's lines in between are gone: the transcript was re-read from the session file (last entry ${this.#cursor ?? "unknown"})`
-				: "the broker's lines in between are gone and the session file could not serve the transcript: OMP is asked for the entries after the cursor instead");
-		}
+		await this.#readRingGap();
+		if (this.#disposed || this.#ended) return;
 		await this.#reconcileEntries();
+	}
+
+	/** Read what a gap in the broker's ring dropped from the session file, once per attach. */
+	async #readRingGap(): Promise<void> {
+		if (!this.#ringGap) return;
+		this.#ringGap = false;
+		const fromFile = await this.#rebuildFromDisk();
+		if (this.#disposed || this.#ended) return;
+		this.#options.log?.info(fromFile
+			? `the broker's lines in between are gone: the transcript was re-read from the session file (last entry ${this.#cursor ?? "unknown"})`
+			: "the broker's lines in between are gone and the session file could not serve the transcript: OMP is asked for the entries after the cursor instead");
 	}
 
 	/**
@@ -2625,9 +2726,9 @@ export class RpcSession {
 		return null;
 	}
 
-	async #fetchState(): Promise<ParsedState | null> {
+	async #fetchState(patient = false): Promise<ParsedState | null> {
 		const answerRevision = this.#stateAnswerRevision;
-		const outcome = await this.#sendInternal({ type: "get_state" });
+		const outcome = await this.#sendInternal({ type: "get_state" }, undefined, undefined, patient);
 		if (outcome.status !== "accepted") {
 			if (outcome.status === "unconfirmed" && answerRevision === this.#stateAnswerRevision) this.#nativeStateUnanswered = true;
 			return null;
@@ -2640,15 +2741,15 @@ export class RpcSession {
 	 * (tabs, free switching, one submit). A child without the command keeps asking question by question through
 	 * `select`, which this page still renders; the refusal is therefore not an error.
 	 */
-	async #enableAskDialog(): Promise<void> {
-		await this.#sendInternal({ type: "set_ask_dialog", enabled: true });
+	async #enableAskDialog(patient = false): Promise<void> {
+		await this.#sendInternal({ type: "set_ask_dialog", enabled: true }, undefined, undefined, patient);
 	}
 
 	/** Subscribe to bounded progress and read the subagent snapshot on every attach; on failure the agents list is marked unavailable. */
-	async #fetchAgents(): Promise<void> {
-		const subscription = await this.#sendInternal({ type: "set_subagent_subscription", level: "progress" });
+	async #fetchAgents(patient = false): Promise<void> {
+		const subscription = await this.#sendInternal({ type: "set_subagent_subscription", level: "progress" }, undefined, undefined, patient);
 		if (subscription.status === "accepted") {
-			const outcome = await this.#sendInternal({ type: "get_subagents" });
+			const outcome = await this.#sendInternal({ type: "get_subagents" }, undefined, undefined, patient);
 			if (outcome.status === "accepted") return;
 		}
 		if (!this.#disposed && !this.#ended) this.#applyLocal({ type: "agents_snapshot", agents: [], availability: "unavailable" });
@@ -2749,8 +2850,11 @@ export class RpcSession {
 				if (event.reason === "disconnected") {
 					this.#noteBrokerClose(event.detail, event.byClient === true);
 					this.#hostCalls?.closeGate("the broker connection closed");
-					if (this.#establishing) this.#dropDuringEstablish = true;
-					else void this.#reattach();
+					if (this.#establishing) {
+						this.#dropDuringEstablish = true;
+						// The answer a tab shown live is waiting for can no longer come over this connection.
+						if (this.#awaitingProof) this.#failAllCommands("closed");
+					} else void this.#reattach();
 				}
 				else this.#stopped(event.reason === "child-exited" ? "child-exited" : null);
 				return;
@@ -3789,13 +3893,14 @@ export class RpcSession {
 		command: RpcCommand,
 		timeoutMs?: number,
 		id?: string,
+		patient = false,
 	): Promise<
 		| { status: "accepted"; response: RpcResponseFrame }
 		| { status: "refused"; reason: SendRefusal; code?: string }
 		| { status: "unconfirmed" }
 	> {
 		try {
-			const response = await this.#send(id ?? `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`, command, timeoutMs);
+			const response = await this.#send(id ?? `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`, command, timeoutMs, patient);
 			if (response.success) return { status: "accepted", response };
 			return { status: "refused", reason: "rejected", ...(typeof response.code === "string" ? { code: response.code } : {}) };
 		} catch (error) {
@@ -3835,21 +3940,33 @@ export class RpcSession {
 	 * command waits (the RPC mode runs `prompt` as a background task), so an unanswered probe, the watchdog's included,
 	 * is evidence of a lost child and never of a user who is still reading a list.
 	 */
-	#send(id: string, command: RpcCommand, timeoutMs?: number): Promise<RpcResponseFrame> {
+	#send(id: string, command: RpcCommand, timeoutMs?: number, patient = false): Promise<RpcResponseFrame> {
 		return new Promise<RpcResponseFrame>((resolve, reject) => {
 			const limit = timeoutMs ?? this.#options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
 			const exempt = command.type === "get_state";
-			const entry: PendingCommand = { resolve, reject, timer: null, restart: () => { entry.sentAt = this.#timers.now(); if (!exempt) arm(); }, command, queueRevision: this.#queueRevision, sentAt: this.#timers.now(), slow: timeoutMs !== undefined || isSlowCommand(command) };
-			const arm = (): void => {
+			const issuedAt = this.#timers.now();
+			const entry: PendingCommand = { resolve, reject, timer: null, restart: () => { entry.sentAt = this.#timers.now(); if (!exempt) arm(); }, command, queueRevision: this.#queueRevision, sentAt: issuedAt, slow: timeoutMs !== undefined || isSlowCommand(command) };
+			const arm = (delay: number = limit): void => {
 				if (entry.timer !== null) this.#timers.clearTimeout(entry.timer);
 				entry.timer = this.#timers.setTimeout(() => {
 					if (this.#model.uiRequest !== null && !exempt) {
 						arm();
 						return;
 					}
+					if (patient) {
+						// A `patient` read (an attach's) outlasts the deadline while lines keep arriving: OMP queues its answer behind the
+						// output it is still producing. The deadline then runs from the newest line, and ends at the cap whatever arrives.
+						const now = this.#timers.now();
+						const quiet = now - this.#lastActivityAt;
+						const left = (this.#options.starvedReadMs ?? DEFAULT_STARVED_READ_MS) - (now - issuedAt);
+						if (quiet < limit && left > 0) {
+							arm(Math.min(limit - quiet, left));
+							return;
+						}
+					}
 					this.#pendingCommands.delete(id);
 					reject(new CommandFailure("timeout"));
-				}, limit);
+				}, delay);
 			};
 			arm();
 			this.#pendingCommands.set(id, entry);
@@ -4132,11 +4249,11 @@ export class RpcSession {
 
 	/** A parse or chunk-contract violation: rebuild state from `get_state` and the delta (never fatal). */
 	#scheduleResync(): void {
-		if (!this.#live || this.#resyncScheduled) return;
+		if (!this.#live || this.#resyncScheduled || this.#resyncRunning) return;
 		this.#resyncScheduled = true;
 		queueMicrotask(() => {
 			this.#resyncScheduled = false;
-			if (!this.#live) return;
+			if (!this.#live || this.#resyncRunning) return;
 			void this.#resync(false).catch(() => this.#fail("state-failed"));
 		});
 	}

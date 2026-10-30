@@ -6281,7 +6281,7 @@ export function handleChatEvent(context: vscode.ExtensionContext, index: Session
       return;
     case "state": {
       const phase = event.payload.phase;
-      logChatConnectionPhase(tabId, phase, event.payload.code, event.payload.exitReason);
+      logChatConnectionPhase(tabId, phase, event.payload.code, event.payload.exitReason, event.payload.readOnlyReason);
       if (phase !== "live") cancelControlPicker(tabId);
       if (phase === "live") {
         s.launchTimeline.mark(tabId, "chat live");
@@ -6347,16 +6347,17 @@ export function handleChatEvent(context: vscode.ExtensionContext, index: Session
 
 /**
  * Record a lost connection and its end in the output channel, including the bounded plain-text
- * diagnostic for an autonomous managed-RPC child exit.
+ * diagnostic for an autonomous managed-RPC child exit. A live phase that is still read-only (a reattached session shown
+ * before OMP has confirmed it) is not yet a restoration: the line waits for the state that lifts the reason.
  */
-function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | null, exitReason?: ChatExitReason): void {
+function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | null, exitReason?: ChatExitReason, readOnlyReason: string | null = null): void {
   const s = windowState();
   const previous = s.loggedChatPhases.get(tabId);
   if (phase === "failed" || phase === "stopped") {
     s.loggedChatPhases.set(tabId, phase);
     log[phase === "failed" ? "warn" : "info"](`tab ${tabId}: chat connection ${phase}${code === null ? "" : ` (${code})`}.`);
     if (phase === "stopped" && exitReason !== undefined) log.warn(`tab ${tabId}: ${chatExitText(exitReason)}`);
-  } else if (phase === "live") {
+  } else if (phase === "live" && readOnlyReason === null) {
     s.loggedChatPhases.delete(tabId);
     if (previous === "failed") log.info(`tab ${tabId}: chat connection restored; the same session is live again.`);
   }

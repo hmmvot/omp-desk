@@ -121,9 +121,39 @@ One window held two Chat tabs that both streamed heavily (one had read about 240
 
 The watchdog, the ring size, the pacing bound and the command deadline are as before. The 33 ms coalescing of `message_update` still flushes before every other line, so tool-output frames interleaved with a long reply defeat it; the cost per frame is measured by the new meter first, and no pacing change was made without that evidence. Identity and re-adoption rules are untouched: a reattach still re-proves the broker's identity and the session's, and the new bounds only end attempts earlier.
 
+## Amendment 2026-10-30: a reattach under a heavy stream is shown live and read-only until OMP confirms the session
+
+### Incident
+
+One Chat tab whose OMP wrote a very heavy stream (over a gigabyte read through the socket since the attach, 250–700 lines and 7–20 MB a minute) lost its connection once (the broker closed the consumer as fallen behind its retained lines) and then could not recover for about forty minutes. Every reattach succeeded (`reattached: replay from seq …`, lines kept arriving on the new connection) and failed exactly 30 s later with `state-failed`; the automatic retry and a manual Reconnect did the same. The one success came when a flood of some 42 000 lines had drained and the window's cursor was far behind the ring (the gap path).
+
+### Cause
+
+Not a host matching or replay defect. In each failed attempt the consumer was caught up (its cursor equalled the ring's newest seq when it closed; every line sent had been processed) and the `get_state` response never reached it. Measured against a real OMP 18.13.3 whose model streams random text (each `message_update` carries the whole partial message, so the output is quadratic; lines over 1 MiB are split into `rpc_chunk` frames): a `get_state` sent during the stream was answered 18–21 s late, with the answer queued behind 426 lines (172 MB) that OMP had already queued, and later reads stayed unanswered for more than 30 s. OMP's RPC input is handled in order and its output is written through one spool, so a response leaves only after everything queued before it, and a process that produces faster than it writes starves the answer. That is OMP's behaviour and is not changed here.
+
+On the host, `RpcSession.#send` armed the fixed 30 s command deadline for `get_state` (exempt only from the dialog pause), and `#resync` turned a read that timed out into `SessionFailure("state-failed")`. `#reattach` ended in the failed state, the automatic retry attached again and queued a new `get_state` behind the same backlog, which is longer than before, so the loop never ended. The test `session-reattach-stream.test.ts` reproduces it with the fake channel and a manual clock: 100 s of streamed lines after a reattach, no answer, phase `failed`.
+
+### Decisions
+
+1. **The reads of an attach wait while the link delivers.** A *patient* command (`get_state`, `set_ask_dialog`, `set_subagent_subscription`, `get_subagents` of `#resync`) restarts its deadline from the newest line (`#lastActivityAt`) when it fires: it fails only after the link has been silent for the command deadline, or at `starvedReadMs` (default 5 min) after it was sent, whatever arrives. A quiet link, a wedged dispatcher that says nothing and an answer that never comes with lines still arriving all end as before, in `state-failed` with `nativeStateUnanswered` (the evidence the page's Restart needs). The deadline of every other command, the watchdog probe included, is unchanged.
+2. **A reattach shows what it has while it waits.** After the attach and the paint, `#stateOrStalled` watches the read: if it is still out after `resyncLiveAfterMs` (default 2 s) and lines arrived within that time, the session reads a gap in the ring from the session file (`#readRingGap`, local I/O only), publishes the conversation `live` with a read-only reason ("Waiting for OMP to confirm this session; sending is paused until it does.") and keeps waiting for the answer. Nothing that needs the session proven is accepted meanwhile: `#identityVerified` is reset by every reattach and set only by the answer, `#controlRefusal` answers `not-live` to sends, Stop, navigation, settings and the tool, cost and context reads, `HostToolCalls.open()` is called only after the proof so a tool call that arrives meanwhile is decided after it, host tools are not registered, and the watchdog is not armed. A start (first attach) and a reattach whose link is quiet keep the old behaviour: there the page shows "Connecting" and the quiet link fails at the command deadline.
+3. **The answer decides.** The unchanged tail of the resync runs when it arrives: continuation, the identity check (`identity-diverged` for another session, from the live phase as for any later check), registrations, the agent roster, `get_entries` after the cursor (the gap was already read and is not read twice), then the read-only reason is lifted and the watchdog armed. The log says `OMP has not answered get_state for N ms, but lines keep arriving (…): the tab is shown live and read-only until it does` and later `OMP answered get_state N ms after it was asked: the session is confirmed`; the extension's `chat connection restored` line waits for the state that lifts the reason.
+4. **A closed link ends the wait at once.** The broker connection closing while the tab is shown this way fails the pending reads as closed (not unconfirmed, so no unanswered-state evidence is recorded), sets the phase back to `attaching` and retries the attach on the reattach schedule instead of waiting for the read's deadline and failing with `state-failed`.
+5. **No second resync starts under a running one.** `#scheduleResync` (the heal of a frame that could not be folded) is skipped while a resync runs; the one in flight rebuilds the transcript.
+
+### What was not changed
+
+OMP, the broker, the ring, the pacing bound, the command deadline and the watchdog are as before. The page, the protocol and the wire are unchanged: the state is an ordinary `live` with `readOnlyReason`. The identity rule is as stated in ADR-0038 and ADR-0050: a reconnect cannot drive a session its attach has not proved; this amendment moves what the tab shows before the proof, not what it does.
+
+### Risks and open questions
+
+- A tab shown live and read-only cannot be stopped or written to until OMP answers. The same is true of the old "Connecting" state, and a command sent now would queue behind the same backlog; the page shows the reason in the composer and the banner. If OMP stays starved, the read ends at the cap (5 min) in `state-failed` with Restart.
+- `starvedReadMs` and `resyncLiveAfterMs` are fixed defaults (options of `RpcSession`, not settings); 5 min is a bound on how long a never-answered read may keep a tab waiting while lines arrive, chosen well above the 18–21 s measured and well below the forty minutes of the incident.
+- The starvation itself (OMP answering behind its own output) is not removed; a heavy stream still delays every command it is asked, Stop included, by the backlog.
+
 ## Related Decisions
 
-- [ADR-0038](../decisions/0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md) (§1 ring and pacing; amended here by the paced close and `lastForcedClose`; §4 amended by the 2026-10-29 amendment: a reattach always ends and a gap in the ring is read from the file).
+- [ADR-0038](../decisions/0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md) (§1 ring and pacing; amended here by the paced close and `lastForcedClose`; §4 amended by the 2026-10-29 amendment: a reattach always ends and a gap in the ring is read from the file; and by the 2026-10-30 amendment: a reattach under a heavy stream is shown live and read-only until OMP confirms the session).
 - [ADR-0050](../decisions/0050-retain-uncertain-input-and-confirm-exact-file-restart.md) (amended here: a timed-out `prompt` is reported delivered when the session file holds it).
 - [Page heartbeat](2026-10-23-page-heartbeat.md) (same diagnostic approach for the page).
 

@@ -296,6 +296,30 @@ describe("executor gate on a live session", () => {
 		assert.equal(provider.started.length, 2, "a call after the new attachment runs");
 	});
 
+	it("runs no call while the tab is shown live before OMP confirmed the session, and decides the live one when the answer proves it", async () => {
+		const { channel, provider, session, timers } = await boot({ session: { commandTimeoutMs: 10_000 } });
+		let waiting: string | null = null;
+		channel.handlers.set("get_state", command => { waiting = String(command.id); return "drop"; });
+		channel.closeLink("disconnected");
+		await tick(20);
+		for (let at = 0; at < 4_000; at += 250) {
+			channel.emit({ type: "agent_start" });
+			timers.advance(250);
+			await tick(2);
+		}
+		assert.equal(session.phase, "live");
+		assert.notEqual(session.model.readOnlyReason, null, "read-only until OMP answers");
+		channel.emitHostCall("while-unconfirmed", "vscode_probe");
+		await tick();
+		assert.equal(provider.started.length, 0, "the gate stays closed until the identity is proved");
+		assert.equal(results(channel).length, 0);
+		assert.ok(waiting !== null);
+		channel.emit(responseLine(waiting, "get_state", true, { data: { model: channel.child.model, thinkingLevel: "off", isStreaming: false, isCompacting: false, sessionFile: FILE, sessionId: "sess-1", queuedMessageCount: 0, messageCount: 0, isSettled: true, todoPhases: [] } }));
+		await tick(20);
+		assert.equal(session.model.readOnlyReason, null);
+		assert.equal(provider.started.length, 1, "the call that arrived live is decided once the gate opens");
+	});
+
 	it("neither runs nor answers a call while another window holds input, and registers only when it takes the claim itself", async () => {
 		const { channel, provider } = await boot({ setup: channel => { channel.inputClaimable = false; } });
 		channel.emitHostCall("call-1", "vscode_probe");
