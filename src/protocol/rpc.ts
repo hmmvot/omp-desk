@@ -325,6 +325,9 @@ export type RpcErrorCode =
 	| "protocol-error"
 	| "state-unavailable";
 
+/** The read-only reason of a reattached session shown live before OMP has answered its state read; the host's log keys "restored" on its absence. */
+export const STATE_UNCONFIRMED_REASON = "Waiting for OMP to confirm this session; sending is paused until it does.";
+
 /** Fixed sentences per code. */
 export const RPC_ERROR_SENTENCES: Readonly<Record<RpcErrorCode, string>> = {
 	"identity-mismatch": "The running OMP process is not serving this session file.",

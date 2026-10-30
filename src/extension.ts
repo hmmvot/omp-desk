@@ -247,6 +247,7 @@ import type { ChatLiteState, ChatPhase } from "./chat/model";
 import { cancelControlPicker, pickControlModel, pickControlThinking } from "./host/control-picker";
 import { activitySignature, withRegistrySubagentWork } from "./protocol/activity";
 import type { TurnActivityReport } from "./protocol/activity";
+import { STATE_UNCONFIRMED_REASON } from "./protocol/rpc";
 import type { ChatDisplayPreferences, ChatWebviewMessage } from "./protocol/chat-messages";
 // The reconnecting bridge (ADR-0023): one exact listener per actual editor, durable
 // records, one route per document, and one admission path for irreversible changes.
@@ -6347,8 +6348,8 @@ export function handleChatEvent(context: vscode.ExtensionContext, index: Session
 
 /**
  * Record a lost connection and its end in the output channel, including the bounded plain-text
- * diagnostic for an autonomous managed-RPC child exit. A live phase that is still read-only (a reattached session shown
- * before OMP has confirmed it) is not yet a restoration: the line waits for the state that lifts the reason.
+ * diagnostic for an autonomous managed-RPC child exit. A live phase shown before OMP confirmed a reattached session
+ * (its read-only reason is `STATE_UNCONFIRMED_REASON`) is not yet a restoration: the line waits for the state that lifts that reason.
  */
 function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | null, exitReason?: ChatExitReason, readOnlyReason: string | null = null): void {
   const s = windowState();
@@ -6357,7 +6358,7 @@ function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | 
     s.loggedChatPhases.set(tabId, phase);
     log[phase === "failed" ? "warn" : "info"](`tab ${tabId}: chat connection ${phase}${code === null ? "" : ` (${code})`}.`);
     if (phase === "stopped" && exitReason !== undefined) log.warn(`tab ${tabId}: ${chatExitText(exitReason)}`);
-  } else if (phase === "live" && readOnlyReason === null) {
+  } else if (phase === "live" && readOnlyReason !== STATE_UNCONFIRMED_REASON) {
     s.loggedChatPhases.delete(tabId);
     if (previous === "failed") log.info(`tab ${tabId}: chat connection restored; the same session is live again.`);
   }

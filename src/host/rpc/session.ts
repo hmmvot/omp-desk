@@ -117,6 +117,7 @@ import {
 	parseLiteModel,
 	parseCommands,
 	parseStateData,
+	STATE_UNCONFIRMED_REASON,
 	toChatEventFrame,
 	writeErrorCode,
 	type ParsedState,
@@ -220,7 +221,7 @@ export interface RpcSessionOptions {
 	reattachBudgetMs?: number;
 	/** How long a reattach whose state answer is still out, with lines arriving, waits before it shows the conversation live and read-only (default 2 s). */
 	resyncLiveAfterMs?: number;
-	/** How long the reads of an attach keep waiting while lines keep arriving, however slow OMP is to answer (default 5 min); a link that delivers nothing fails them at `commandTimeoutMs`. */
+	/** How long the reads of a reattach keep waiting while lines keep arriving, however slow OMP is to answer (default 5 min; one attempt of a reattach may last this long); a link that delivers nothing fails them at `commandTimeoutMs`. A first attach and a heal resync keep the plain deadline. */
 	starvedReadMs?: number;
 	/** Delays between background retries of a failed (recoverable) session; the list length is the retry budget. */
 	autoRecoveryDelaysMs?: readonly number[];
@@ -589,13 +590,11 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 /**
  * OMP answers a command in the order of its output, so the answer to a read made while it streams heavily is queued behind the flood
  * and comes when the flood has been written, however long that takes (a stream of 7-20 MB a minute held it back for tens of minutes).
- * A link that keeps delivering lines is not a lost child: the reads of an attach keep waiting while lines arrive, up to this long.
+ * A link that keeps delivering lines is not a lost child: the reads of a reattach keep waiting while lines arrive, up to this long.
  */
 const DEFAULT_STARVED_READ_MS = 300_000;
 /** A reattach whose state answer is still out after this long, with lines still arriving, shows the conversation live and read-only instead of "Connecting". */
 const DEFAULT_RESYNC_LIVE_AFTER_MS = 2_000;
-/** Why a reattached session that OMP has not yet proven is live but read-only. */
-const STATE_UNCONFIRMED = "Waiting for OMP to confirm this session; sending is paused until it does.";
 /** What `#stateOrStalled` resolves instead of the state when the answer is out while lines keep arriving. */
 const STATE_STALLED = Symbol("state-stalled");
 const DEFAULT_RECONCILE_INTERVAL_MS = 500;
@@ -2003,7 +2002,7 @@ export class RpcSession {
 	/** Answer the dialog `response.id`. Returns false when no such dialog is pending or the write failed. */
 	async respondUi(response: ChatUiResponse): Promise<boolean> {
 		const request = this.#model.uiRequest?.id === response.id ? this.#model.uiRequest : this.#model.uiQueue.find(queued => queued.id === response.id);
-		if (this.#mutationFence !== null || request === undefined || this.#model.phase !== "live") return false;
+		if (this.#mutationFence !== null || request === undefined || this.#model.phase !== "live" || !this.#identityVerified) return false;
 		// An `ask` answer the child would refuse (the child throws on a mismatch) never reaches it.
 		if ("answers" in response && !(request.method === "ask" && askAnswersMatch(request, response.answers))) return false;
 		const answer =
@@ -2454,7 +2453,7 @@ export class RpcSession {
 		if (this.#disposed || this.#ended || this.#dropDuringEstablish || answered() || this.#model.phase !== "resyncing") return false;
 		this.#awaitingProof = true;
 		this.#options.log?.info(`OMP has not answered get_state for ${Math.round(this.#timers.now() - askedAt)} ms, but lines keep arriving (last seq ${this.#lastSeq}, ${this.#linesSinceAttach} since the attach): the tab is shown live and read-only until it does`);
-		this.#model = setChatPhase(this.#model, "live", null, STATE_UNCONFIRMED);
+		this.#model = setChatPhase(this.#model, "live", null, STATE_UNCONFIRMED_REASON);
 		this.#publish(true);
 		return true;
 	}
@@ -2483,11 +2482,11 @@ export class RpcSession {
 			return;
 		}
 		const askedAt = this.#timers.now();
-		const statePromise = this.#fetchState(true);
+		const statePromise = this.#fetchState(reattach);
 		let answered = false;
 		void statePromise.then(() => { answered = true; });
-		const agentsPromise = this.#fetchAgents(true);
-		const askDialogPromise = this.#enableAskDialog(true);
+		const agentsPromise = this.#fetchAgents(reattach);
+		const askDialogPromise = this.#enableAskDialog(reattach);
 		await this.#paint;
 		let state: ParsedState | null | typeof STATE_STALLED = reattach ? await this.#stateOrStalled(statePromise) : await statePromise;
 		if (this.#disposed || this.#ended) return;

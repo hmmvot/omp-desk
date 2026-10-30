@@ -84,7 +84,7 @@ function starveState(rig: Rig): void {
 }
 
 /** One streamed reply: `seconds` of `message_update` lines, one per `stepMs`, with the clock moving along. */
-async function stream(rig: Rig, seconds: number, stepMs = 250): Promise<void> {
+async function stream(rig: Pick<Rig, "channel" | "timers">, seconds: number, stepMs = 250): Promise<void> {
 	const { channel, timers } = rig;
 	for (let at = 0; at < seconds * 1000; at += stepMs) {
 		channel.emitMessage("message_update", "m-flood", assistantMessage(`streamed ${at}`, 5000) as never);
@@ -191,6 +191,38 @@ describe("a reattach while OMP streams heavily", () => {
 		rig.timers.advance(250);
 		await waitUntil(() => rig.channel.attachRequests.length === 3);
 		assert.equal(rig.log.has(/reattach failed/), false);
+	});
+
+	it("writes no dialog answer before the session is proven, and writes it once the answer comes", async () => {
+		const rig = await boot();
+		await dropLink(rig);
+		await stream(rig, 3);
+		assert.equal(rig.session.phase, "live");
+		rig.channel.emit({ type: "extension_ui_request", id: "dlg-1", method: "select", title: "Approve?", options: ["Yes", "No"] });
+		await tick();
+		assert.equal(await rig.session.respondUi({ id: "dlg-1", value: "Yes" }), false, "an unproven session answers no dialog");
+		assert.deepEqual(rig.channel.commandsOfType("extension_ui_response"), []);
+		rig.answerState();
+		await waitUntil(() => rig.session.model.readOnlyReason === null);
+		assert.equal(await rig.session.respondUi({ id: "dlg-1", value: "Yes" }), true);
+		assert.equal(rig.channel.commandsOfType("extension_ui_response").length, 1);
+	});
+
+	it("keeps the plain command deadline for a first attach, however many lines arrive", async () => {
+		const scratch = await ScratchDir.create();
+		scratches.push(scratch);
+		const file = await scratch.file("s.jsonl", sessionFileText({ id: "sess-1", entries: [u1, a1] }));
+		const channel = new FakeRpcChannel({ sessionFile: file, entries: [u1, a1] as never, leafId: "a1" });
+		channel.handlers.set("get_state", () => "drop");
+		const timers = new ManualTimers();
+		const session = new RpcSession({ channel, sessionFile: file, cwd: "D:\\scratch", hostNonce: "host-a", timers, fileExists: async () => true, autoRecoveryDelaysMs: [], commandTimeoutMs: 10_000 });
+		sessions.push(session);
+		const started = session.start();
+		await tick();
+		await stream({ channel, timers }, 12);
+		await started;
+		assert.equal(session.phase, "failed");
+		assert.equal(session.model.code, "state-failed");
 	});
 
 	it("fails the tab when the late answer names another session file", async () => {
