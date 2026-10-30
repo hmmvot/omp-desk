@@ -1,3 +1,6 @@
+import type { ChatEntry } from "../../chat/messages.ts";
+import { positionTranscript } from "../../chat/projection.ts";
+import { appendFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { CLEAR_COMMAND, CLEAR_ERROR_PATH, CLEAR_MARKER_TYPE, parseClearArgs, type ClearArgs } from "../../chat/clear.ts";
@@ -21,9 +24,10 @@ const a1 = messageEntry("a1", "u1", assistantMessage("hello", 2000));
 let seq = 0;
 const rid = () => (++seq).toString(16).padStart(32, "0");
 
-async function boot(catalog = true, options: Partial<RpcSessionOptions> = {}) {
+async function boot(catalog = true, options: Partial<RpcSessionOptions> = {}, beforeStart?: (channel: FakeRpcChannel) => void) {
  const channel = new FakeRpcChannel({ sessionFile: options.sessionFile ?? null, entries: [u1, a1] as never, leafId: "a1", ...(options.expectedProviderSessionId === undefined ? {} : { sessionId: options.expectedProviderSessionId }) });
  channel.handlers.set("get_available_commands", () => ({ data: { commands: catalog ? [{ name: CLEAR_COMMAND, source: "extension" }] : [] } }));
+ beforeStart?.(channel);
  const timers = new ManualTimers();
  const session = new RpcSession({ channel, sessionFile: null, cwd: "D:\\scratch", hostNonce: "host-a", timers, watchdogIntervalMs: 60 * 60_000, ...options });
  sessions.push(session);
@@ -71,6 +75,56 @@ describe("combined clear", () => {
   assert.deepEqual(rewindTargets(session.model.entries), []);
   assert.deepEqual(await session.clear(rid()), { status: "done" });
   assert.equal(calls[2]!.sessionId, "sess-1", "the journal header does not rotate with provider identity");
+ });
+ it("shows nothing of the turn the broker replayed, nor of OMP's fresh report, below the divider", async () => {
+  // The window reloaded after the turn: the session file is read for the history, the broker replays the turn's lines, and the clear follows.
+  const scratch = await ScratchDir.create(); scratches.push(scratch);
+  const u3 = messageEntry("u3", "a1", userMessage("push", 5000));
+  const a3 = messageEntry("a3", "u3", assistantMessage("pushed", 6000));
+  const usage = { type: "model_usage", id: "mu3", parentId: "a3", timestamp: isoOf(9_000), purpose: "memory" };
+  const file = await scratch.file("replayed-turn.jsonl", sessionFileText({ entries: [u1, a1, u3, a3, usage] }));
+  const { channel, session } = await boot(true, { sessionFile: file }, rig => {
+   rig.child.entries = [u1, a1, u3, a3, usage] as never;
+   rig.child.leafId = "mu3";
+   rig.emitMessage("message_end", "msg-1", userMessage("push", 5000) as never);
+   rig.emitMessage("message_end", "msg-2", assistantMessage("pushed", 6000) as never);
+   rig.emit({ type: "agent_end" });
+  });
+  await tick();
+  // The clear's own entries follow the usage row; the file reader sees them as OMP writes them.
+  install(channel);
+  const installed = channel.handlers.get("prompt")!;
+  channel.handlers.set("prompt", command => {
+   const before = channel.child.entries.length;
+   const answer = installed(command);
+   appendFileSync(file, channel.child.entries.slice(before).map(row => `${JSON.stringify(row)}\n`).join(""));
+   // OMP's builtin /fresh prints its report whenever it runs, also as the middle phase of a clear.
+   if (command.message === "/fresh") channel.emit({ type: "command_output", text: "Fresh provider session started (1 provider state pruned)." });
+   return answer;
+  });
+  assert.deepEqual(await session.clear(rid()), { status: "done" });
+  const model = session.model;
+  assert.deepEqual(model.ephemeral, [], "the report of the provider reset inside a clear is not a transcript row");
+  const positioned = positionTranscript(model.entries, model.durableCount, model.pending, model.ephemeral, null, model.durablePositions);
+  const split = splitClearedHistory(positioned, model.olderCount)!;
+  assert.ok(split, "the confirmed boundary is found");
+  const turns = (rows: readonly ChatEntry[]) => rows.filter(row => row.type === "message").map(row => row.id);
+  assert.deepEqual(turns(split.before), ["u1", "a1", "u3", "a3"], "the whole turn is cleared history");
+  assert.deepEqual(turns(split.after), [], "nothing of it stays below the divider");
+  assert.ok(split.messages >= 4, "the divider counts the messages it hides");
+  assert.deepEqual(positioned.slice(positioned.findIndex(row => row.id === split.boundary.id)).map(row => row.type), ["reset_boundary", "custom"], "the divider is followed by its marker only");
+ });
+ it("does not show a fresh report the broker replays after a reattach, and still shows one typed live and other replayed output", async () => {
+  const report = (count: number) => `Fresh provider session started (${count} provider ${count === 1 ? "state" : "states"} pruned).`;
+  const { channel, session } = await boot(true, {}, rig => {
+   rig.emit({ type: "command_output", text: report(1) });
+   rig.emit({ type: "command_output", text: "Shook 3 tool results." });
+   rig.emit({ type: "command_output", text: report(2) });
+  });
+  assert.deepEqual(session.model.ephemeral.map(item => item.payload), [{ text: "Shook 3 tool results." }], "the replayed reports of a clear's (or a typed) /fresh are not rows; other replayed output is");
+  channel.emit({ type: "command_output", text: report(1) });
+  await tick();
+  assert.deepEqual(session.model.ephemeral.map(item => item.payload), [{ text: "Shook 3 tool results." }, { text: report(1) }], "a report that arrives live outside a clear is OMP's answer to a typed /fresh");
  });
  it("is exactly once and does not put internal commands in the user ledger", async () => {
   const { channel, session } = await boot(); install(channel); const requestId = rid();

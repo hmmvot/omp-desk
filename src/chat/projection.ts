@@ -43,20 +43,26 @@ export function positionTranscript(
 		if (siblings === undefined) attached.set(anchor, [entry]);
 		else siblings.push(entry);
 	}
-	// A durable entry nobody positioned (a reset boundary, a custom marker) belongs where its parent is, not above
-	// every positioned row: replayed events anchor a later prompt to the leaf they saw, which can precede it.
+	// A durable entry nobody positioned (a reset boundary, a custom marker) belongs where its parent is, not above every
+	// positioned row: replayed events anchor a later prompt to the leaf they saw, which can precede it. When the parent is
+	// not an earlier row (OMP writes entries the file reader never returns, such as model usage or a credential pin, between
+	// a turn and what follows it), the row before it in the branch is where it belongs. A parentless entry starts a tree.
 	const placed = new Set<string>(durablePositions.keys());
 	const plain = new Map<string, ChatEntry[]>();
 	const roots: ChatEntry[] = [];
+	let previous: ChatEntry | null = null;
 	for (const entry of entries.slice(0, durableCount)) {
+		const before = previous;
+		previous = entry;
 		if (durablePositions.has(entry.id)) continue;
-		if (entry.parentId === null || !placed.has(entry.parentId)) {
+		const parent = entry.parentId === null ? null : placed.has(entry.parentId) ? entry.parentId : before?.id ?? null;
+		placed.add(entry.id);
+		if (parent === null) {
 			roots.push(entry);
 			continue;
 		}
-		placed.add(entry.id);
-		const siblings = plain.get(entry.parentId);
-		if (siblings === undefined) plain.set(entry.parentId, [entry]);
+		const siblings = plain.get(parent);
+		if (siblings === undefined) plain.set(parent, [entry]);
 		else siblings.push(entry);
 	}
 	for (const [parent, children] of plain) attached.set(parent, [...children, ...(attached.get(parent) ?? [])]);

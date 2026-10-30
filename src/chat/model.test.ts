@@ -32,6 +32,8 @@ import {
 } from "./model.ts";
 import { assistantMessage, messageEntry, toolResultMessage, userMessage } from "../host/rpc/test-support.ts";
 import { positionTranscript } from "./projection.ts";
+import { CLEAR_MARKER_TYPE } from "./clear.ts";
+import { splitClearedHistory } from "./cleared-history.ts";
 
 const EPOCH: ChatEpoch = { nonce: "n", counter: 1 };
 
@@ -556,6 +558,22 @@ describe("projections", () => {
 		model = applyChatRewrite(model, [u1, a1, u2, a2, compaction], 0, "c1");
 		assert.equal(model.durablePositions.get("u2")?.anchorId, "a1", "the prompt moved to the nearest row the re-read still holds");
 		assert.deepEqual(windowOf(model, 10, null).rows.map(row => row.id), ["u1", "a1", "u2", "a2", "c1"]);
+	});
+
+	it("keeps a clear's boundary and marker below the whole turn a snapshot positioned, when the model usage between them is not held", () => {
+		const at = "2026-10-30T14:00:50.000Z";
+		const u1 = messageEntry("u1", null, userMessage("question", 100));
+		const a1 = messageEntry("a1", "u1", assistantMessage("answer", 200));
+		// The host's snapshot: the turn's rows hold the positions they had live, the first one anchored to a row the host no longer holds.
+		let model = live({ entries: [u1, a1], leafId: "a1", durablePositions: [{ entryId: "u1", anchorId: "notice-gone", seq: 1 }, { entryId: "a1", anchorId: "u1", seq: 2 }] });
+		// The clear's rows follow model usage OMP wrote after the answer; the host's file reader never returns it.
+		const boundary: ChatEntry = { type: "reset_boundary", id: "b1", parentId: "usage-not-held", timestamp: at };
+		const marker = { type: "custom", id: "m1", parentId: "b1", timestamp: at, customType: CLEAR_MARKER_TYPE, data: { v: 1, requestId: "a".repeat(32), boundaryId: "b1" } } as ChatEntry;
+		model = applyChatEntries(model, [boundary, marker], "m1");
+		const shown = positionTranscript(model.entries, model.durableCount, model.pending, model.ephemeral, null, model.durablePositions);
+		assert.deepEqual(shown.map(row => row.id), ["u1", "a1", "b1", "m1"]);
+		const split = splitClearedHistory(shown, 5)!;
+		assert.deepEqual([split.messages, split.atLeast, split.after.map(row => row.id)], [2, true, ["b1", "m1"]], "the divider counts the turn it hides and shows nothing of it");
 	});
 });
 

@@ -630,6 +630,8 @@ const TRAFFIC_DEBUG_MS = 5_000;
 /** A frame that cannot be applied triggers at most one rebuild per this interval. */
 const FRAME_FAILURE_RESYNC_GAP_MS = 2_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,120}$/;
+/** The line OMP's builtin `/fresh` prints (formatFreshSessionResult, OMP 18.8.5 to 18.13.3). */
+const FRESH_REPORT = /^Fresh provider session started \(\d+ provider states? pruned\)\.$/;
 const MAX_REMEMBERED_REQUESTS = 256;
 const MAX_LEDGER = 64;
 /** How long a Stop that may take its message back waits for OMP to settle and report the prompt's result. */
@@ -2966,6 +2968,10 @@ export class RpcSession {
 			// The command text became a user message: an input hook rewrote it, or OMP no longer routes it.
 			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user" && JSON.stringify(frame.message.content ?? "").includes(navigation.requestId)) navigation.finish?.("fell-through");
 		}
+		// OMP's `/fresh` prints "Fresh provider session started (N provider state pruned)". A clear runs that builtin inside itself, and
+		// a window that attaches replays the line from the broker's ring before its Chat is live, with nothing left to say it was a
+		// clear's: either way it is not a row. A `/fresh` typed in a live Chat still shows it.
+		if (frame.type === "command_output" && ((phase?.kind === "fresh" && navigation?.errorPath === CLEAR_ERROR_PATH) || (typeof frame.text === "string" && FRESH_REPORT.test(frame.text) && !this.#live))) return;
 		// An explicit `/context` request reads the report from the frame; the frame still renders as the notice it is.
 		// OMP's output carries no request id: this is the first report observed while the request waits, not a proven answer to it.
 		const pending = this.#contextRequest;
