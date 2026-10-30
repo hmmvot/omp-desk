@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-10-30
+
 ### Fixed
 
 - **OMP Desk starts when VS Code runs as another Windows account and an administrator account has access to that account's profile.** Someone signed in to Windows as an administrator who runs VS Code as a standard account (for example with `runas`) saw "another Windows account … has full control of …" and OMP Desk could not load its native module, because the administrator account held an explicit entry on the standard account's profile folder and the same-user check trusted the Administrators group but not a single administrator account. An account that Windows lists as a member of the local Administrators group (read by account SID with `NetLocalGroupGetMembers`, never guessed from a name, and kept for the life of the window, so **Reload Window** after changing the group) is now trusted exactly as the group is, in every check that trusts the group, because an administrator can elevate and reach everything the group reaches anyway. Every other account, a group such as `Users` and any account whose membership Windows cannot confirm (including an administrator that is only a member through a domain or nested group) is still refused with the same message, and the [troubleshooting section](docs/guide/troubleshooting.md#another-windows-account-can-reach-omp-desks-folders) says so. [Issue #1](https://github.com/hmmvot/omp-desk/issues/1), ADR-0054 amendment of 2026-10-30.
@@ -612,7 +614,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.14...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.15...HEAD
+[0.4.15]: https://github.com/hmmvot/omp-desk/compare/v0.4.14...v0.4.15
 [0.4.14]: https://github.com/hmmvot/omp-desk/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/hmmvot/omp-desk/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/hmmvot/omp-desk/compare/v0.4.11...v0.4.12
