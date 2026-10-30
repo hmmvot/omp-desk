@@ -39,6 +39,15 @@ describe("positionTranscript with entries nobody positioned", () => {
 		assert.deepEqual(positionTranscript(entries, entries.length, new Map(), [], null, positions).map(entry => entry.id), ["old", "older", "live", "after"]);
 	});
 
+	it("keeps a notice right after its anchor in a chain of parentless and parent-linked rows that nobody positioned", () => {
+		const shell = messageEntry("shell", null, userMessage("shell", 1_000));
+		const python = messageEntry("python", "shell", assistantMessage("python", 2_000));
+		const error = messageEntry("error", "python", assistantMessage("error", 3_000));
+		const entries = [shell, python, error];
+		const notice = { id: "notice", kind: "notice", anchorId: "shell", seq: 1, timestamp: 1, payload: { level: "warning", message: "Positioned notice" } };
+		assert.deepEqual(positionTranscript(entries, entries.length, new Map(), [notice]).map(entry => entry.id), ["shell", "notice", "python", "error"]);
+	});
+
 	it("leaves entries without any positions in file order", () => {
 		const entries = [messageEntry("u", null, userMessage("one", 1_000)), messageEntry("a", "u", assistantMessage("two", 2_000))];
 		assert.deepEqual(positionTranscript(entries, 2, new Map(), []).map(entry => entry.id), ["u", "a"]);
