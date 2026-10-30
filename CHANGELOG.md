@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-10-30
+
 ### Changed
 
 - **A visible Sessions view does much less background work.** Every 15 seconds each window that showed Sessions looked at every session row again: two claim reads, a check whether the window holding the row is alive, a probe of the row's broker and a check for an outside OMP, for all rows (48 of these a minute for 12 rows, in each window). A row is now looked at again when something that decides what it shows changed: its claim (another window starting, stopping or moving the session), the set of open windows, or its own record in the catalog, and a burst of such changes costs one look per row. Every 15 seconds only the rows whose end nothing announces are checked again (an OMP started in a terminal, a session under a broker no window runs, a check that failed: 8 a minute for 12 rows with two of that kind), and every row is looked at once in 3 minutes as a safety net for a change the system dropped. Showing the view or switching to the window still looks at every row at once, and a hidden view does nothing on the timer.
@@ -605,7 +607,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.13...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.14...HEAD
+[0.4.14]: https://github.com/hmmvot/omp-desk/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/hmmvot/omp-desk/compare/v0.4.12...v0.4.13
 [0.4.12]: https://github.com/hmmvot/omp-desk/compare/v0.4.11...v0.4.12
 [0.4.11]: https://github.com/hmmvot/omp-desk/compare/v0.4.10...v0.4.11
