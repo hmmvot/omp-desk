@@ -204,6 +204,7 @@ function fixedProcesses(rows: readonly FixedRow[]): Win32Native & { readonly rea
 		readSecuritySync: unused,
 		readSecurity: unused,
 		lookupAccountNames: unused,
+		administratorsMembership: unused,
 	};
 }
 

@@ -6,7 +6,7 @@
  * tree into owner-only storage. The runtime executable that loads that entry is never copied: it runs where it is
  * installed. What stands in for staging is the rule [ADR-0054](../../docs/decisions/0054-verify-private-windows-storage-with-security-identifiers.md)
  * draws for a path the broker is reached through: judged with security identifiers, every owner is a permitted
- * principal (the current account, SYSTEM, Administrators, TrustedInstaller and the owner placeholders), and no other principal may replace or re-permission what the path names or
+ * principal (the current account, SYSTEM, Administrators and any account Windows lists in that group, TrustedInstaller and the owner placeholders), and no other principal may replace or re-permission what the path names or
  * anything above it. The executable file itself is held harder than a directory: another principal may read and
  * execute it and nothing else, because a write right to the file is a right to change the code the broker runs.
  * The volume root is the platform's trust anchor and is not read.
@@ -73,6 +73,7 @@ export async function verifyExecutableTrust(file: string, probe: ExecutableTrust
 	if (security.failure !== null) return { ok: false, reason: `the access of ${file} could not be read (${security.failure})` };
 	const sid = security.sid;
 	if (sid === null) return { ok: false, reason: "the owning account SID could not be read" };
+	const member = security.isAdministratorMember;
 	for (const target of paths) {
 		const isFile = target === file;
 		// The executable and the folder it sits in decide what the broker loads (the application folder is the first place
@@ -87,9 +88,9 @@ export async function verifyExecutableTrust(file: string, probe: ExecutableTrust
 		const acl = parseWindowsAcl(report.acl.stdout);
 		if (!acl.parsed) return { ok: false, reason: `the access listing of ${target} could not be read` };
 		for (const entry of acl.entries) {
-			if (entry.denied || isPermittedAclPrincipal(entry.principal, sid)) continue;
+			if (entry.denied) continue;
 			const excessive = strict ? permissionsPermitModification(entry.permissions) : permissionsPermitReplacement(entry.permissions);
-			if (!excessive) continue;
+			if (!excessive || isPermittedAclPrincipal(entry.principal, sid, member)) continue;
 			return {
 				ok: false,
 				reason: `${label} ${target} lets ${await namedPrincipal(entry.principal)} ${strict ? "change" : "replace or re-permission"} it (${entry.permissions})`,
@@ -97,7 +98,7 @@ export async function verifyExecutableTrust(file: string, probe: ExecutableTrust
 		}
 		// An owner outside the trusted set can rewrite the access rules of what it owns.
 		if (report.owner === null) return { ok: false, reason: `the owner of ${target} could not be read` };
-		if (!isPermittedAclPrincipal(report.owner, sid)) {
+		if (!isPermittedAclPrincipal(report.owner, sid, member)) {
 			return { ok: false, reason: `${label} ${target} is owned by ${await namedPrincipal(report.owner)}, beyond the same-user boundary` };
 		}
 	}

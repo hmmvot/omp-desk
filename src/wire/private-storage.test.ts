@@ -159,6 +159,8 @@ function fakeSecurity(bend: {
 	readonly sid?: string | null;
 	readonly entries?: (target: string) => readonly string[] | null;
 	readonly owner?: (target: string) => string | null;
+	/** What the module says about Administrators membership; absent means the read carries no such source. */
+	readonly member?: (sid: string) => boolean;
 } = {}): { readonly read: NonNullable<PrivateStorageProbe["readSecurity"]>; readonly calls: string[][] } {
 	const calls: string[][] = [];
 	const read: NonNullable<PrivateStorageProbe["readSecurity"]> = async paths => {
@@ -173,7 +175,7 @@ function fakeSecurity(bend: {
 				owner: bend.owner === undefined ? fixturePrincipal("WORKSTATION\\dev") : bend.owner(target),
 			});
 		}
-		return { sid: bend.sid === undefined ? TEST_CURRENT_SID : bend.sid, failure: null, reports };
+		return { sid: bend.sid === undefined ? TEST_CURRENT_SID : bend.sid, failure: null, reports, ...(bend.member === undefined ? {} : { isAdministratorMember: bend.member }) };
 	};
 	return { read, calls };
 }
@@ -203,6 +205,7 @@ function fakeNative(read: Win32SecurityRead, names: ReadonlyMap<string, string> 
 		readSecuritySync: unused,
 		readSecurity: async (_paths, deadlineMs) => { deadlines.push(deadlineMs); return read; },
 		lookupAccountNames: async sids => new Map([...names].filter(([sid]) => sids.includes(sid))),
+		administratorsMembership: unused,
 	};
 }
 
@@ -338,6 +341,83 @@ it("describes the sibling refusals (an account that can read the store, a foreig
 	});
 });
 
+// ---- An account in the Administrators group is trusted like the group (ADR-0054, amended 2026-10-30) ----
+
+const ADMIN_ACCOUNT_SID = "S-1-5-21-100-200-300-1003";
+
+it("trusts an account Windows lists in the Administrators group like the group, on a folder, on the store and as an owner", async () => {
+	await withStore(async layout => {
+		const carrier = path.dirname(layout.root);
+		const asked: string[] = [];
+		const member = (sid: string): boolean => { asked.push(sid); return sid === ADMIN_ACCOUNT_SID; };
+		const entries = (target: string): readonly string[] => target === carrier || target === layout.root ? [...CLEAN_ENTRIES, `${ADMIN_ACCOUNT_SID}:(OI)(CI)(F)`] : CLEAN_ENTRIES;
+		const admitted = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries, member }).read } });
+		assert.equal(admitted.ready, true, admitted.reason ?? "refused");
+		assert.deepEqual([...new Set(asked)], [ADMIN_ACCOUNT_SID], "only an account that is neither this one, SYSTEM nor the group is asked about");
+
+		const owned = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ member, owner: target => target === carrier ? ADMIN_ACCOUNT_SID : fixturePrincipal("WORKSTATION\\dev") }).read } });
+		assert.equal(owned.ready, true, owned.reason ?? "refused");
+
+		// The same grant on a read that names no membership source is refused, as it was before the rule.
+		const unsourced = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries }).read } });
+		assert.equal(unsourced.ready, false);
+		assert.match(unsourced.reason ?? "", new RegExp(`readable by ${ADMIN_ACCOUNT_SID}`));
+
+		// A probe that names every read can name the membership as well.
+		const all = await verifyPrivateStorage({ layout, probe: { platform: "win32", currentSid: TEST_CURRENT_SID, isAdministratorMember: member, readAcl: async target => ({ ok: true, stdout: fixtureAcl(entries(target)), detail: null }), readOwners: async targets => ({ ok: true, stdout: targets.map(target => `${target}|${fixturePrincipal("WORKSTATION\\dev")}`).join("\n"), detail: null }) } });
+		assert.equal(all.ready, true, all.reason ?? "refused");
+	});
+});
+
+it("keeps refusing an account that is not a member, with the refusal it always had, and one whose membership cannot be read", async () => {
+	await withStore(async layout => {
+		const carrier = path.dirname(layout.root);
+		const grant = (account: string) => (target: string): readonly string[] => target === carrier ? [...CLEAN_ENTRIES, `${account}:(OI)(CI)(F)`] : CLEAN_ENTRIES;
+		const before = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries: grant(OTHER_SID) }).read } });
+		assert.equal(before.ready, false);
+		const notMember = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries: grant(OTHER_SID), member: () => false }).read } });
+		assert.equal(notMember.ready, false);
+		assert.equal(notMember.reason, before.reason, "the message for an account that is not an administrator is unchanged");
+		assert.match(notMember.reason ?? "", /lets S-1-5-21-100-200-300-1002 replace or re-permission it \(2032127: full control/);
+		// A lookup that throws is a refusal, never an admission.
+		const failing = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries: grant(ADMIN_ACCOUNT_SID), member: () => { throw new Error("NetLocalGroupGetMembers failed"); } }).read } });
+		assert.equal(failing.ready, false);
+		assert.equal(classifyNativeFailure(failing.reason ?? "").kind, "foreign-account-access");
+		// An account that is only listed as a member of some other group is not trusted: only the membership answer widens the set.
+		const readOnlyElsewhere = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: fakeSecurity({ entries: target => target === layout.root ? [...CLEAN_ENTRIES, `${OTHER_SID}:(OI)(CI)(RX)`] : CLEAN_ENTRIES, member: sid => sid === ADMIN_ACCOUNT_SID }).read } });
+		assert.equal(readOnlyElsewhere.ready, false);
+	});
+});
+
+it("judges the group and the other permitted identities as before, and never asks about them", () => {
+	const asked: string[] = [];
+	const member = (sid: string): boolean => { asked.push(sid); return sid === ADMIN_ACCOUNT_SID; };
+	for (const sid of ["S-1-5-32-544", "S-1-5-18", "S-1-3-0", "S-1-3-4", "S-1-5-10", TEST_CURRENT_SID, "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"]) {
+		assert.equal(isPermittedAclPrincipal(sid, TEST_CURRENT_SID, member), true, sid);
+	}
+	assert.deepEqual(asked, [], "the trusted set is answered without the membership lookup");
+	assert.equal(isPermittedAclPrincipal(`${ADMIN_ACCOUNT_SID} (PC\\AdminAccount)`, TEST_CURRENT_SID, member), true);
+	assert.equal(isPermittedAclPrincipal(ADMIN_ACCOUNT_SID, TEST_CURRENT_SID), false, "without a membership source an administrator account is outside, as before");
+	assert.equal(isPermittedAclPrincipal("S-1-5-32-545", TEST_CURRENT_SID, member), false, "another group is not trusted");
+	assert.equal(isPermittedAclPrincipal("PC\\AdminAccount", TEST_CURRENT_SID, () => true), false, "a name is never looked up");
+	assert.equal(isPermittedAclPrincipal("", TEST_CURRENT_SID, () => true), false);
+	assert.equal(isPermittedAclPrincipal(ADMIN_ACCOUNT_SID, TEST_CURRENT_SID, () => { throw new Error("lookup failed"); }), false);
+	assert.equal(isPermittedAclPrincipal(ADMIN_ACCOUNT_SID, TEST_CURRENT_SID, (() => "yes") as unknown as (sid: string) => boolean), false, "only a true answer admits");
+});
+
+it("judges the warm-start chain with the membership source of its read", () => {
+	const files = ["C:\\a", "C:\\a\\store"];
+	const reports = (account: string) => new Map<string, PrivateStorageSecurityReport>(files.map(target => [target.toLowerCase(), {
+		acl: { ok: true, stdout: JSON.stringify([...JSON.parse(fixtureAcl(CLEAN_ENTRIES)), { principal: account, permissions: 0x1f01ff, denied: false, inherited: true }]), detail: null },
+		owner: fixturePrincipal("WORKSTATION\\dev"),
+	}]));
+	const chain = { owned: [], carriers: ["C:\\a"] };
+	const read = { sid: TEST_CURRENT_SID, failure: null, reports: reports(ADMIN_ACCOUNT_SID) };
+	assert.equal(chainSecurityProblem({ ...read, isAdministratorMember: sid => sid === ADMIN_ACCOUNT_SID }, chain), null);
+	assert.match(chainSecurityProblem(read, chain) ?? "", /lets S-1-5-21-100-200-300-1003 replace or re-permission it/);
+	assert.match(chainSecurityProblem({ ...read, reports: reports(OTHER_SID), isAdministratorMember: sid => sid === ADMIN_ACCOUNT_SID }, chain) ?? "", /lets S-1-5-21-100-200-300-1002 replace or re-permission it/);
+});
+
 it("reads an entry that does not say where it came from and keeps the refusal's wording when the account has no name", () => {
 	const entry = { principal: OTHER_SID, permissions: 0x1f01ff, denied: false };
 	assert.equal(parseWindowsAcl(JSON.stringify([entry])).parsed, true, "a reading without the flag is still a reading");
@@ -468,6 +548,34 @@ it("restricts a store that is already limited with one reading and no rewrite, a
 		assert.match(owned.reason ?? "", /is owned by S-1-5-21-100-200-300-9999/);
 		assert.equal(foreign.calls.length, 1);
 		assert.equal(icacls.length, rewritesBefore);
+	});
+});
+
+it("leaves a directory alone whose only extra entry is an account Windows lists in the Administrators group, and rewrites the one that is not", async () => {
+	await withStore(async (_layout, root) => {
+		const sub = path.join(root, "records");
+		const layout: PrivateStorageLayout = { root, directories: [root, sub], verifiedDirectories: [root, sub], probeDirectory: root, probeText: "restrict-admin" };
+		const rewrites: string[] = [];
+		const entries = (target: string): readonly string[] =>
+			rewrites.includes(target) ? CLEAN_ENTRIES
+				: target === root ? [...CLEAN_ENTRIES, `${ADMIN_ACCOUNT_SID}:(OI)(CI)(F)`]
+				: target === sub ? [...CLEAN_ENTRIES, `${OTHER_SID}:(OI)(CI)(RX)`]
+				: CLEAN_ENTRIES;
+		const probe = (member: PrivateStorageProbe["isAdministratorMember"]): PrivateStorageProbe => ({
+			platform: "win32",
+			readSecurity: fakeSecurity({ entries }).read,
+			...(member === undefined ? {} : { isAdministratorMember: member }),
+			applyIcacls: async target => { rewrites.push(target); return { ok: true, stdout: "", detail: null }; },
+		});
+		const vouched = await restrictPrivateStorage({ layout, probe: probe(sid => sid === ADMIN_ACCOUNT_SID) });
+		assert.equal(vouched.restricted, true, vouched.reason ?? "refused");
+		assert.deepEqual(rewrites, [sub], "the administrator account's entry on the root is within the permitted set, so only the other directory is rewritten");
+
+		// Without that answer the same entry is outside the set and the root is rewritten too (as before the rule).
+		rewrites.length = 0;
+		const unvouched = await restrictPrivateStorage({ layout, probe: probe(undefined) });
+		assert.deepEqual(rewrites, [root, sub]);
+		assert.equal(unvouched.restricted, true, unvouched.reason ?? "refused");
 	});
 });
 

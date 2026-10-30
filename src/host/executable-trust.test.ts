@@ -136,6 +136,22 @@ describe("verifyExecutableTrust", { skip: process.platform === "win32" ? false :
 		assert.equal(result.ok, true);
 	});
 
+	it("trusts an account the read vouches for as a member of Administrators like the group, on the file, a folder and as an owner", async () => {
+		const admin = "S-1-5-21-1111111111-2222222222-3333333333-1003";
+		const reports = {
+			[FILE]: report([...typical(true), { principal: admin, permissions: FULL_CONTROL }], admin),
+			[ABOVE[0]!]: report([...typical(false), { principal: admin, permissions: FULL_CONTROL }]),
+		};
+		const asked: string[] = [];
+		const vouched = { ...security({ reports }), isAdministratorMember: (sid: string) => { asked.push(sid); return sid === admin; } };
+		assert.deepEqual((await verify(vouched)).result, { ok: true, paths: CHAIN });
+		assert.deepEqual([...new Set(asked)], [admin]);
+		// Without that answer, or when Windows says it is not a member, the same read is refused as before.
+		assert.match(refusal((await verify(security({ reports }))).result), /lets .* (change|replace or re-permission) it|is owned by/);
+		assert.match(refusal((await verify({ ...security({ reports }), isAdministratorMember: () => false })).result), /lets S-1-5-21-1111111111-2222222222-3333333333-1003 change it/);
+		assert.match(refusal((await verify({ ...security({ reports }), isAdministratorMember: () => { throw new Error("lookup failed"); } })).result), /lets S-1-5-21-1111111111-2222222222-3333333333-1003 change it/);
+	});
+
 	it("refuses another principal that can write data to the file", async () => {
 		const file = report([...typical(true), { principal: OTHER, permissions: WRITE_DATA }]);
 		const reason = refusal((await verify(security({ reports: { [FILE]: file } }))).result);

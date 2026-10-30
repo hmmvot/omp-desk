@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
@@ -280,6 +280,28 @@ describe("readSecurity against real paths", { skip: process.platform !== "win32"
 		assert.match(names.get("S-1-5-18") ?? "", /\\.+/, "SYSTEM resolves as DOMAIN\\name");
 		assert.equal(names.has("S-1-5-21-1-2-3-999999"), false);
 		assert.equal(names.has("not a sid"), false);
+	});
+
+	it("reads membership of the Administrators group from Windows: accounts only, SIDs only, failures unknown", async () => {
+		const native = await loadWin32Native(await installedAddonAsset());
+		assert.equal(native.administratorsMembership("S-1-1-0"), "not-member", "Everyone");
+		assert.equal(native.administratorsMembership("S-1-5-32-545"), "not-member", "another group");
+		assert.equal(native.administratorsMembership("S-1-5-32-544"), "not-member", "the group itself is a group, not an account");
+		assert.equal(native.administratorsMembership("S-1-5-21-1-2-3-999999"), "not-member", "a SID that is not listed");
+		assert.equal(native.administratorsMembership("not a sid"), "unknown");
+		assert.equal(native.administratorsMembership(""), "unknown");
+		// The built-in Administrator account of this machine cannot leave the group; its SID is this machine's account domain with RID 500.
+		const own = native.readSecuritySync([]).sid;
+		const machine = own === null ? null : /^(S-1-5-21-\d+-\d+-\d+)-\d+$/.exec(own)?.[1] ?? null;
+		if (machine !== null) {
+			const builtin = `${machine}-500`;
+			const names = await native.lookupAccountNames([builtin], 20_000);
+			if (names.get(builtin)?.toLowerCase().startsWith(`${hostname().toLowerCase()}\\`)) {
+				assert.equal(native.administratorsMembership(builtin), "member", "the built-in Administrator account");
+				assert.equal(native.administratorsMembership(builtin), "member", "answered again from the kept answer");
+				assert.equal(native.administratorsMembership(`${machine}-503`), "not-member", "DefaultAccount is not an administrator");
+			}
+		}
 	});
 
 	it("reads nothing and reports the failure when the deadline has already passed", async () => {

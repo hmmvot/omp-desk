@@ -8,7 +8,7 @@
  * [ADR-0006](../../docs/decisions/0006-host-generated-key-peer-verified-pipe.md)'s
  * same-user trust boundary): before the first byte is written, the store must be
  * a real local directory outside the workspace, not a link or reparse point,
- * with access limited to the owning account plus SYSTEM and Administrators (or
+ * with access limited to the owning account plus SYSTEM and Administrators (the group and the accounts Windows lists in it; or
  * an owner-only mode elsewhere), and a bounded write probe must read back. A
  * failed access rewrite leaves the caller's capture off rather than assumed
  * safe.
@@ -89,6 +89,11 @@ export interface PrivateStorageProbe {
 	 * name itself.
 	 */
 	readonly readSecurity?: (paths: readonly string[]) => Promise<PrivateStorageSecurityRead>;
+	/**
+	 * Whether a SID is a member of the local Administrators group (ADR-0054, amended 2026-10-30). Replaces the answer of the native
+	 * module, which serves it for the reads the probe does not name itself; absent means no account is trusted for its membership.
+	 */
+	readonly isAdministratorMember?: (sid: string) => boolean;
 	/**
 	 * Reads the mode `ls -ld` prints for one path, on POSIX; the mode carries the
 	 * marker for an extended access control list. Defaults to `/bin/ls -ld`.
@@ -248,6 +253,12 @@ export interface PrivateStorageSecurityRead {
 	readonly failure: string | null;
 	/** One report per requested path, keyed by its lower-case spelling. */
 	readonly reports: ReadonlyMap<string, PrivateStorageSecurityReport>;
+	/**
+	 * Whether a SID is a member of the local Administrators group, from the module that made the read (ADR-0054, amended
+	 * 2026-10-30); `true` only for an account Windows lists as a member. Absent when the read names no such source: then no
+	 * account is trusted for its membership.
+	 */
+	readonly isAdministratorMember?: (sid: string) => boolean;
 }
 
 /**
@@ -298,7 +309,7 @@ export function onLocalFixedNtfs(native: Win32Native, target: string): boolean {
 
 /** {@link readStorageSecurity} on a given module, synchronously; the caller has established that the paths are local. */
 export function readSecuritySyncOn(native: Win32Native, paths: readonly string[]): PrivateStorageSecurityRead {
-	return toStorageRead(native.readSecuritySync(paths));
+	return toStorageRead(native, native.readSecuritySync(paths));
 }
 
 /** {@link readStorageSecurity} on a given module: for the one caller that judges a module before it is shared. */
@@ -311,10 +322,10 @@ export async function readSecurityOn(native: Win32Native | null, paths: readonly
 			reports: new Map(paths.map(target => [target.toLowerCase(), { acl: { ok: false, stdout: "", detail }, owner: null }])),
 		};
 	}
-	return toStorageRead(await native.readSecurity(paths, OWNER_TIMEOUT_MS));
+	return toStorageRead(native, await native.readSecurity(paths, OWNER_TIMEOUT_MS));
 }
 
-function toStorageRead(read: Win32SecurityRead): PrivateStorageSecurityRead {
+function toStorageRead(native: Win32Native, read: Win32SecurityRead): PrivateStorageSecurityRead {
 	const reports = new Map<string, PrivateStorageSecurityReport>();
 	for (const [key, report] of read.reports) {
 		reports.set(key, {
@@ -326,7 +337,12 @@ function toStorageRead(read: Win32SecurityRead): PrivateStorageSecurityRead {
 			owner: report.owner,
 		});
 	}
-	return { sid: read.sid !== null && isSid(read.sid) ? read.sid : null, failure: read.failure, reports };
+	return {
+		sid: read.sid !== null && isSid(read.sid) ? read.sid : null,
+		failure: read.failure,
+		reports,
+		isAdministratorMember: sid => native.administratorsMembership(sid) === "member",
+	};
 }
 
 /**
@@ -339,13 +355,14 @@ export function chainSecurityProblem(read: PrivateStorageSecurityRead, chain: { 
 	if (read.failure !== null) return `the access of the staged native module's path could not be read (${read.failure})`;
 	const identity = read.sid;
 	if (identity === null) return "the owning account SID could not be read";
+	const member = read.isAdministratorMember;
 	for (const target of chain.owned) {
 		const report = read.reports.get(target.toLowerCase());
 		if (report === undefined || !report.acl.ok) return `the store access of ${target} could not be verified (${report?.acl.detail ?? "the SID reader returned no ACL"})`;
 		const acl = parseWindowsAcl(report.acl.stdout);
 		if (!acl.parsed) return `the store access listing of ${target} could not be read`;
 		for (const entry of acl.entries) {
-			if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
+			if (entry.denied || isPermittedAclPrincipal(entry.principal, identity, member)) continue;
 			return foreignRefusal("read-store", target, entry.principal, identity, entry, `the store path ${target} is readable by ${entry.principal}, beyond the same-user boundary`);
 		}
 	}
@@ -355,15 +372,14 @@ export function chainSecurityProblem(read: PrivateStorageSecurityRead, chain: { 
 		const acl = parseWindowsAcl(report.acl.stdout);
 		if (!acl.parsed) return `the access listing of ${target} on the path to the store could not be read`;
 		for (const entry of acl.entries) {
-			if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
-			if (!permissionsPermitReplacement(entry.permissions)) continue;
+			if (entry.denied || !permissionsPermitReplacement(entry.permissions) || isPermittedAclPrincipal(entry.principal, identity, member)) continue;
 			return foreignRefusal("replace-folder", target, entry.principal, identity, entry, `the component ${target} on the path to the store lets ${entry.principal} replace or re-permission it (${entry.permissions})`);
 		}
 	}
 	for (const target of [...chain.owned, ...chain.carriers]) {
 		const owner = read.reports.get(target.toLowerCase())?.owner;
 		if (owner === null || owner === undefined) return `the owner of ${target} could not be read`;
-		if (!isPermittedAclPrincipal(owner, identity)) return foreignRefusal("own-store", target, owner, identity, null, `the store path ${target} is owned by ${owner}, beyond the same-user boundary`);
+		if (!isPermittedAclPrincipal(owner, identity, member)) return foreignRefusal("own-store", target, owner, identity, null, `the store path ${target} is owned by ${owner}, beyond the same-user boundary`);
 	}
 	return null;
 }
@@ -614,9 +630,22 @@ function principalSid(principal: string): string | null {
 	return matched?.[1] ?? null;
 }
 
-export function isPermittedAclPrincipal(principal: string, currentSid: string): boolean {
+/**
+ * Whether a principal is inside the same-user boundary: a numeric identity above, the current account, or (ADR-0054, amended
+ * 2026-10-30) an account `isAdministratorMember` vouches for, which is trusted like the Administrators group because it can
+ * elevate and reach what the group reaches. Names are never read. Anything that is not a verified member, including a lookup that
+ * fails or throws, is outside: this is the only place a membership answer is used, and it only ever widens by one verified account.
+ */
+export function isPermittedAclPrincipal(principal: string, currentSid: string, isAdministratorMember?: (sid: string) => boolean): boolean {
 	const sid = principalSid(principal);
-	return sid !== null && (Object.hasOwn(PERMITTED_ACL_SIDS, sid) || (isSid(currentSid) && sid === currentSid));
+	if (sid === null) return false;
+	if (Object.hasOwn(PERMITTED_ACL_SIDS, sid) || (isSid(currentSid) && sid === currentSid)) return true;
+	if (isAdministratorMember === undefined) return false;
+	try {
+		return isAdministratorMember(sid) === true;
+	} catch {
+		return false;
+	}
 }
 
 export function describeStorageError(error: unknown): string {
@@ -796,7 +825,7 @@ async function spellsSameObject(spelled: string, real: string, io: StorageFs = a
 /**
  * Prove a private store is usable before a single byte is captured: a real local
  * directory outside the workspace, not a link or reparse point anywhere on the way
- * to it, owned by this account (plus SYSTEM and Administrators) and with an access
+ * to it, owned by this account (plus SYSTEM and Administrators, and the accounts Windows lists in that group) and with an access
  * listing limited to them on Windows, or an owner-only mode elsewhere, and a write
  * probe that reads back.
  *
@@ -906,6 +935,8 @@ async function verifyStorage(
 		phase("security");
 		const identity = probe?.currentSid ?? security?.sid ?? null;
 		if (identity === null || !isSid(identity)) return refuse("the owning account SID could not be read");
+		// An account Windows lists in the Administrators group is trusted like the group (ADR-0054, amended 2026-10-30).
+		const member = probe?.isAdministratorMember ?? security?.isAdministratorMember;
 		const readAcl = probe?.readAcl ?? (async (target: string) =>
 			security?.reports.get(target.toLowerCase())?.acl ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
 		for (const target of storePaths) {
@@ -917,7 +948,7 @@ async function verifyStorage(
 			if (!acl.parsed) return refuse(`the store access listing of ${target} could not be read`);
 			for (const entry of acl.entries) {
 				if (entry.denied) continue;
-				if (!isPermittedAclPrincipal(entry.principal, identity)) {
+				if (!isPermittedAclPrincipal(entry.principal, identity, member)) {
 					const named = await namedPrincipal(entry.principal);
 					return refuse(foreignRefusal("read-store", target, named, await namedPrincipal(identity), entry, `the store path ${target} is readable by ${named}, beyond the same-user boundary`));
 				}
@@ -932,8 +963,7 @@ async function verifyStorage(
 			const acl = parseWindowsAcl(result.stdout);
 			if (!acl.parsed) return refuse(`the access listing of ${target} on the path to the store could not be read`);
 			for (const entry of acl.entries) {
-				if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
-				if (!permissionsPermitReplacement(entry.permissions)) continue;
+				if (entry.denied || !permissionsPermitReplacement(entry.permissions) || isPermittedAclPrincipal(entry.principal, identity, member)) continue;
 				const named = await namedPrincipal(entry.principal);
 				return refuse(
 					foreignRefusal("replace-folder", target, named, await namedPrincipal(identity), entry, `the component ${target} on the path to the store lets ${named} replace or re-permission it (${entry.permissions})`),
@@ -961,13 +991,13 @@ async function verifyStorage(
 		for (const target of owned) {
 			const owner = ownerByPath.get(target.toLowerCase());
 			if (owner === undefined) return refuse(`the owner of ${target} could not be read`);
-			if (!isPermittedAclPrincipal(owner, identity)) {
+			if (!isPermittedAclPrincipal(owner, identity, member)) {
 				const named = await namedPrincipal(owner);
 				return refuse(foreignRefusal("own-store", target, named, await namedPrincipal(identity), null, `the store path ${target} is owned by ${named}, beyond the same-user boundary`));
 			}
 		}
-		evidence.push("access is limited to the owner, SYSTEM and Administrators");
-		evidence.push("every store path is owned by the owner, SYSTEM or Administrators");
+		evidence.push("access is limited to the owner, SYSTEM, Administrators and accounts Windows lists in that group");
+		evidence.push("every store path is owned by the owner, SYSTEM, Administrators or an account Windows lists in that group");
 		evidence.push(
 			`every component between the store and ${path.parse(layout.root).root} is owned by a trusted principal and lets no other account replace or re-permission it, and ${path.parse(layout.root).root} is the platform trust anchor`,
 		);
@@ -1116,6 +1146,7 @@ export async function restrictPrivateStorage(input: {
 			readiness: null,
 		};
 	}
+	const member = input.probe?.isAdministratorMember ?? security?.isAdministratorMember;
 	let reports = input.probe?.readAcl === undefined ? (security?.reports ?? null) : null;
 	const readAcl = input.probe?.readAcl ?? (async (target: string) =>
 		reports?.get(target.toLowerCase())?.acl ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
@@ -1131,7 +1162,7 @@ export async function restrictPrivateStorage(input: {
 		// rewritten from themselves, one at a time, never as a recursive walk.
 		const result = await readAcl(directory);
 		const acl = parseWindowsAcl(result.stdout);
-		if (result.ok && acl.parsed && acl.principals.every(principal => isPermittedAclPrincipal(principal, account))) continue;
+		if (result.ok && acl.parsed && acl.principals.every(principal => isPermittedAclPrincipal(principal, account, member))) continue;
 		const applied = await applyIcacls(directory, ownerOnlyGrant(account));
 		if (!applied.ok) {
 			return {

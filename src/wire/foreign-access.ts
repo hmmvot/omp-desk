@@ -2,7 +2,8 @@
  * The refusals that say another Windows account can reach, replace or re-permission what the staged runtime (the native module,
  * ADR-0076) is kept in, and the sentence a person is given for them (ADR-0054: the same-user boundary).
  *
- * The boundary is one rule: only the account running VS Code, SYSTEM and Administrators may hold access that lets the staged tree
+ * The boundary is one rule: only the account running VS Code, SYSTEM and Administrators (the group, and any account Windows lists as
+ * a member of it, ADR-0054 amended 2026-10-30) may hold access that lets the staged tree
  * be replaced or re-permissioned, on the tree and on every folder on the path to it. The private-storage verifier and the warm-start
  * check refuse with a sentence; that sentence reaches the user as a plain string (it crosses the staging child's output, the loader's
  * recorded failure and the log). This module is the one place that writes it and reads it back, so the notice can say which folder,

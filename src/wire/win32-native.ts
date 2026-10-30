@@ -22,12 +22,15 @@ import { silentLogger } from "../shared/logger.ts";
 import { CallLane } from "./call-lane.ts";
 import { nameForeignAccess } from "./foreign-access.ts";
 import {
+	ADMINISTRATORS_SID,
 	decodeAclEntries,
 	formatSid,
 	MAX_SID_SUBAUTHORITIES,
+	memoizeMembership,
 	nullDaclEntries,
 	SID_HEADER_BYTES,
 	sidBytesOf,
+	type AdministratorsMembership,
 	type SecurityEntry,
 } from "./win32-security.ts";
 
@@ -154,6 +157,15 @@ export interface Win32Native {
 	 * Names are diagnostic only: ask for the SIDs a refusal names, never on the admission path.
 	 */
 	lookupAccountNames(sids: readonly string[], deadlineMs: number): Promise<ReadonlyMap<string, string>>;
+	/**
+	 * Whether the account with this SID is a member of the local Administrators group, as Windows lists it (ADR-0054, amended
+	 * 2026-10-30): the group is named from its well-known SID (the name is localized), `NetLocalGroupGetMembers` (level 0: SIDs
+	 * only, the local account database, no name resolution) reads its direct members, and the SID must be one of them and resolve
+	 * (`LookupAccountSidW`) to a user account, never a group. Synchronous, because the warm start judges access in one step.
+	 * Membership through a nested group (a domain group, a local group inside the group) is not expanded and reads `not-member`;
+	 * every failure is `unknown`. Definite answers are kept for the life of the module: a membership change needs a reload.
+	 */
+	administratorsMembership(sid: string): AdministratorsMembership;
 }
 
 /** What one batched security read reported. Paths are keyed by their lower-case spelling. */
@@ -489,10 +501,19 @@ function callAsync<T>(call: NativeCall, ...args: unknown[]): Promise<T> {
 
 /** Characters of one account name or domain a lookup may return; a longer name stays a bare SID. */
 const ACCOUNT_NAME_CHARS = 256;
+/** `MAX_PREFERRED_LENGTH`: the Net API allocates the whole answer, so a list is never partial for want of room. */
+const MAX_PREFERRED_LENGTH = 0xffffffff;
+/** Members of the local Administrators group a reading accepts; a bigger answer is `unknown` rather than trusted. */
+const MAX_GROUP_MEMBERS = 65_536;
+/** `LOCALGROUP_MEMBERS_INFO_0` is one pointer; the image is 64-bit (x64 or arm64). */
+const POINTER_BYTES = 8;
+/** `SID_NAME_USE` `SidTypeUser`. */
+const SID_TYPE_USER = 1;
 
-function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecurity" | "readSecuritySync" | "lookupAccountNames"> {
+function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecurity" | "readSecuritySync" | "lookupAccountNames" | "administratorsMembership"> {
 	const advapi32 = koffi.load("advapi32.dll");
 	const kernel32 = koffi.load("kernel32.dll");
+	const netapi32 = koffi.load("netapi32.dll");
 	const getNamedSecurityInfo = advapi32.func(
 		"uint32 __stdcall GetNamedSecurityInfoW(str16 path, int objectType, uint32 information, _Out_ void** owner, _Out_ void** group, _Out_ void** dacl, _Out_ void** sacl, _Out_ void** descriptor)",
 	) as NativeCall;
@@ -506,6 +527,10 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 	const getCurrentProcess = kernel32.func("void* __stdcall GetCurrentProcess()") as NativeCall;
 	const closeHandle = kernel32.func("bool __stdcall CloseHandle(void* handle)") as NativeCall;
 	const localFree = kernel32.func("void* __stdcall LocalFree(void* memory)") as NativeCall;
+	const netLocalGroupGetMembers = netapi32.func(
+		"uint32 __stdcall NetLocalGroupGetMembers(str16 server, str16 localGroup, uint32 level, _Out_ void** buffer, uint32 preferredMaximumLength, _Out_ uint32* entriesRead, _Out_ uint32* totalEntries, _Inout_ size_t* resumeHandle)",
+	) as NativeCall;
+	const netApiBufferFree = netapi32.func("uint32 __stdcall NetApiBufferFree(void* buffer)") as NativeCall;
 
 	const moveMemory = kernel32.func("void __stdcall RtlMoveMemory(_Out_ uint8_t* destination, void* source, size_t length)") as NativeCall;
 	/**
@@ -573,6 +598,63 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 		}
 	}
 
+	/** `LookupAccountSidW` on the calling thread for a local lookup: the account's name and what kind of account it is, or `null`. */
+	function accountOf(sid: Buffer): { name: string; use: number } | null {
+		const name = Buffer.alloc(ACCOUNT_NAME_CHARS * 2);
+		const domain = Buffer.alloc(ACCOUNT_NAME_CHARS * 2);
+		const nameChars = [ACCOUNT_NAME_CHARS];
+		const domainChars = [ACCOUNT_NAME_CHARS];
+		const use = [0];
+		if (!(lookupAccountSid(null, sid, name, nameChars, domain, domainChars, use) as boolean)) return null;
+		return { name: name.toString("utf16le", 0, nameChars[0]! * 2), use: use[0]! };
+	}
+
+	/** One uncached answer; see {@link Win32Native.administratorsMembership}. */
+	function administratorsMembershipOf(text: string): AdministratorsMembership {
+		try {
+			const sid = sidBytesOf(text);
+			const wanted = sid === null ? null : formatSid(sid);
+			const group = sidBytesOf(ADMINISTRATORS_SID);
+			if (sid === null || wanted === null || group === null) return "unknown";
+			// The group's name is localized: it comes from the well-known SID, never from a literal.
+			const groupAccount = accountOf(group);
+			if (groupAccount === null) return "unknown";
+			const buffer = [null as unknown];
+			const read = [0];
+			const total = [0];
+			const status = netLocalGroupGetMembers(null, groupAccount.name, 0, buffer, MAX_PREFERRED_LENGTH, read, total, [0]) as number;
+			let found = false;
+			try {
+				// A partial answer (`ERROR_MORE_DATA`, a count that differs from the total) cannot show that an account is absent.
+				if (status !== 0 || read[0] !== total[0] || read[0]! > MAX_GROUP_MEMBERS || buffer[0] === null || buffer[0] === 0n) return "unknown";
+				// LOCALGROUP_MEMBERS_INFO_0 is one pointer to a SID; the SIDs sit in the same API buffer.
+				const pointers = copyNative(buffer[0], read[0]! * POINTER_BYTES);
+				for (let index = 0; index < read[0]!; index++) {
+					const address = pointers.readBigUInt64LE(index * POINTER_BYTES);
+					if (address === 0n) return "unknown";
+					const subAuthorities = copyNative(address, SID_HEADER_BYTES)[1]!;
+					if (subAuthorities > MAX_SID_SUBAUTHORITIES) return "unknown";
+					const member = formatSid(copyNative(address, SID_HEADER_BYTES + 4 * subAuthorities));
+					if (member === null) return "unknown";
+					if (member === wanted) {
+						found = true;
+						break;
+					}
+				}
+			} finally {
+				if (buffer[0] !== null && buffer[0] !== 0n) netApiBufferFree(buffer[0]);
+			}
+			if (!found) return "not-member";
+			// A group that is a member of the group is not an account that can elevate by itself: only a user account counts.
+			const account = accountOf(sid);
+			if (account === null) return "unknown";
+			return account.use === SID_TYPE_USER ? "member" : "not-member";
+		} catch {
+			return "unknown";
+		}
+	}
+	const administratorsMembership = memoizeMembership(administratorsMembershipOf);
+
 	return {
 		readSecuritySync(paths) {
 			try {
@@ -636,6 +718,7 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 				.catch(() => undefined);
 			return names;
 		},
+		administratorsMembership,
 	};
 }
 

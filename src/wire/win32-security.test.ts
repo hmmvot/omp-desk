@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { decodeAclEntries, EVERYONE_SID, formatSid, nullDaclEntries, sidBytesOf, sidLength } from "./win32-security.ts";
+import { decodeAclEntries, EVERYONE_SID, formatSid, memoizeMembership, nullDaclEntries, sidBytesOf, sidLength, type AdministratorsMembership } from "./win32-security.ts";
 
 /** The binary SID of `S-1-5-18` (SYSTEM): revision 1, one sub-authority, authority 5, sub-authority 18. */
 const SYSTEM = Buffer.from([1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0]);
@@ -116,5 +116,27 @@ describe("decodeAclEntries", () => {
 
 	it("reads a NULL DACL as full control for Everyone", () => {
 		assert.deepEqual(nullDaclEntries(), [{ principal: EVERYONE_SID, permissions: 0xffffffff, denied: false, inherited: false }]);
+	});
+});
+
+describe("memoizeMembership", () => {
+	it("asks Windows once per SID and keeps the answer for the life of the lookup", () => {
+		const asked: string[] = [];
+		const lookup = memoizeMembership(sid => { asked.push(sid); return sid === "S-1-5-21-1-2-3-1001" ? "member" : "not-member"; });
+		assert.equal(lookup("S-1-5-21-1-2-3-1001"), "member");
+		assert.equal(lookup("S-1-5-21-1-2-3-1001"), "member");
+		assert.equal(lookup("S-1-5-21-1-2-3-1002"), "not-member");
+		assert.equal(lookup("S-1-5-21-1-2-3-1002"), "not-member");
+		assert.deepEqual(asked, ["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"], "the second question of each SID was a cache hit");
+	});
+
+	it("never keeps an unknown answer: the next question asks again", () => {
+		const answers: AdministratorsMembership[] = ["unknown", "member", "not-member"];
+		let asked = 0;
+		const lookup = memoizeMembership(() => answers[asked++]!);
+		assert.equal(lookup("S-1-5-21-1-2-3-1001"), "unknown");
+		assert.equal(lookup("S-1-5-21-1-2-3-1001"), "member");
+		assert.equal(lookup("S-1-5-21-1-2-3-1001"), "member");
+		assert.equal(asked, 2);
 	});
 });

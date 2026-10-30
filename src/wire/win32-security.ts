@@ -156,3 +156,29 @@ export function sidBytesOf(text: string): Buffer | null {
 	subs.forEach((sub, index) => bytes.writeUInt32LE(sub, SID_HEADER_BYTES + 4 * index));
 	return bytes;
 }
+
+/** The well-known SID of the local BUILTIN\Administrators group; its name is localized, so it is always resolved from this. */
+export const ADMINISTRATORS_SID = "S-1-5-32-544";
+
+/**
+ * What Windows said about whether an account is a member of the local Administrators group: `member` only for an account
+ * (not a group) the group's own member list names; `not-member` when the list was read and does not name it; `unknown` for every
+ * failure (an API error, an unresolvable SID, an answer that does not hold together). Only `member` is trusted.
+ */
+export type AdministratorsMembership = "member" | "not-member" | "unknown";
+
+/**
+ * Remember the definite answers of a membership lookup for the life of the caller (one activation: the module is loaded once per
+ * process): a membership change needs a reload to be seen. An `unknown` answer is never kept, so a transient failure does not
+ * refuse the account for the rest of the activation; it only refuses while it lasts.
+ */
+export function memoizeMembership(lookup: (sid: string) => AdministratorsMembership): (sid: string) => AdministratorsMembership {
+	const known = new Map<string, AdministratorsMembership>();
+	return sid => {
+		const cached = known.get(sid);
+		if (cached !== undefined) return cached;
+		const answer = lookup(sid);
+		if (answer !== "unknown") known.set(sid, answer);
+		return answer;
+	};
+}
