@@ -97,7 +97,7 @@ export class DraftStore {
 	readonly #directory: string;
 	readonly #log: Logger;
 	readonly #now: () => number;
-	/** The image-set key each tab's record holds, once this window has read or written it. */
+	/** The image-set key each slot's record holds, once this window has read or written it. */
 	readonly #held = new Map<string, string>();
 	readonly #queues = new Map<string, Promise<unknown>>();
 
@@ -112,7 +112,7 @@ export class DraftStore {
 		return { draft: path.join(this.#directory, `${key}.draft.json`), images: path.join(this.#directory, `${key}.images.json`), label: key.slice(0, 8) };
 	}
 
-	/** One tab's operations run in the order they were asked: a save never overtakes the clear before it. */
+	/** One slot's operations run in the order they were asked: a save never overtakes the clear before it. */
 	#serial<T>(owner: string, work: () => Promise<T>): Promise<T> {
 		const previous = this.#queues.get(owner) ?? Promise.resolve();
 		const next = previous.then(work, work);
@@ -192,7 +192,7 @@ export class DraftStore {
 		}
 	}
 
-	/** The record of a tab, or `null` when it has none or it does not validate (which deletes it). */
+	/** The record of a slot, or `null` when it has none or it does not validate (which deletes it). */
 	load(owner: string): Promise<StoredDraft | null> {
 		return this.#serial(owner, async () => {
 			const files = this.#files(owner);

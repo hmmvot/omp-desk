@@ -86,6 +86,8 @@ const DETAIL_VIEW_TYPES: readonly string[] = [DETAIL_VIEW_TYPE, LEGACY_DETAIL_VI
 
 /** How long one document is given to hand its unsent draft over before it is replaced. */
 const DRAFT_CAPTURE_TIMEOUT_MS = 1_500;
+/** How long a closed editor's saved draft is kept before it is deleted (a shutting-down window never finishes the wait). */
+const DRAFT_FORGET_GRACE_MS = 5_000;
 
 /** The bridge endpoint of an editor, as far as an invalidation reads it. */
 export interface GuestBridgeBinding {
@@ -312,6 +314,20 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	/** The documents that have been offered their record, so a page announcing itself again is not sent the same record twice. */
 	const recalledDocuments = new WeakSet<object>();
 	let draftRecallSeq = 0;
+	/**
+	 * An editor's close deletes its record only after a grace period, and only when no editor of the slot is back by then. A window
+	 * that is shutting down fires its editors' dispose events too (VS Code does not say which close it is), but it cannot finish a
+	 * timer: its record stays for the editor VS Code revives, which a user's close never has.
+	 */
+	function forgetDraftAfterGrace(slot: string): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const timer = setTimeout(() => {
+			if (deps.tabs().get(slot)?.panel) resolve();
+			else drafts.forget(slot).then(resolve, resolve);
+		}, DRAFT_FORGET_GRACE_MS);
+		timer.unref?.();
+		return promise;
+	}
 
 	/** Offers a document that has just announced itself the draft its editor saved before its previous page died. */
 	async function recallDraft(slot: string, own: Tab, panel: vscode.WebviewPanel, tabId: string): Promise<void> {
@@ -841,7 +857,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		captureDraft,
 		carryDraftFrom,
 		releaseCarriedDraft,
-		forgetDraft: slot => drafts.forget(slot),
+		forgetDraft: slot => forgetDraftAfterGrace(slot),
 		openDetailTab,
 		openMermaidTab,
 		openArtifact,

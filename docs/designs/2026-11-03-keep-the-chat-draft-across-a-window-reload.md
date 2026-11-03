@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-11-03
 ---
 
@@ -49,13 +49,13 @@ Key: `sha256(slot)` in hex (the first 32 characters) as the file stem, so the na
 
 Splitting them is what keeps a text edit cheap: a keystroke burst rewrites a small file, the multi-megabyte image file only when an image is added or removed. The content file records the key of the image file it expects; a mismatch at load (a crash between the two, or a tampered file) drops the images and counts them as not carried. Operations of one slot run in the order they were asked, so a late clear cannot erase a save asked after it.
 
-The record's rules at load (a record that breaks one is deleted and treated as absent): a regular file within the byte ceiling; valid JSON of the exact version and shape; `owner` equal to the asked slot; content valid under `parseDraftHandoffContent`; every `files` key a reference of the documents' grammar naming a linked document of the content, every path a bounded string; the images valid under `parsePersistedDraftImages` and their key equal to the one the content names. A recall whose linked path no longer reads as text is not a load failure: the read happens at send, as for any linked document.
+The record's rules at load (a record that breaks one is deleted and treated as absent): a regular file within the byte ceiling; valid JSON of the exact version and shape; `owner` equal to the asked slot; content valid under `parseDraftHandoffContent`; every `files` key a reference of the documents' grammar and every path a bounded string; the images valid under `parsePersistedDraftImages` and their key equal to the one the content names. A `files` entry that no linked document names is never used, and a linked document without an entry is dropped at recall (its marker becomes text), not a load failure. A recall whose linked path no longer reads as text is not a load failure either: the read happens at send, as for any linked document.
 
 ### 2. The page saves, the host acknowledges
 
 The page side is `src/webview/lib/draft-persistence.ts` (no React): it watches the cell, builds a snapshot with `snapshotOf(draft)` of the Draft module and posts it over the panel route.
 
-- **When**: a snapshot is posted at most once per 400 ms of quiet and at the latest 2 s after the first unsaved change, immediately when the page becomes hidden or is being unloaded (`visibilitychange`, `pagehide`), immediately when the draft has just become empty after it held something (a send, an emptied composer, a dismissed card: the record of text that was already sent is deleted without waiting), and again when the route changes back to the panel while a change is unsaved. The page watches the fields that matter (text, images, documents, recovery cards, the message in flight, lost-image count) by reference, so reads in flight, the caret and the history walk cost nothing.
+- **When**: a snapshot is posted at most once per 400 ms of quiet and at the latest 2 s after the first unsaved change, immediately when the page becomes hidden or is being unloaded (`visibilitychange`, `pagehide`), immediately when the draft has just become empty after it held something (a send, an emptied composer, a dismissed card: the record of text that was already sent is deleted without waiting), and again when the route changes back to the panel while a change is unsaved. One save is in flight at a time, so while one waits for its answer a later change (and a flush at leaving) waits for it: with a lost answer a change can stay unsaved for up to the 10 s answer window. The page watches the fields that matter (text, images, documents, recovery cards, the message in flight, lost-image count) by reference, so reads in flight, the caret and the history walk cost nothing.
 - **What is saved**: the text, the images whose marker is in the text (a deleted image kept only for Undo is not saved), the documents whose marker is in the text, the cards, the message awaiting admission as an unconfirmed card, the not-carried count.
 - **Armed**: a composer that has just mounted is empty because its draft has not been restored yet, not because the user cleared it. The page posts nothing until the draft has held content once on this page (the revision alone does not arm it: a no-op edit of an empty composer is not news), so an empty page can never erase the record it is about to be given.
 - **One in flight**: the next snapshot waits for `omp:draft-saved`. An answer that does not come within 10 s is given up, the images are sent whole again with the next snapshot, and after two unanswered saves in a row the page stops asking until the draft changes again.
@@ -69,7 +69,7 @@ The page side is `src/webview/lib/draft-persistence.ts` (no React): it watches t
 
 On the page's `omp:ready`, for a Chat document of a slot that has a record, and only when no hand-off draft waits for the slot (the hand-off's text is newer than any record), the host reads the two files, re-registers each linked path in the tab's registry (a new reference per path, registered as a dropped path: a record is not proof that the user chose a network path, so such a path is not opened on the host's own account; a document whose reference was not in `files` is dropped and its marker becomes ordinary text), and posts `omp:draft-recall` (the content, the images, the key) once per document. The read takes time: when it ends, the host posts only if the editor still shows the same document and tab.
 
-The page holds a recall that arrives before the composer mounts (the pattern of `lib/draft-handoff.ts`) and applies it with `restorePersisted`: if the draft is still pristine (empty, never edited) the recalled draft replaces it, the images get new ids and numbers continue after the recalled ones; if the user already typed, the composer keeps its text and the recalled text comes as a recovery card; if the cell is held by a hand-off capture the recall waits until it lets go. The restored draft is saved again by the page, which deletes nothing it should keep.
+The page holds a recall that arrives before the composer mounts (the pattern of `lib/draft-handoff.ts`) and applies it with `restorePersisted`: if the draft is still pristine (empty, never edited) the recalled draft replaces it, the images keep the ids their key names (so the next save sends `images: null` and the host's key stays valid) and numbers continue after the recalled ones; if the user already typed, the composer keeps its text and the recalled text comes as a recovery card; if the cell is held by a hand-off capture the recall waits until it lets go. The restored draft is saved again by the page, which deletes nothing it should keep.
 
 ### 4. When it is cleared
 
@@ -77,7 +77,7 @@ The page holds a recall that arrives before the composer mounts (the pattern of 
 | --- | --- |
 | Send accepted, text deleted, cards dismissed (the draft becomes empty) | the page posts the empty snapshot, the host deletes both files |
 | A send in flight when the page dies | the message is saved as an unconfirmed card, the same sentence the hand-off uses ("OMP did not confirm this message… may already have been accepted") |
-| The user closes the editor | the editor's `onDidDispose` calls `forgetDraft(slot)`; the record is deleted. A reload does not close the editor, so it keeps the record (to be checked in a real window; see Risks) |
+| The user closes the editor | the editor's `onDidDispose` calls `forgetDraft(slot)`, which deletes the record after a 5 s grace and only if no editor of the slot is open again by then. VS Code does not say whether a dispose is a user's close or a window shutting down, and the ADR-0025 amendment records that; a shutting-down window cannot finish the 5 s wait, so its record survives for the revived editor, and a user's close deletes it |
 | The session's row leaves the catalog (Delete, Forget) | the editor of its tab closes, and with it the record |
 | Untouched for 14 days | the sweep deletes it |
 
@@ -110,11 +110,13 @@ The sweep runs in the window at its first save or recall and then at most every 
 
 ## Risks and Open Questions
 
-- **`onDidDispose` at Reload Window**: the design relies on the editor's `onDidDispose` not firing when the window reloads or closes (the extension host is stopped and VS Code revives the editor). [INFERENCE] until verified in a real window; the end-to-end scenario checks that the draft is back after a reload, which fails if the record were deleted by the reload.
+- **`onDidDispose` at Reload Window**: the delete is delayed (section 4) so that the answer to "does a shutdown fire the dispose event" no longer decides whether the draft survives. Checked in a real window with the e2e scenario `57-chat-draft-reload` (Reload Window: the draft is back after the reload; a send, a second reload, the composer is empty). Not checked: quit and reopen of the whole VS Code.
 - **Another window writes the same slot**: an editor is bound to one window; Move to This Window creates a new slot. No record is shared.
 - **Disk load**: at most one write per page per 400 ms burst, one small file normally. Image bytes are written once per change of the image set.
 - **The hand-off's images**: a draft carried by the hand-off arrives without images (ADR-0050 never carried them), so the record loses them at the next save, as the live draft already did.
 - **Restore is not instant**: the recall waits for a disk read of up to 14 MB after `omp:ready`; a user typing in those milliseconds gets the card, not a merge.
+- **A legacy (version 1) chat panel** gets a new editor id when it is migrated, so its record is unreachable; it ages out at 14 days.
+- **The sweep is not ordered against a save of another slot**: a record 14 days old that is being rewritten at the moment of a sweep can be removed after its save. The next save writes it again.
 
 ## Rollout and Verification
 
@@ -130,4 +132,5 @@ One commit (design, Draft-module functions, protocol, store, page, dispatcher, t
 
 ## Architecture Review
 
-- Reviewer: an independent reviewer examined the first version (2026-11-03) and accepted it with changes: a record per editor slot instead of per tab, the armed rule, explicit refusal rules, validation by the page before posting, the recall's recheck, immediate deletion when the draft becomes empty, no `origin` kept for linked paths, no setting (rationale recorded), the limits of the bridge route, the real file map and names, an age-only sweep, matching of the acknowledgement by save id and a recall kept apart from the hand-off. All are applied above; a confirmation pass of this version follows.
+- First pass: an independent reviewer examined the first version (2026-11-03) and accepted it with changes: a record per editor slot instead of per tab, the armed rule, explicit refusal rules, validation by the page before posting, the recall's recheck, immediate deletion when the draft becomes empty, no `origin` kept for linked paths, no setting (rationale recorded), the limits of the bridge route, the real file map and names, an age-only sweep, matching of the acknowledgement by save id and a recall kept apart from the hand-off. All were applied.
+- Confirmation pass (2026-11-03, a second independent reviewer, read-only, against the code): **accept with changes**. Material: the delete on `onDidDispose` rested on an unverified assumption that ADR-0025 records as unreliable, and a delete fired during a shutdown would have been indeterminate. Resolved: the delete now waits 5 s and is skipped when an editor of the slot is open again (a shutting-down window cannot finish the wait), with a regression test of the cases (grace passed, editor back, window dead before the grace); the e2e scenario `57-chat-draft-reload` passed in a real window (the record survived Reload Window and was recalled). Should-fix: the load rule on `files` and the 2 s/flush promise were reworded to what the code does; the doc says recalled images keep the ids their key names. Nits: the store's per-tab comments say slot; the legacy-panel and sweep-ordering limits are in Risks. Not checked in a window: quit and reopen of the whole VS Code.

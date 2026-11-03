@@ -949,18 +949,48 @@ describe("the draft kept across a window reload", () => {
 		assert.deepEqual(live.posted.map(message => message.type), ["omp:draft-restore"]);
 	});
 
-	it("deletes the record of an editor the user closed", async () => {
+	/** The editor of `SLOT` closes in a window with the record saved; `back` says whether an editor of the slot is open again when the grace ends. */
+	async function closedEditor(back: boolean): Promise<ReturnType<typeof windowWithStorage>> {
 		await withControl();
 		const before = windowWithStorage();
 		const old = before.editor();
 		await before.dispatcher.handleMessage(index, SLOT, old.panel, saving(1, { text: "draft text" }));
-		await before.dispatcher.forgetDraft(SLOT);
+		mock.timers.enable({ apis: ["setTimeout"] });
+		const forgotten = before.dispatcher.forgetDraft(SLOT);
+		if (!back) old.tab.panel = null as never;
+		mock.timers.tick(4_999);
+		await nextTurn();
+		mock.timers.tick(1);
+		await forgotten;
+		return windowWithStorage();
+	}
 
-		const after = windowWithStorage();
+	it("deletes the record of an editor the user closed once the grace has passed", async () => {
+		const after = await closedEditor(false);
 		const live = after.editor();
 		await after.dispatcher.handleMessage(index, SLOT, live.panel, ready);
 		await settle(after);
 		assert.equal(live.posted.some(message => message.type === "omp:draft-recall"), false);
+	});
+
+	it("keeps the record when an editor of the slot is open again after the grace, and when the window dies before it ends", async () => {
+		const reopened = await closedEditor(true);
+		const live = reopened.editor();
+		await reopened.dispatcher.handleMessage(index, SLOT, live.panel, ready);
+		assert.ok(await posted(live, "omp:draft-recall"), "an editor back in the slot finds its draft");
+		mock.timers.reset();
+		await withControl();
+		const before = windowWithStorage();
+		const old = before.editor();
+		await before.dispatcher.handleMessage(index, SLOT, old.panel, saving(1, { text: "draft text" }));
+		mock.timers.enable({ apis: ["setTimeout"] });
+		void before.dispatcher.forgetDraft(SLOT);
+		old.tab.panel = null as never;
+		mock.timers.tick(4_999);
+		const dying = windowWithStorage();
+		const next = dying.editor();
+		await dying.dispatcher.handleMessage(index, SLOT, next.panel, ready);
+		assert.ok(await posted(next, "omp:draft-recall"), "the window died before the grace ended: the record is still there");
 	});
 
 	it("ignores a malformed save and a save from a panel that no longer serves the slot", async () => {
