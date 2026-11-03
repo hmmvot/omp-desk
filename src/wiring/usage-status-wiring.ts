@@ -14,7 +14,7 @@ export interface UsageStatusDeps {
 	source(): UsageStatusSource | null;
 	refresh(): void;
 }
-/** The call `extension.ts` makes when a reading or the active tab may have changed. */
+/** The call `window.ts` makes when a reading or the active tab may have changed. */
 export interface UsageStatusHandle extends vscode.Disposable {
 	update(): void;
 }

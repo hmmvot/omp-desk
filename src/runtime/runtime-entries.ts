@@ -1,6 +1,6 @@
 /**
  * The verified copies of the runtime entries every child process of a window runs (ADR-0066 moved
- * this out of `extension.ts`; the staging rules themselves are unchanged).
+ * this out of the entry module; the staging rules themselves are unchanged).
  *
  * Every entry is copied to `<globalStorage>/runtime/<sha256>/<name>`, and the copy is re-read and
  * re-hashed on *every* call — immediately before its caller hands the path to a child process. A

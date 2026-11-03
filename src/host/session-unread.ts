@@ -8,7 +8,7 @@
  * front of. They differ exactly while the session is unread, and a later event replaces
  * the first identity instead of toggling a flag.
  *
- * Pure decisions only; `src/extension.ts` calls them from the notification ledgers and
+ * Pure decisions only; `src/wiring/window.ts` calls them from the notification ledgers and
  * from the window/editor focus events and persists the result through
  * `SessionIndex.recordConversationState`.
  */

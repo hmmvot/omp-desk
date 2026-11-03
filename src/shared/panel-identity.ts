@@ -8,7 +8,7 @@
  *
  * - the extension host stamps a validated tab id into the panel document
  *   (`src/host/guest-webview.ts`) and validates the state VS Code hands back
- *   (`src/extension.ts`);
+ *   (`src/wiring/window.ts`);
  * - the guest bootstrap persists it — the bundle through `setState`
  *   (`src/webview/bridge.ts`), and a document without the bundle through the
  *   inline source this module generates, so a loading or failure panel keeps its

@@ -26,7 +26,7 @@
  * advances whenever either changes. It deliberately holds no resources and no
  * secrets — the live `WebviewPanel`, document incarnation, bridge endpoint and
  * terminal pipeline are keyed by the same immutable slot id in the extension's own
- * resource map (`tabs` in `src/extension.ts`), whose only way to reach a slot by
+ * resource map (`tabs` in `WindowState`, `src/wiring/window-state.ts`), whose only way to reach a slot by
  * conversation is the {@link EditorSlotRegistry.controllerOf} answer this registry
  * gives. `src/host/session-index.ts` holds the same binding durably, so a restore
  * resolves a slot's conversation and role from what was committed rather than from

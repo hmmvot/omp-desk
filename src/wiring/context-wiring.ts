@@ -14,7 +14,7 @@ export interface ContextViewDeps {
 	/** Run the Chat footer's Compact or Shake for `tabId` (its pickers, prompts and refusal texts). */
 	runAction(tabId: string, command: "compact" | "shake"): void;
 }
-/** The calls `extension.ts` makes when the active editor or its session changes. */
+/** The calls `window.ts` makes when the active editor or its session changes. */
 export interface ContextHandle extends vscode.Disposable {
 	/** The target, its generation or its running state may have changed. */
 	sync(): void;

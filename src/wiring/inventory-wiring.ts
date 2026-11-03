@@ -27,7 +27,7 @@ export interface InventoryViewsDeps {
 	/** The window's helper scheduler: the worker processes of every read and switch run through it. */
 	readonly helpers: Pick<HelperScheduler, "run">;
 }
-/** The calls `extension.ts` makes when the active editor or its session changes. */
+/** The calls `window.ts` makes when the active editor or its session changes. */
 export interface InventoryHandle extends vscode.Disposable {
 	/** The target, its generation or its running state may have changed. */
 	sync(): void;

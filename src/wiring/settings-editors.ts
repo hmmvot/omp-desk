@@ -26,7 +26,7 @@ export interface SettingsEditorsDeps {
 	readonly config: OmpConfigEditorHost;
 }
 
-/** What `extension.ts` calls to open an editor from Chat. */
+/** What `window.ts` calls to open an editor from Chat. */
 export interface SettingsEditorsHandle {
 	/** The Models or Agents editor for `binding`. */
 	openSettings(kind: SettingsKind, binding: SettingsEditorContext): Promise<void>;

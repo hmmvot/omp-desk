@@ -183,8 +183,8 @@ export interface TabState {
 /**
  * Everything one window mutates while it runs, in one object.
  *
- * `activate` builds it with {@link createWindowState} and installs it in the one module
- * binding, {@link window}; every function reads it through {@link windowState}. Grouped by concern.
+ * `createWindow` (`src/wiring/window.ts`) builds one of these per window; that window's functions read it through the
+ * closure's `windowState()`. Grouped by concern.
  */
 export interface WindowState {
   // Session index and claims

@@ -44,7 +44,7 @@
  *   that still runs the previous release reads the defaults for a moved key until it reloads.
  * - **Cost.** A window with nothing to move answers from synchronous reads and does no I/O; the
  *   keys of a layer move concurrently, and activation does not wait for the move (see
- *   `extension.ts`: the first launch of a process does).
+ *   `window.ts`: the first launch of a process does).
  */
 import { isDeepStrictEqual } from "node:util";
 import type { Logger } from "../shared/logger.ts";

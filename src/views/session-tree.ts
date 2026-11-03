@@ -17,7 +17,7 @@
  *   remains the only authority for which editors are open.
  *
  * Nothing here invents session state, starts a process, imports a file or mirrors
- * the per-tab panel/terminal map that `src/extension.ts` owns; anything that can
+ * the per-tab panel/terminal map that `src/wiring/window.ts` owns; anything that can
  * start, focus or stop something is delegated back to it. A row click
  * opens stopped history without a writer; a rapid second click or Open launches it.
  * A fileless draft has nothing to view, so its click requests Open instead.

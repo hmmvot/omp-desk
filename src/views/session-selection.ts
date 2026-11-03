@@ -5,7 +5,7 @@
  * the row of the session the user viewed most recently selected: a selection that holds
  * no session row (cleared, or only a folder or the New Session row) is put back. Picking
  * another session row is left alone, and the selection follows once that session's
- * editor becomes the viewed one. Pure decisions; `src/extension.ts` reveals the row.
+ * editor becomes the viewed one. Pure decisions; `src/wiring/window.ts` reveals the row.
  */
 
 /** One editor of this window, as the focus recency order lists it. */

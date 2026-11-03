@@ -2,7 +2,7 @@
  * OMP Desk — `ompDesk.runSessionsAtRepositoryRoot` read for a folder, and the folder the editors bind.
  *
  * The setting is resource-scoped, so it is read for the folder it applies to: a monorepo folder or workspace can turn it off.
- * Sessions (`extension.ts`) and the folder OMP Settings opens on with no active session read it here and resolve through the same
+ * Sessions (`src/wiring/window.ts`) and the folder OMP Settings opens on with no active session read it here and resolve through the same
  * `sessionFolderFor`. An editor opened for a session binds that session's own folder instead, so it reads the `<cwd>/.omp` the session reads.
  */
 import * as vscode from "vscode";

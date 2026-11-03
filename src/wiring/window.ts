@@ -30,17 +30,14 @@ import { installedNerdFonts } from "../host/terminal-fonts";
 import { terminalFontFamily } from "../shared/terminal-theme";
 import { DEFAULT_OMP_PROFILE, delay, renameStoppedSessionTitle, resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot, setOmpBackgroundRunner, setOmpPathReader, setOmpResolutionLog, terminalWriterForHandle } from "../host/native-terminal";
 import { configuredChatBrokerRuntime, configuredOmpPath, findTerminalForPid } from "../host/omp-vscode";
-import type { LoginFlowDeps } from "../host/provider-login-flow";
 import { runOmpCli, type OmpCliResult } from "../host/native-terminal";
 import { ProviderUsageCache, UsageFailureNotes } from "../host/provider-usage";
 import { HelperScheduler, isHelperCancelled } from "../host/helper-scheduler";
 import { createHelperSlots } from "../host/helper-slots";
 import { readOmpSetting, readOmpSettings, TODO_CLEAR_DELAY_SETTING } from "../host/omp-setting-read";
 import { enabledMagicKeywords, MAGIC_KEYWORD_SETTING_KEYS } from "../shared/magic-keywords";
-import { observeSessionBranch } from "../host/session-branch";
 import type { BranchObservation } from "../host/session-branch";
 import type { FooterMetadataMessage } from "../shared/footer-metadata";
-import { relativeAge } from "../shared/relative-age";
 import { reduceFileBlocks, splitFileBlocks } from "../shared/file-blocks";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "../views/session-order";
 import type { SessionsGrouping } from "../views/session-order";
@@ -108,11 +105,6 @@ import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, si
 import { nativeTroubleshootingAnchor } from "../wire/native-module-failure";
 import { comparablePosix, findFileMentions } from "../host/file-mentions";
 import { EditorRecency } from "./editor-context";
-import { quoteHunkOf } from "./quote-hunk";
-import { quoteSourceOf } from "./quote-source";
-import { composePreviewQuote } from "./preview-quote";
-import type { PreviewDocument } from "./preview-quote";
-import type { ActivePreview } from "./preview-selection";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "../wire/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "../wire/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "../host/session-unread";
@@ -152,7 +144,6 @@ import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } fr
 import { WorkspaceFolderRegistry, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "../views/workspace-folders";
 import { LauncherFolders } from "../views/launcher-folders";
 import { SessionFolderResolver } from "../wire/session-folder";
-import { displayFolderPath } from "../host/folder-display";
 import type { LauncherFolder } from "../views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict } from "../views/workspace-folders";
 import { ChatRuntime } from "../host/chat-runtime";
@@ -218,7 +209,6 @@ import { createWindowLinkRules } from "./link-rules";
 import { showDeskCommands } from "./palette-commands";
 import { parseInternalLink } from "../shared/internal-links";
 import { createShellSlotStore, mergeShellSlotRecords, SHELL_SLOTS_KEY } from "../host/shell-slots";
-import { watchBrokerLoss } from "../host/broker-loss";
 import { setTimeout as delayMs } from "node:timers/promises";
 import { catalogPaths, startCatalogWatch } from "../host/profile-catalog";
 import { openProfileCatalog } from "./catalog-recovery";
@@ -240,9 +230,7 @@ import { announceUpdaterTerminations, updaterNoticeFiles } from "./updater-notic
 import { registerSettingsEditors } from "./settings-editors";
 import type { SettingsEditorContext } from "../host/omp-settings-editor";
 import { SETTINGS_APPLY_NOT_LIVE } from "../host/omp-settings-apply";
-import { folderShellOwnerHint } from "../host/shell-owner";
 import { shellCleanupDescription } from "../host/shell-title";
-import type { PtyOwnerHint } from "../wire/pty-protocol";
 import type { GuestControlRequestMessage, GuestControlStateMessage, GuestPanelAction, GuestPanelActionMessage, GuestHostMessage, GuestSessionViewMessage, GuestTerminalFontMessage, GuestTerminalCopyReplyMessage, GuestTerminalCopyRequestMessage, GuestTerminalActivateMessage } from "../protocol/messages";
 import { createControlRequestId, controlPathEquals } from "../wire/control-protocol";
 import type { ControlModelRef } from "../protocol/control";
@@ -533,7 +521,7 @@ const MAX_SESSION_TITLE_CHARS = 200;
 
 /** What a window is built from. */
 export interface WindowDeps {
-  /** The extension host's activation context. A fixture that never activates passes a stand-in and sets the pieces its cases read. */
+  /** The extension host's activation context. The lifecycle fixture passes none (`undefined`) and assigns the pieces its cases read to `state`. */
   readonly context: vscode.ExtensionContext;
   /** The window's OMP Desk log channel, when its creator already has one; `activate` creates it otherwise. */
   readonly output?: vscode.LogOutputChannel;
@@ -6316,6 +6304,7 @@ export function createWindow(deps: WindowDeps) {
       }
       if (current.tabId !== null) cancelControlPicker(current.tabId);
       s.draftRestores.delete(slot);
+      void s.guestDispatcher.forgetDraft(slot).catch(() => log.warn(`slot ${slot}: the saved draft could not be deleted`));
       forgetTerminalCopy(current);
       current.panel = null;
       s.editorRecency.forget(slot);
