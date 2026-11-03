@@ -5705,6 +5705,48 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a draft with text, a command chip and an image is saved to the host, comes back whole after a reload, and is saved empty after the send", async () => {
+			await chipSetup("draft-keep");
+			await installImages();
+			await ui.call("Input.insertText", { text: "/skill:rev" });
+			await press("Tab", "Tab", 9);
+			await waitDraft("window.composer.value()==='/skill:review '");
+			await ui.call("Input.insertText", { text: "src/a.ts " });
+			await pasteImage(10, 6, "[Image #1, 10x6]");
+			const savedWith = "window.sent.filter(message=>message.type==='omp:draft-save').at(-1)";
+			await ui.wait(`${savedWith}?.images?.length===1&&${savedWith}.text===window.composer.value()`);
+			interface Saved { saveId: number; imagesKey: string; images: { mimeType: string; number: number }[]; text: string; attachments: number; recoverable: unknown[]; documents: unknown[] }
+			const saved = await ui.evaluate<Saved>(savedWith);
+			assert.equal(saved.text, "/skill:review src/a.ts [Image #1, 10x6] ", "a pasted image's marker is followed by a space");
+			assert.deepEqual(saved.images.map(image => [image.number, image.mimeType]), [[1, "image/png"]]);
+			assert.equal(saved.imagesKey.split(",").length, 1);
+
+			// The window reloads: a new page, the host offers the record the old one saved.
+			await reset("draft-kept");
+			await installImages();
+			await ui.evaluate(`window.ui.push({commands:${CHIP_COMMANDS}})`);
+			assert.equal(await ui.evaluate("window.composer.value()"), "", "a new page starts with an empty composer");
+			await ui.evaluate(`window.ui.receive(${JSON.stringify({ type: "omp:draft-recall", recallId: 1, imagesKey: saved.imagesKey, images: saved.images, text: saved.text, attachments: saved.attachments, recoverable: saved.recoverable, documents: saved.documents })})`);
+			await waitDraft(`window.composer.value()===${JSON.stringify(saved.text)}`);
+			assert.deepEqual(await strip(), ["#1"], "the image is an attachment again");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.text, "/skill:review ", "the command is a chip again");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "a recalled draft is put back, never sent");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:draft-save'&&message.text==='').length"), 0, "the empty page was not saved over the record before the recall");
+
+			// The send clears it: the host is told to delete the record.
+			await ui.evaluate("window.composer.focus()");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			const sent = await ui.evaluate<{ text: string; images?: { mimeType: string }[] }>("window.ui.sends()[0]");
+			assert.equal(sent.text, saved.text.trimEnd(), "the send trims the draft as it always does");
+			assert.deepEqual(sent.images?.map(image => image.mimeType), ["image/png"], "the recalled image is sent as an image");
+			await ui.evaluate("window.ui.sendReply()");
+			await waitDraft("window.composer.value()===''");
+			await ui.wait(`${savedWith}?.text===''&&${savedWith}.images?.length===0`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a typed name is a chip the moment it is complete and keeps its space or line break when one follows, while an unknown command, a path and a denied command stay plain text", async () => {
 			await chipSetup("chips-typed");
 			await ui.call("Input.insertText", { text: "/compact" });

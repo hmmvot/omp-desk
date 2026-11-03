@@ -960,6 +960,38 @@ describe("draft messages", () => {
 		const bigHeld = { ...held, content: "h".repeat(MAX_DRAFT_HANDOFF_CHARS - 4), bytes: 4, chars: 4 };
 		assert.deepEqual(parseGuestWebviewMessage({ ...reply, text: "abcd", documents: [bigHeld] }), { ...reply, text: "abcd", documents: [bigHeld] }, "held text counts against the sum, and exactly the bound passes");
 	});
+
+	it("carries the draft a page saves for a window reload: images only when the set changed, the host's answer and the recall, all bounded", () => {
+		const data = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]).toString("base64");
+		const image = { number: 1, name: "shot.png", mimeType: "image/png", bytes: 11, data, width: 10, height: 6 };
+		const content = { text: "see [Image #1]", attachments: 0, recoverable: [], documents: [] };
+		const save = { type: "omp:draft-save", saveId: 4, imagesKey: "1", images: [image], ...content };
+		assert.deepEqual(parseGuestWebviewMessage(save), save);
+		const textOnly = { ...save, images: null };
+		assert.deepEqual(parseGuestWebviewMessage(textOnly), textOnly, "the set the host holds is not sent again");
+		const empty = { type: "omp:draft-save", saveId: 5, imagesKey: "", images: [], text: "", attachments: 0, recoverable: [], documents: [] };
+		assert.deepEqual(parseGuestWebviewMessage(empty), empty);
+		for (const refused of [
+			{ ...save, saveId: -1 },
+			{ ...save, imagesKey: "1,x" },
+			{ ...save, imagesKey: "1,2" },
+			{ ...save, images: undefined },
+			{ ...save, images: [{ ...image, bytes: 12 }] },
+			{ ...save, images: [{ ...image, mimeType: "image/svg+xml" }] },
+			{ ...save, images: [{ ...image, data: "not base64!" }] },
+			{ ...save, images: [{ ...image, width: 10, height: undefined }] },
+			{ ...save, images: [image, image], imagesKey: "1,2" },
+			{ ...save, text: "a\rb" },
+		]) assert.equal(parseGuestWebviewMessage(refused), null, JSON.stringify(refused).slice(0, 120));
+
+		const saved = { type: "omp:draft-saved", saveId: 4, imagesKey: "1" };
+		assert.deepEqual(parseGuestHostMessage(saved), saved);
+		assert.equal(parseGuestHostMessage({ ...saved, imagesKey: "1;2" }), null);
+		const recall = { type: "omp:draft-recall", recallId: 2, imagesKey: "1", images: [image], ...content };
+		assert.deepEqual(parseGuestHostMessage(recall), recall);
+		assert.equal(parseGuestHostMessage({ ...recall, imagesKey: "" }), null, "the key names as many images as the message carries");
+		assert.equal(parseGuestHostMessage({ ...recall, images: null }), null);
+	});
 });
 
 describe("composer command boundary", () => {

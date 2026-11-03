@@ -42,6 +42,7 @@ import { JobsUi } from "./lib/jobs-ui";
 import { chatBanner } from "./lib/chat-banner";
 import { operationBannerText } from "./lib/chat-operation";
 import { captureDraft, offerRestoredDraft, releaseDraftCapture } from "./lib/draft-handoff";
+import { offerDraftPersistence } from "./lib/draft-persistence";
 import { requestPanelAction } from "./lib/panel-actions";
 import { selectedText } from "../shared/selection-query";
 import { useChatSnapshot, useComposerPopupReport, useTypingActivity } from "./lib/use-chat";
@@ -105,6 +106,8 @@ function SessionView({ client }: { client: ChatClient }): ReactNode {
 		} else if (message.type === "omp:draft-restore" && view.mode === "chat") {
 			offerRestoredDraft(message.requestId, message);
 			guestTransport.post({ type: "omp:draft-restored", requestId: message.requestId });
+		} else if (message.type === "omp:draft-saved" || message.type === "omp:draft-recall") {
+			offerDraftPersistence(message);
 		}
 	}), [view.mode]);
 	useEffect(() => {

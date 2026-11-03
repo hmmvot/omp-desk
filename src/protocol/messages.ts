@@ -39,7 +39,8 @@ import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
 import { HUNK_LOCATION_SEPARATOR, MAX_QUOTE_VERSION_LENGTH, QUOTE_VERSION_SEPARATOR } from "../shared/quote-location.ts";
 import { isEmptyStateKeyCommand, type EmptyStateKeyCommand } from "../shared/key-hints.ts";
-import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
+import type { SniffedImageMimeType } from "../shared/image-sniff.ts";
+import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGE_BYTES, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
 import type { ServedModelPair, ServedModelVerdict } from "../chat/served-model.ts";
@@ -651,6 +652,94 @@ export interface GuestDraftRestoredMessage {
 	requestId: number;
 }
 
+/**
+ * One image of a draft the page saves: the draft's own attachment (`PendingImage`) with its reference number. `bytes` is the decoded
+ * length of `data`, which is the wire `ImageContent.data`.
+ */
+export interface PersistedDraftImage {
+	number: number;
+	name: string;
+	mimeType: SniffedImageMimeType;
+	bytes: number;
+	data: string;
+	width?: number;
+	height?: number;
+}
+
+/**
+ * The page's whole unsent draft, to be kept across a window reload (docs/designs/2026-11-03-keep-the-chat-draft-across-a-window-reload.md).
+ * `attachments` counts the images the draft holds that this message does not carry. `images` is the draft's image set whole, or `null`
+ * for "the set the host acknowledged under `imagesKey`": the bytes are posted only when the set changes. An empty draft (no text, no
+ * image, no document, no card, nothing not carried) tells the host to delete its record. Panel route only: a bridge request cannot carry it.
+ */
+export interface GuestDraftSaveMessage extends DraftHandoffContent {
+	type: "omp:draft-save";
+	/** Correlation of this one save; the host's acknowledgement names it. */
+	saveId: number;
+	/** Identifies the image set: the ids of its images in number order, comma separated; empty for none. */
+	imagesKey: string;
+	images: PersistedDraftImage[] | null;
+}
+
+/** The host's answer to a save: the image-set key it now holds (what a later save may leave out), `""` for none. */
+export interface GuestDraftSavedMessage {
+	type: "omp:draft-saved";
+	saveId: number;
+	imagesKey: string;
+}
+
+/** The draft the host kept for this tab before the window reloaded, offered once to a document that has just become ready. */
+export interface GuestDraftRecallMessage extends DraftHandoffContent {
+	type: "omp:draft-recall";
+	recallId: number;
+	imagesKey: string;
+	images: PersistedDraftImage[];
+}
+
+/** Longest image-set key: digits, commas, one id per image. */
+const IMAGES_KEY = /^(?:[0-9]{1,9}(?:,[0-9]{1,9}){0,999})?$/;
+
+/** The number of images an image-set key names. */
+export function imagesKeyCount(key: string): number {
+	return key === "" ? 0 : key.split(",").length;
+}
+
+/** True for an image-set key of the draft protocol. */
+export function isImagesKey(value: unknown): value is string {
+	return typeof value === "string" && IMAGES_KEY.test(value);
+}
+
+/** Bytes a canonical base64 string decodes to. */
+function decodedBase64Length(data: string): number {
+	return (data.length / 4) * 3 - (data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0);
+}
+
+/**
+ * Validate the images of a saved draft against the draft's own budgets: a supported type, canonical base64, the per-image and the
+ * per-draft size, a byte count equal to the decoded length, positive numbers that never repeat. `null` refuses the whole set.
+ */
+export function parsePersistedDraftImages(value: unknown): PersistedDraftImage[] | null {
+	if (!Array.isArray(value) || value.length > MAX_ATTACH_ITEMS) return null;
+	const images: PersistedDraftImage[] = [];
+	const numbers = new Set<number>();
+	let total = 0;
+	for (const candidate of value) {
+		if (!isRecord(candidate) || !isDocumentNumber(candidate.number) || numbers.has(candidate.number)) return null;
+		const { name, mimeType, bytes, data, width, height } = candidate;
+		if (typeof name !== "string" || name.length === 0 || name.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(name)) return null;
+		if (typeof mimeType !== "string" || !isChatImageMimeType(mimeType)) return null;
+		if (typeof data !== "string" || data.length === 0 || data.length > MAX_CHAT_IMAGE_BASE64_CHARS) return null;
+		total += data.length;
+		if (total > MAX_CHAT_IMAGES_BASE64_CHARS || !isCanonicalBase64Text(data)) return null;
+		if (!isCount(bytes, MAX_CHAT_IMAGE_BYTES) || bytes !== decodedBase64Length(data)) return null;
+		if ((width === undefined) !== (height === undefined)) return null;
+		if (width !== undefined && (!isCount(width, 1_000_000) || !isCount(height, 1_000_000) || width === 0 || height === 0)) return null;
+		numbers.add(candidate.number);
+		images.push({ number: candidate.number, name, mimeType: mimeType as SniffedImageMimeType, bytes, data, ...(width === undefined ? {} : { width, height: height as number }) });
+	}
+	return images;
+}
+
 // Native terminal pane messages (ADR-0024).
 
 /**
@@ -965,6 +1054,8 @@ export type GuestHostMessage =
 	| GuestDraftRequestMessage
 	| GuestSelectionRequestMessage
 	| GuestDraftRestoreMessage
+	| GuestDraftSavedMessage
+	| GuestDraftRecallMessage
 	| GuestDraftReleaseMessage
 	| GuestTerminalFontMessage
 	| GuestTerminalStateMessage
@@ -1244,6 +1335,7 @@ export type GuestWebviewMessage =
 	| GuestTerminalFocusMessage
 	| GuestTerminalVisibilityMessage
 	| GuestDraftReplyMessage
+	| GuestDraftSaveMessage
 	| GuestDraftRestoredMessage
 	| GuestOpenDetailMessage
 	| GuestOpenMermaidMessage
@@ -1580,6 +1672,15 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 		const content = parseDraftHandoffContent(value);
 		return content === null || !isRequestId(value.requestId) ? null : { type: "omp:draft-restore", requestId: value.requestId, ...content };
 	}
+	if (value.type === "omp:draft-saved") {
+		return isRequestId(value.saveId) && isImagesKey(value.imagesKey) ? { type: "omp:draft-saved", saveId: value.saveId, imagesKey: value.imagesKey } : null;
+	}
+	if (value.type === "omp:draft-recall") {
+		const content = parseDraftHandoffContent(value);
+		const images = parsePersistedDraftImages(value.images);
+		if (content === null || images === null || !isRequestId(value.recallId) || !isImagesKey(value.imagesKey) || imagesKeyCount(value.imagesKey) !== images.length) return null;
+		return { type: "omp:draft-recall", recallId: value.recallId, imagesKey: value.imagesKey, images, ...content };
+	}
 	if (value.type === "omp:terminal-font") {
 		const { fontFamily, fontSize, lineHeight, letterSpacing } = value;
 		if (!isNamedBoundaryText(fontFamily, 32 * 1024)) return null;
@@ -1834,6 +1935,16 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 			return { type: "omp:selection-reply", requestId: value.requestId, text: normalizeSymbolQuery(value.text) };
 		case "omp:draft-restored":
 			return isRequestId(value.requestId) ? { type: "omp:draft-restored", requestId: value.requestId } : null;
+		case "omp:draft-save": {
+			// The whole draft, bounded like the hand-off's and carrying its images only when the set changed. Refused whole when any part
+			// is out of bounds: half a draft would replace a good record.
+			if (!isRequestId(value.saveId) || !isImagesKey(value.imagesKey)) return null;
+			const content = parseDraftHandoffContent(value);
+			const images = value.images === null ? null : parsePersistedDraftImages(value.images);
+			if (content === null || (value.images !== null && images === null)) return null;
+			if (images !== null && imagesKeyCount(value.imagesKey) !== images.length) return null;
+			return { type: "omp:draft-save", saveId: value.saveId, imagesKey: value.imagesKey, images, ...content };
+		}
 		case "omp:draft-reply": {
 			// The draft travels back exactly as it was typed, bounded and without control
 			// characters (newlines and tabs excepted): a reply this boundary cannot carry

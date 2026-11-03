@@ -5,8 +5,10 @@
  */
 import type { MutableRefObject } from "react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { guestTransport } from "../bridge";
 import { createDraftCell, type DraftCell, type DraftCellState } from "./draft/draft.ts";
 import { createSurfacePort, type SurfacePort } from "./draft-write.ts";
+import { receiveDraftPersistence, startDraftPersistence } from "./draft-persistence.ts";
 import type { DraftSurface } from "./draft-surface.ts";
 
 export interface DraftHandle {
@@ -28,5 +30,28 @@ export function useDraft(): DraftHandle & { readonly state: DraftCellState } {
 	const state = useSyncExternalStore(cell.subscribe, cell.getState);
 	// Draft base64 and previews live only in the cell's value; dropping the cell with the component is what releases them.
 	useEffect(() => () => cell.dispose(), [cell]);
+	// The draft is kept across a window reload by the host (`draft-persistence.ts`): saved while it changes, recalled once when the page is ready.
+	useEffect(() => {
+		const persistence = startDraftPersistence(cell, {
+			post: message => guestTransport.post(message),
+			onRoute: listener => guestTransport.onRouteChange(() => listener()),
+			onLeaving: listener => {
+				const hidden = (): void => {
+					if (document.visibilityState === "hidden") listener();
+				};
+				document.addEventListener("visibilitychange", hidden);
+				window.addEventListener("pagehide", listener);
+				return () => {
+					document.removeEventListener("visibilitychange", hidden);
+					window.removeEventListener("pagehide", listener);
+				};
+			},
+		});
+		const stopReceiving = receiveDraftPersistence(persistence.receive);
+		return () => {
+			stopReceiving();
+			persistence.stop();
+		};
+	}, [cell]);
 	return { ...handle, state };
 }

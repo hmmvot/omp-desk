@@ -39,7 +39,9 @@ const VALUES: Record<string, "kept"> = {
 	restoreHandoff: "kept",
 	restoreQueued: "kept",
 	rewind: "kept",
+	restorePersisted: "kept",
 	setEditorText: "kept",
+	snapshotOf: "kept",
 	viewOf: "kept",
 };
 
@@ -55,6 +57,7 @@ const TYPES: Record<string, "kept"> = {
 	OutgoingMessage: "kept",
 	SendContext: "kept",
 	SendResult: "kept",
+	DraftSnapshot: "kept",
 	Settled: "kept",
 	ChipSpan: "kept",
 	CompletionRow: "kept",

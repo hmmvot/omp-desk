@@ -41,6 +41,8 @@ export { clearText, cleared, insertText, restoreQueued, rewind, setEditorText } 
 export type { Alerts, RewindAnswer } from "./refill.ts";
 export type { RestoredQueued } from "./queue-merge.ts";
 export { addRecoverable, dismissLost, dismissRecoverable, keepUnsent, restoreHandoff } from "./handoff.ts";
+export { restorePersisted, snapshotOf } from "./persist.ts";
+export type { DraftSnapshot } from "./persist.ts";
 export { QUOTE_HELD_NOTICE, quote, removeQuote } from "./quote.ts";
 export type { QuoteContext, QuoteRequest, QuoteResult } from "./quote.ts";
 export { quoteTitle } from "./quote-draft.ts";

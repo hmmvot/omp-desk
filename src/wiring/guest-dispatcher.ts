@@ -23,6 +23,7 @@ import { MERMAID_PREVIEW_VIEW_TYPE, type MermaidPreviews } from "../host/mermaid
 import type { SessionIndex } from "../host/session-index.ts";
 import { sameEpoch } from "../chat/model.ts";
 import type { ArtifactDocuments } from "./artifact-documents.ts";
+import { createDraftPersistence } from "./draft-persistence.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { DetailTarget } from "../protocol/detail-target.ts";
 import {
@@ -259,6 +260,8 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	carryDraftFrom(previous: vscode.WebviewPanel | null): Promise<CarriedDraft<Tab> | null>;
 	/** Cancel only the source capture; an already-replaced document has nothing to unlock. */
 	releaseCarriedDraft(carried: CarriedDraft<Tab> | null): void;
+	/** Delete the draft kept for an editor slot across a window reload: its editor was closed by the user, so nothing will ask for it. */
+	forgetDraft(slot: string): Promise<void>;
 	/** Open, or reveal, one detail tab of the conversation an editor shows. */
 	openDetailTab(tabId: string, mode: SessionViewMode, request: GuestOpenDetailMessage): void;
 	/** Open, or reveal, the diagram tab of a mermaid source. Presentation only: any editor, active or passive, may ask. */
@@ -296,6 +299,30 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		}
 		return registry;
 	};
+
+	/** The drafts the pages save across a window reload, kept by the host in its private store, one record per editor slot (`draft-persistence.ts`). */
+	const drafts = createDraftPersistence({
+		storageDir: () => {
+			const directory: unknown = deps.context()?.globalStorageUri?.fsPath;
+			return typeof directory === "string" ? directory : null;
+		},
+		registryOf: attachedFilesOf,
+		log: deps.log,
+	});
+	/** The documents that have been offered their record, so a page announcing itself again is not sent the same record twice. */
+	const recalledDocuments = new WeakSet<object>();
+	let draftRecallSeq = 0;
+
+	/** Offers a document that has just announced itself the draft its editor saved before its previous page died. */
+	async function recallDraft(slot: string, own: Tab, panel: vscode.WebviewPanel, tabId: string): Promise<void> {
+		const document = own.document;
+		if (document === null || recalledDocuments.has(document)) return;
+		recalledDocuments.add(document);
+		const message = await drafts.recall(slot, tabId, ++draftRecallSeq);
+		// The read took time: the editor may show another document or conversation by now, and the record is not for that one.
+		if (message === null || own.panel !== panel || own.document !== document || own.tabId !== tabId) return;
+		void panel.webview.postMessage(message satisfies GuestHostMessage);
+	}
 
 	async function recalledPrompt(tabId: string, text: string): Promise<GuestRecallPromptMessage> {
 		const split = splitFileBlocks(text);
@@ -576,6 +603,11 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			if (carried?.reply.requestId === parsed.requestId && carried.restoredDocument === own.document) deps.draftRestores().delete(slot);
 			return;
 		}
+		if (parsed.type === "omp:draft-save") {
+			const saved = await drafts.save(slot, tabId, parsed);
+			if (saved !== null && own.panel === panel && own.tabId === tabId) void panel.webview.postMessage(saved satisfies GuestHostMessage);
+			return;
+		}
 		if (parsed.type === "omp:selection-reply") {
 			acceptSelectionReply(slot, panel, parsed);
 			return;
@@ -647,6 +679,11 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 					carried.restoredDocument = own.document;
 					const { requestId, text, attachments, recoverable, documents } = carried.reply;
 					void panel.webview.postMessage({ type: "omp:draft-restore", requestId, text, attachments, recoverable, documents } satisfies GuestDraftRestoreMessage);
+				}
+				if (own.mode === "chat" && own.document?.kind === "guest" && carried === undefined) {
+					void recallDraft(slot, own, panel, tabId).catch(error => {
+						deps.log.warn(`tab ${tabId}: the saved draft could not be offered (${error instanceof Error ? error.message : "error"})`);
+					});
 				}
 				return;
 			}
@@ -804,6 +841,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		captureDraft,
 		carryDraftFrom,
 		releaseCarriedDraft,
+		forgetDraft: slot => drafts.forget(slot),
 		openDetailTab,
 		openMermaidTab,
 		openArtifact,

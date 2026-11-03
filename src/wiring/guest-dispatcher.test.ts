@@ -859,6 +859,120 @@ describe("the draft handoff", () => {
 	});
 });
 
+describe("the draft kept across a window reload", () => {
+	const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+	const image = { number: 1, name: "shot.png", mimeType: "image/png", bytes: PNG.byteLength, data: PNG.toString("base64") };
+	const saving = (saveId: number, extra: Record<string, unknown> = {}) => ({ type: "omp:draft-save", saveId, imagesKey: "", images: [], text: "", attachments: 0, recoverable: [], documents: [], ...extra });
+	const ready = { type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION };
+	let storage = "";
+	beforeEach(async () => { storage = await mkdtemp(join(tmpdir(), "omp-desk-draft-dispatch-")); });
+	afterEach(async () => { await rm(storage, { recursive: true, force: true }); });
+	/** A window whose activation context has a storage folder, like every real one. */
+	const windowWithStorage = () => world({ context: () => ({ globalStorageUri: { fsPath: storage } }) as never });
+	/** The page's posts are made after real file reads: waits, by turns of the event loop, until the page was posted something of `type`. */
+	async function posted(editor: FakeEditor, type: string): Promise<PostedMessage | undefined> {
+		for (let turn = 0; turn < 5_000 && !editor.posted.some(message => message.type === type); turn++) await nextTurn();
+		return editor.posted.find(message => message.type === type);
+	}
+	const CONTROL_SLOT = "slot-control";
+	/** A window that saved a draft for the control editor; once the control gets its record back, every read started before it has finished. */
+	async function withControl(): Promise<void> {
+		const before = windowWithStorage();
+		const old = before.editor(CONTROL_SLOT);
+		await before.dispatcher.handleMessage(index, CONTROL_SLOT, old.panel, saving(1, { text: "control" }));
+	}
+	async function settle(w: ReturnType<typeof windowWithStorage>): Promise<void> {
+		const control = w.editor(CONTROL_SLOT);
+		await w.dispatcher.handleMessage(index, CONTROL_SLOT, control.panel, ready);
+		assert.ok(await posted(control, "omp:draft-recall"));
+	}
+
+	it("keeps what a page saves and acknowledges it with the image set it holds, empty for a draft that is empty", async () => {
+		const w = windowWithStorage();
+		const live = w.editor();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, saving(1, { text: "hello [Image #1]", imagesKey: "1", images: [image] }));
+		assert.deepEqual(live.posted, [{ type: "omp:draft-saved", saveId: 1, imagesKey: "1" }]);
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, saving(2));
+		assert.deepEqual(live.posted.at(-1), { type: "omp:draft-saved", saveId: 2, imagesKey: "" });
+	});
+
+	it("offers the saved draft once to the document of the same editor in a new window, and never to another editor", async () => {
+		await withControl();
+		const before = windowWithStorage();
+		const old = before.editor();
+		await before.dispatcher.handleMessage(index, SLOT, old.panel, saving(1, { text: "draft text", imagesKey: "1", images: [image] }));
+
+		const after = windowWithStorage();
+		const other = after.editor(OTHER_SLOT);
+		await after.dispatcher.handleMessage(index, OTHER_SLOT, other.panel, ready);
+		const live = after.editor();
+		await after.dispatcher.handleMessage(index, SLOT, live.panel, ready);
+		const recall = await posted(live, "omp:draft-recall");
+		assert.ok(recall);
+		assert.deepEqual({ text: recall.text, imagesKey: recall.imagesKey, images: recall.images }, { text: "draft text", imagesKey: "1", images: [image] });
+		await after.dispatcher.handleMessage(index, SLOT, live.panel, ready);
+		await nextTurn();
+		assert.equal(live.posted.filter(message => message.type === "omp:draft-recall").length, 1, "a page announcing itself again is not offered the record twice");
+		await settle(after);
+		assert.equal(other.posted.some(message => message.type === "omp:draft-recall"), false);
+	});
+
+	it("offers nothing to a terminal editor, and nothing when the editor saved nothing", async () => {
+		await withControl();
+		const before = windowWithStorage();
+		const old = before.editor();
+		await before.dispatcher.handleMessage(index, SLOT, old.panel, saving(1, { text: "draft text" }));
+
+		const after = windowWithStorage();
+		const shell = after.editor(SLOT, { mode: "terminal" });
+		await after.dispatcher.handleMessage(index, SLOT, shell.panel, ready);
+		const empty = after.editor(OTHER_SLOT);
+		await after.dispatcher.handleMessage(index, OTHER_SLOT, empty.panel, ready);
+		await settle(after);
+		assert.deepEqual([shell.posted, empty.posted], [[], []]);
+	});
+
+	it("puts back the draft carried from a replaced document, and does not also offer the saved one", async () => {
+		await withControl();
+		const before = windowWithStorage();
+		const old = before.editor();
+		await before.dispatcher.handleMessage(index, SLOT, old.panel, saving(1, { text: "saved text" }));
+
+		const after = windowWithStorage();
+		const live = after.editor();
+		after.state.draftRestores.set(SLOT, {
+			reply: { type: "omp:draft-reply", requestId: 5, captured: true, text: "carried text", attachments: 0, recoverable: [], documents: [] },
+			source: after.editor(OTHER_SLOT).tab, panel: fakePanel().panel, document: guestDocument(), restoredDocument: null,
+		} as never);
+		await after.dispatcher.handleMessage(index, SLOT, live.panel, ready);
+		await settle(after);
+		assert.deepEqual(live.posted.map(message => message.type), ["omp:draft-restore"]);
+	});
+
+	it("deletes the record of an editor the user closed", async () => {
+		await withControl();
+		const before = windowWithStorage();
+		const old = before.editor();
+		await before.dispatcher.handleMessage(index, SLOT, old.panel, saving(1, { text: "draft text" }));
+		await before.dispatcher.forgetDraft(SLOT);
+
+		const after = windowWithStorage();
+		const live = after.editor();
+		await after.dispatcher.handleMessage(index, SLOT, live.panel, ready);
+		await settle(after);
+		assert.equal(live.posted.some(message => message.type === "omp:draft-recall"), false);
+	});
+
+	it("ignores a malformed save and a save from a panel that no longer serves the slot", async () => {
+		const w = windowWithStorage();
+		const live = w.editor();
+		const stale = fakePanel();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, saving(1, { imagesKey: "not a key" }));
+		await w.dispatcher.handleMessage(index, SLOT, stale.panel, saving(2, { text: "stale" }));
+		assert.deepEqual([live.posted, stale.posted], [[], []]);
+	});
+});
+
 /** A page that answers a selection request with `text`, as the editor `sender` names it. */
 const selectionAnswering = (
 	dispatcher: GuestDispatcher<FakeTab>, text: string, sender: () => { slot: string; panel: never },
