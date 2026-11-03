@@ -42,8 +42,13 @@ describe("window registry", () => {
 		directory = path.join(storage, WINDOW_REGISTRY_DIRECTORY);
 	});
 
-	afterEach(() => {
-		for (const registry of registries.splice(0)) registry.dispose();
+	afterEach(async () => {
+		const closing = registries.splice(0);
+		for (const registry of closing) registry.dispose();
+		// A write a test left in flight (a debounced renewal that fired just before the test ended) must land or fail
+		// before the directory is removed under it: otherwise its rename fails with ENOENT and the error is reported
+		// into the next test's `errors`. A disposed registry's flush() answers with the write already in progress.
+		await Promise.all(closing.map(registry => registry.flush()));
 		fs.rmSync(directory, { recursive: true, force: true });
 		clock = BASE;
 		alive.clear();
