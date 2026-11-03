@@ -237,7 +237,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			--vscode-editor-font-family:Consolas, "Courier New", monospace;
 		}</style><script nonce="${nonce}">window.sent=[];window.errors=[];window.addEventListener("error",event=>window.errors.push(event.message));
 		const nativeSet=window.setTimeout.bind(window), nativeClear=window.clearTimeout.bind(window), timers=new Map();let timerId=0;
-		window.setTimeout=(fn,ms,...args)=>{if(ms!==45000&&ms!==35000&&ms!==6000&&ms!==4000&&ms!==120)return nativeSet(fn,ms,...args);const id=--timerId;timers.set(id,{fn,ms,args});return id};
+		// The fixture clock holds a timer by its delay alone. The chat client's pace timer is as long as what is left of its pace window (1 to 150 ms): when that was exactly 120 it
+		// was held for the terminal's 120 ms debounce and never ran, and the reply it carried never reached the page.
+		window.setTimeout=(fn,ms,...args)=>{if(ms!==45000&&ms!==35000&&ms!==6000&&ms!==4000&&(ms!==120||/#notifyLive/.test(new Error().stack||"")))return nativeSet(fn,ms,...args);const id=--timerId;timers.set(id,{fn,ms,args});return id};
 		window.clearTimeout=id=>{if(!timers.delete(id))nativeClear(id)};
 		const nativeInterval=window.setInterval.bind(window), nativeClearInterval=window.clearInterval.bind(window);
 		window.setInterval=(fn,ms,...args)=>{if(ms!==60000&&ms!==1000)return nativeInterval(fn,ms,...args);const id=--timerId;timers.set(id,{fn,ms,args,repeat:true});return id};
