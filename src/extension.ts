@@ -301,6 +301,7 @@ import { parseCommitLinkTarget } from "./shared/commit-links";
 import { handleLinkRuleOpen } from "./host/link-rules";
 import type { LinkRuleSource } from "./host/link-rules";
 import { createWindowLinkRules } from "./wiring/link-rules";
+import { showDeskCommands } from "./wiring/palette-commands";
 import { parseInternalLink } from "./shared/internal-links";
 import {
   createShellSlotId,
@@ -2377,6 +2378,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.clickSession", () => s.sessionActions.clickSelected(context, index)),
     registerDeskCommand("ompDesk.openProcess", () => s.sessionActions.openSelectedProcess(context, index)),
     registerDeskCommand("ompDesk.goToSession", () => s.sessionActions.goTo(context, index)),
+    registerDeskCommand("ompDesk.showCommands", () => showDeskCommands()),
     registerDeskCommand("ompDesk.switchToSessionWindow", (argument: unknown) => s.routing.switchToWindow(index, tabIdArgument(argument))),
     registerDeskCommand("ompDesk.moveSessionHere", (argument: unknown) => moveSessionHere(context, index, argument)),
     registerDeskCommand("ompDesk.moveSessionHere.palette", (argument: unknown) => moveSessionHere(context, index, argument)),
