@@ -232,8 +232,6 @@ interface WindowFixture {
 
 interface Harness {
   reset(index: unknown, chat: unknown): void;
-  installWindow(next: unknown): void;
-  createWindowState(context: unknown): unknown;
   window(): WindowFixture;
   record(state: State): RecordFixture;
   state(tabId: string): State;
@@ -403,7 +401,7 @@ const pages: BridgeClient[] = [];
 
 before(async () => {
   root = await mkdtemp(path.join(tmpdir(), "omp-extension-lifecycle-"));
-  // The entry is the test-only harness module over the entry module's exports (`src/extension-harness.ts`), not `extension.ts` itself.
+  // The entry is the test-only harness module over the window factory (`src/extension-harness.ts`), not `extension.ts` itself.
   const entry = fileURLToPath(new URL("./extension-harness.ts", import.meta.url));
   const outfile = path.join(root, "extension.mjs");
   await build({ entryPoints: [entry], outfile, bundle: true, platform: "node", format: "esm", target: "node22", plugins: [{
@@ -411,7 +409,7 @@ before(async () => {
     setup(builder) {
       builder.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "fixture" }));
       builder.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({ contents: VSCODE, loader: "js", resolveDir: path.dirname(entry) }));
-      builder.onResolve({ filter: /^\.\/(?:host\/)?session-claim(?:\.ts)?$/ }, () => ({ path: "claims", namespace: "claim-fixture" }));
+      builder.onResolve({ filter: /^(?:\.\/(?:host\/)?|\.\.\/host\/)session-claim(?:\.ts)?$/ }, () => ({ path: "claims", namespace: "claim-fixture" }));
       builder.onLoad({ filter: /^claims$/, namespace: "claim-fixture" }, () => ({
         contents: `import { acquireClaim as actual } from ${JSON.stringify(path.join(path.dirname(entry), "host", "session-claim.ts"))};
           export * from ${JSON.stringify(path.join(path.dirname(entry), "host", "session-claim.ts"))};
@@ -423,7 +421,7 @@ before(async () => {
           }`,
         loader: "js", resolveDir: path.dirname(entry),
       }));
-      builder.onResolve({ filter: /^\.\/host\/desktop-notifications$/ }, () => ({ path: "desktop", namespace: "desktop-fixture" }));
+      builder.onResolve({ filter: /^(?:\.\/|\.\.\/)host\/desktop-notifications(?:\.ts)?$/ }, () => ({ path: "desktop", namespace: "desktop-fixture" }));
       builder.onLoad({ filter: /^desktop$/, namespace: "desktop-fixture" }, () => ({
         contents: `import { desktopToastXml } from ${JSON.stringify(path.join(path.dirname(entry), "host", "desktop-notifications.ts"))};
           const xmls = [];
@@ -482,7 +480,7 @@ before(async () => {
         ["rpc-reconcile", "export async function brokerNativeGenerationReader() { return async () => ({ kind: 'gone' }); }"],
         // The root-absence reader is shared by the native and RPC runtime modules.
       ]) {
-        // `extension.ts` and the harness import `./host/<name>`; the runtime layer imports `../host/<name>.ts`: both are the same module.
+        // The harness imports `./host/<name>`, the window factory and the runtime layer `../host/<name>(.ts)`: all are the same module.
         // `control-protocol` moved to src/wire (ADR-0065 A10); the others are still in src/host.
         const folder = name === "control-protocol" ? "wire" : "host";
         builder.onResolve({ filter: new RegExp(`^(?:\\./|\\.\\./)${folder}/${name}(?:\\.ts)?$`) }, () => ({ path: name!, namespace: "native-fixture" }));

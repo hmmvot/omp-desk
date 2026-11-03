@@ -2,16 +2,16 @@
  * The entry `src/extension-lifecycle.test.ts` bundles in place of `extension.ts`. Nothing ships it: `esbuild.mjs` never names it
  * and `extension.ts` never imports it.
  *
- * The lifecycle cases drive private functions of the entry module (`closeSession`, `restoreTabs`, `openTab` through the window's
- * session flows, ...) against the test's stand-ins for `vscode` and the native transports. `extension.ts` exports those
- * functions for this module (see the comment above its first test-only export); this module builds the `harness` object over
- * them, with the fixture state that used to be source text appended to `extension.ts`.
+ * The lifecycle cases drive the operations of a window (`closeSession`, `restoreTabs`, `openTab` through the window's session
+ * flows, ...) against the test's stand-ins for `vscode` and the native transports. A case's `reset` makes one window with
+ * `createWindow` (`src/wiring/window.ts`, the factory `activate` calls too) and the `harness` object forwards each operation to
+ * the window the case currently runs, with the fixture state the cases use set on it.
  *
- * The test's esbuild plugin substitutes the modules `vscode`, `./host/session-claim`, `./host/desktop-notifications`,
- * `./host/native-terminal`, `./host/omp-vscode`, `./host/provider-login-rpc`, `./host/rpc-launch`, `./host/control-client`,
- * `./wire/control-protocol` and `./host/rpc-reconcile` by their import specifiers, so this module imports them with the same
- * specifiers `extension.ts` does and gets the same substituted instances. The fixture members those substitutes add to their
- * modules are read through a cast (they are not exports of the real modules).
+ * The test's esbuild plugin substitutes the modules `vscode`, `session-claim`, `desktop-notifications`, `native-terminal`,
+ * `omp-vscode`, `provider-login-rpc`, `rpc-launch`, `control-client`, `control-protocol` and `rpc-reconcile` by their import
+ * specifiers (from `src/`, `src/host/` and `src/wiring/`), so this module imports them with the specifiers `src/` files use and gets
+ * the same substituted instances. The fixture members those substitutes add to their modules are read through a cast (they are not
+ * exports of the real modules).
  */
 import type * as vscode from "vscode";
 import * as fixtureVscodeModule from "vscode";
@@ -25,6 +25,7 @@ import { startClaimWatch } from "./host/claim-watch";
 import { HostControlClient } from "./host/control-client";
 import { DetailTabs } from "./host/detail-tabs";
 import type { ChatRuntime } from "./host/chat-runtime";
+import { HelperScheduler } from "./host/helper-scheduler";
 import { createOwnerReconciler } from "./host/rpc-reconcile";
 import { SessionIndex, type OmpHostLauncher } from "./host/session-index";
 import { createShellSlotId, createShellSlotStore } from "./host/shell-slots";
@@ -33,20 +34,7 @@ import { LocalRecordedStop } from "./runtime/local-recorded-stop";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
 import { registerEditorPanels, type EditorPanelsDeps } from "./wiring/editor-panels";
 import { registerSessionActions } from "./wiring/session-actions";
-import {
-  activateNativeEditor, attachChatRoute, chooseDefaultSessionView, closeSession, copyActiveTerminalScreen, createSessionRuntime,
-  createWindowState, defaultSessionMode, deleteSessionInPlace, editorPanelsDeps, forgetTurnActivity, handOverSession,
-  handleBridgeRequest, handleChatEvent, handleGuestControlRequest, handlePassiveSlotMessage, handleRestoreOutcome,
-  handleShellEditorClosed, handleTerminalGuestMessage, installWindowForTest, launcherFacts, launcherOwnershipFacts,
-  localLauncher, loginProviderFromPalette, logoutProviderFromPalette, newSession, newSessionInPlace, newTabState,
-  notifierFor, openProviderLogin, openSession, panelResponder, passiveReasonForSlot, postPanelAction, presentRestoreOutcome,
-  pushSessionView, quoteEditorSelectionToSession, readChatDisplayPreferences, recordFor, recordSessionModels, refreshChatDisplayPreferences,
-  refreshDefaultProviderModels, refreshLauncher, refreshRowsForClaims, refreshSessionModels, releaseSelectionFromOtherWindow,
-  reloadSession, renameSession, requestSessionRowExpand, restoreTabs, resumeWorkspaceFolder, revealActiveSession,
-  revealDesktopNotification, reviveEditorPanel, runChatAction, sessionActionsDeps, sessionRuntimeDeps, signInProvider,
-  startNewSession, subscribeProviderLoginRefresh, tabState, terminalFontMessage, windowState,
-} from "./extension";
-import type { TabState, WindowState } from "./extension";
+import { createWindow, type DeskWindow, type TabState, type WindowState } from "./wiring/window";
 
 // The ids the lifecycle test's fixtures use for its one editor: the same values as `EDITOR`, `TAB` and `DOCUMENT` there.
 const EDITOR = "b".repeat(32);
@@ -85,7 +73,7 @@ const fixtureVscode = fixtureVscodeModule as unknown as FakeVscode;
 
 /** The window's state with its `readonly` fields assignable: the fixture replaces pieces a real window builds once. */
 type MutableWindow = { -readonly [K in keyof WindowState]: WindowState[K] };
-const mutableWindow = (): MutableWindow => windowState();
+const mutableWindow = (): MutableWindow => current.state;
 
 // The members the test's substitutes add beside the real exports of the modules they replace.
 const claimFixture = claimModule as unknown as { setClaimFailures(codes: string[]): void };
@@ -95,14 +83,76 @@ const { providerAuthFixture } = providerLoginRpcModule as unknown as { providerA
 
 // The harness runs windows without an activation context: the cases that need one set it on the window.
 const fixtureContext = undefined as never;
+// The helper scheduler of a fixture window has no restore to wait for and no cross-window slots: a helper run starts as soon as it is asked for.
+const silentLog = { error() {}, warn() {}, info() {}, debug() {}, trace() {} };
+const newWindow = (): DeskWindow => createWindow({ context: fixtureContext, helpers: new HelperScheduler({ log: silentLog, backgroundGate: Promise.resolve(), backgroundSettleMs: 0 }) });
+// The window the running case drives. A window is made from the start, so a case that reaches an internal before its first reset still has one.
+let current = newWindow();
+type Ops = DeskWindow["ops"];
+/** The harness members that call an operation of the window the case currently runs, with the arguments the commands pass it. */
+const forwarded = <K extends keyof Ops>(...names: K[]): Pick<Ops, K> =>
+  Object.fromEntries(names.map(name => [name, (...args: never[]) => (current.ops[name] as Hook)(...args)])) as Pick<Ops, K>;
 // The chat runtime the case built; the runtime and its launcher are constructed from it.
 let fixtureChat = undefined as never as ChatRuntime;
-const fixtureWindow = (): WindowState => windowState();
+const fixtureWindow = (): WindowState => current.state;
 type Flows = WindowState["sessionFlows"];
 type Control = WindowState["sessionRuntime"]["control"];
 
 export const harness = {
-  closeSession, presentRestoreOutcome, handOverSession, handleChatEvent, restoreTabs,
+  // The operations of the current window (`createWindow(...).ops`), called with the arguments the commands pass.
+  ...forwarded(
+    "closeSession",
+    "presentRestoreOutcome",
+    "handOverSession",
+    "handleChatEvent",
+    "restoreTabs",
+    "handleRestoreOutcome",
+    "renameSession",
+    "reloadSession",
+    "handleGuestControlRequest",
+    "panelResponder",
+    "defaultSessionMode",
+    "chooseDefaultSessionView",
+    "newSession",
+    "startNewSession",
+    "resumeWorkspaceFolder",
+    "newSessionInPlace",
+    "deleteSessionInPlace",
+    "handleTerminalGuestMessage",
+    "pushSessionView",
+    "handleShellEditorClosed",
+    "terminalFontMessage",
+    "revealDesktopNotification",
+    "revealActiveSession",
+    "releaseSelectionFromOtherWindow",
+    "refreshLauncher",
+    "launcherFacts",
+    "notifierFor",
+    "forgetTurnActivity",
+    "copyActiveTerminalScreen",
+    "activateNativeEditor",
+    "postPanelAction",
+    "handleBridgeRequest",
+    "subscribeProviderLoginRefresh",
+    "refreshDefaultProviderModels",
+    "refreshSessionModels",
+    "recordSessionModels",
+    "runChatAction",
+    "openProviderLogin",
+    "loginProviderFromPalette",
+    "signInProvider",
+    "logoutProviderFromPalette",
+    "handlePassiveSlotMessage",
+    "passiveReasonForSlot",
+    "readChatDisplayPreferences",
+    "refreshChatDisplayPreferences",
+    "attachChatRoute",
+    "reviveEditorPanel",
+    "openSession",
+    "requestSessionRowExpand",
+    "launcherOwnershipFacts",
+    "refreshRowsForClaims",
+  ),
   // The session flows live in the window's sessionFlows handle (wiring/session-flows.ts); these adapters keep the cases' argument shapes.
   openTab: (...args: Parameters<Flows["openTab"]>) => fixtureWindow().sessionFlows.openTab(...args),
   switchSessionMode: (...args: Parameters<Flows["switchSessionMode"]>) => fixtureWindow().sessionFlows.switchSessionMode(...args),
@@ -112,38 +162,27 @@ export const harness = {
   connectHostControl: (context: vscode.ExtensionContext, _index: unknown, ...args: Parameters<Control["connect"]>) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.connect(...args); },
   reconnectHostControl: (context: vscode.ExtensionContext, _index: unknown, ...args: Parameters<Control["reconnect"]>) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.reconnect(...args); },
   establishControl: (context: vscode.ExtensionContext, _index: unknown, ...args: Parameters<Control["establish"]>) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.establish(...args); },
-  startNativeWatch: (_index: unknown, state: TabState, native: Parameters<WindowState["sessionRuntime"]["nativeWatch"]["start"]>[1]) => fixtureWindow().sessionRuntime.nativeWatch.start(recordFor(state), native),
-  handleNativeHostExited: (_index: unknown, state: TabState, native: Parameters<WindowState["sessionRuntime"]["exit"]["nativeExited"]>[1]) => fixtureWindow().sessionRuntime.exit.nativeExited(recordFor(state), native),
+  startNativeWatch: (_index: unknown, state: TabState, native: Parameters<WindowState["sessionRuntime"]["nativeWatch"]["start"]>[1]) => fixtureWindow().sessionRuntime.nativeWatch.start(current.ops.recordFor(state), native),
+  handleNativeHostExited: (_index: unknown, state: TabState, native: Parameters<WindowState["sessionRuntime"]["exit"]["nativeExited"]>[1]) => fixtureWindow().sessionRuntime.exit.nativeExited(current.ops.recordFor(state), native),
   bindConversationIdentity: (_index: unknown, ...args: Parameters<WindowState["sessionRuntime"]["identity"]["bind"]>) => fixtureWindow().sessionRuntime.identity.bind(...args),
   retryPendingIdentity: (_index: unknown, tabId: string) => fixtureWindow().sessionRuntime.identity.retry(tabId),
   /** The runtime's record of the conversation an editor shows: its process, control channel, fence and failure. */
-  record: recordFor,
-  handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
-  defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
-  resumeWorkspaceFolder, newSessionInPlace, deleteSessionInPlace,
+  record: (state: TabState) => current.ops.recordFor(state),
   panelFactory(handler: EditorPanelsDeps<TabState>["createWebviewPanel"]) {
     const w = fixtureWindow(), previous = w.editorPanels;
-    w.editorPanels = registerEditorPanels({ ...editorPanelsDeps(), createWebviewPanel: handler });
+    w.editorPanels = registerEditorPanels({ ...current.ops.editorPanelsDeps(), createWebviewPanel: handler });
     return () => { w.editorPanels = previous; };
   },
-  // The helper scheduler of a window the fixture installs has no restore to wait for and no cross-window slots: see `installWindowForTest`.
-  installWindow: installWindowForTest,
-  window: (): WindowState => windowState(),
+  window: (): WindowState => current.state,
   holdStartupRestore() {
     const w = mutableWindow(), over = Promise.withResolvers<void>();
     let pending = true;
     w.catalogAdoption = { ...w.catalogAdoption, startupRestoreOver: () => pending ? over.promise : null };
     return { end() { pending = false; over.resolve(); } };
   },
-  createWindowState,
-  localLauncher: (context: vscode.ExtensionContext, index: SessionIndex) => localLauncher(context, index, fixtureChat), handleTerminalGuestMessage,
-  startConversation: (index: SessionIndex, ...args: Parameters<LocalLauncher["startConversation"]>) => localLauncher(fixtureWindow().context as vscode.ExtensionContext, index, fixtureChat).startConversation(...args),
-  pushSessionView, handleShellEditorClosed,
+  localLauncher: (context: vscode.ExtensionContext, index: SessionIndex) => current.ops.localLauncher(context, index, fixtureChat),
+  startConversation: (index: SessionIndex, ...args: Parameters<LocalLauncher["startConversation"]>) => current.ops.localLauncher(fixtureWindow().context as vscode.ExtensionContext, index, fixtureChat).startConversation(...args),
   SessionTreeProvider,
-  terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
-  copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
-  handleBridgeRequest,
-  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette, signInProvider, logoutProviderFromPalette,
   providerLoginFixture, providerAuthFixture,
   storedRenameFixture,
   providerModelsIdle: () => fixtureWindow().defaultProviderModelsRead ?? Promise.resolve(),
@@ -160,21 +199,19 @@ export const harness = {
     return () => { fixtureVscode.window.showInputBox = previous; };
   },
   sessionModelAvailability: (tabId: string) => fixtureWindow().footerBindings.get(tabId)?.message.hasAvailableModels,
-  handlePassiveSlotMessage, passiveReasonForSlot,
   footerIdle: () => Promise.all([...fixtureWindow().footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
   restoredDraft: (slot: string) => fixtureWindow().draftRestores.get(slot)?.reply ?? null,
-  readChatDisplayPreferences, refreshChatDisplayPreferences,
   configurationWrites: () => fixtureVscode.workspace.configurationWrites,
   openedDocuments: () => fixtureVscode.window.openedDocuments,
   quickPicks: () => fixtureVscode.window.quickPicks,
   shellContext(cwd: string, panel: vscode.WebviewPanel) {
-    const slot = createShellSlotId(), state = newTabState(slot);
+    const slot = createShellSlotId(), state = current.ops.newTabState(slot);
     state.shellSlot = slot; state.panel = panel; fixtureWindow().tabs.set(slot, state);
     fixtureWindow().shellSlots = { get: (key: string) => key === slot ? { cwd } : null } as never;
     return { slot, state };
   },
   async shellFixture(cwd: string, panel: vscode.WebviewPanel, liveness: string) {
-    const slot = createShellSlotId(), state = newTabState(slot), values = new Map<string, unknown>(), w = fixtureWindow();
+    const slot = createShellSlotId(), state = current.ops.newTabState(slot), values = new Map<string, unknown>(), w = fixtureWindow();
     state.shellSlot = slot; state.panel = panel; w.tabs.set(slot, state);
     w.shellSlots = createShellSlotStore({ get: (key: string) => values.get(key), update: async (key: string, value: unknown) => { values.set(key, value); } } as never);
     await w.shellSlots.add({ slot, cwd, folderKey: cwd, label: "Project terminal" } as never);
@@ -183,7 +220,7 @@ export const harness = {
   },
   hostGeneration: () => fixtureWindow().bridgeHost.hostGeneration,
   clipboardWrites: () => fixtureVscode.env.clipboard.writes,
-  quotePreviewSelection: (index: SessionIndex) => quoteEditorSelectionToSession(fixtureContext, index),
+  quotePreviewSelection: (index: SessionIndex) => current.ops.quoteEditorSelectionToSession(fixtureContext, index),
   setActiveTab: (tab: unknown) => { fixtureVscode.window.tabGroups.activeTabGroup.activeTab = tab; },
   customTabInput: (viewType: string, fsPath: string) => { const input = new fixtureVscode.TabInputCustom(); input.viewType = viewType; input.uri = { scheme: "file", fsPath }; return input; },
   webviewTabInput: (viewType: string) => { const input = new fixtureVscode.TabInputWebview(); input.viewType = viewType; return input; },
@@ -212,7 +249,7 @@ export const harness = {
   configuration(values: Record<string, unknown>) { fixtureVscode.workspace.configurationValues = values; },
   editorLifecycle() {
     const w = fixtureWindow(), previous = w.editorPanels;
-    w.editorPanels = registerEditorPanels(editorPanelsDeps());
+    w.editorPanels = registerEditorPanels(current.ops.editorPanelsDeps());
     // Bridge bootstrap is covered by real sockets separately; these cases drive editor identity, disposal and runtime
     // delivery through the ordinary panel route. The window's own bridge host (and so its host generation) stays
     // installed and runs its real endpoint creation; only the listener is faked, and it never binds. The factory is not
@@ -240,7 +277,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge as SessionIndex, fixtureChat, () => hostLauncher, w.sessionRuntime.records);
+    const runtimeDeps = current.ops.sessionRuntimeDeps(w.indexForBridge as SessionIndex, fixtureChat, () => hostLauncher, w.sessionRuntime.records);
     // The broker facts of the fixture's rows come in through the runtime's deps, not by reassigning a function of the module.
     w.sessionRuntime = new LocalSessionRuntime({
       ...runtimeDeps,
@@ -253,14 +290,14 @@ export const harness = {
       }),
     });
     w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
-    w.sessionActions = registerSessionActions(sessionActionsDeps());
+    w.sessionActions = registerSessionActions(current.ops.sessionActionsDeps());
     const dialogs: { message: unknown; detail: unknown; action: unknown }[] = [];
     fixtureVscode.window.showWarningMessage = async (message: unknown, options: { detail?: string } | undefined, action: unknown) => { dialogs.push({ message, detail: options?.detail, action }); return action; };
     fixtureVscode.window.showInputBox = async () => "Recovered draft title";
     return dialogs;
   },
-  attachChatRoute, state: tabState,
-  reviveEditorPanel, openSession, requestSessionRowExpand, viewTypeOf: bridgeViewType,
+  state: (key: string) => current.ops.tabState(key),
+  viewTypeOf: bridgeViewType,
   tabStrip(columns: string[][], activeColumn = 0) {
     // One group per column; each entry is the view type of one webview editor tab.
     const groups = columns.map((viewTypes, at) => {
@@ -277,13 +314,14 @@ export const harness = {
   bindRevived(slot: string, panel: vscode.WebviewPanel) { const w = fixtureWindow(); w.tabs.get(slot)!.panel = panel; for (const resolve of w.panelBindWaiters.get(slot) ?? []) resolve(); },
   markPageRunning(slot: string) { fixtureWindow().bridgeLiveEditors.add(slot); },
   controlClient: HostControlClient,
-  SessionIndex, acquireClaim: claimModule.acquireClaim, createClaimHolder: claimModule.createClaimHolder, launcherOwnershipFacts, refreshRowsForClaims, startClaimWatch,
+  SessionIndex, acquireClaim: claimModule.acquireClaim, createClaimHolder: claimModule.createClaimHolder, startClaimWatch,
   setClaimFailures: claimFixture.setClaimFailures,
   reset(index: SessionIndex, conversation: ChatRuntime) {
-    installWindowForTest(createWindowState(fixtureContext));
+    current.dispose();
+    current = newWindow();
     const w = mutableWindow();
     fixtureChat = conversation;
-    w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation);
+    w.indexForBridge = index; w.sessionRuntime = current.ops.createSessionRuntime(index, conversation);
     // The fixture's window has no startup restore to wait for: the pass is over and covers no row.
     w.catalogAdoption = { ...w.catalogAdoption, startupRestoreSettled: () => true, startupRestoreOver: () => null, startupRestore: () => null, restoreCovers: () => false, startupCovers: () => false };
     w.detailTabs = new DetailTabs({ createPanel() { throw new Error("the fixture opens no detail tab"); }, attachPage: () => () => {}, handleMessage: async () => ({ status: "refused" }), openUrl: async () => {}, openMermaid() {}, log() {} } as never);
@@ -306,7 +344,7 @@ export const harness = {
     w.rootGone = async () => false;
   },
   editor(index: unknown, endpoint: unknown, panel: unknown, editorId = EDITOR, tabId = TAB) {
-    const state = newTabState(editorId); state.tabId = tabId; state.panel = panel as vscode.WebviewPanel;
+    const state = current.ops.newTabState(editorId); state.tabId = tabId; state.panel = panel as vscode.WebviewPanel;
     state.bridge = { editorId, endpoint, documentId: DOCUMENT, bound: true } as never;
     state.document = { kind: "guest", bridgeDocumentId: DOCUMENT } as never;
     const w = fixtureWindow();
@@ -316,5 +354,3 @@ export const harness = {
     return state;
   },
 };
-// A window is installed from the start, so a case that reaches an internal before its first reset still has one.
-installWindowForTest(createWindowState(fixtureContext));
