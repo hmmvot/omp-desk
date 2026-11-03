@@ -564,6 +564,7 @@ ${ANSI_STYLES}
 .omp-overview-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 2px 24px; font-size: 11px; }
 .omp-overview-actions [aria-disabled="true"] { opacity: 0.5; cursor: default; text-decoration: none; }
 .omp-overview-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.omp-overview-time { flex: none; font-size: 11px; font-variant-numeric: tabular-nums; }
 .omp-overview-member { border-left: 1px solid var(--omp-border); margin-left: 12px; padding-left: 6px; }
 .omp-native-event { color: var(--omp-muted); font-size: 12px; padding: 6px 0; overflow-wrap: anywhere; }
 .omp-native-skill header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }

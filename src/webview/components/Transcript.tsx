@@ -52,7 +52,7 @@ import { CHAT_TEXT_MENU_CONTEXT } from "../../shared/quote-menu";
 import { sentTextOf } from "../lib/file-block-rows";
 import { requestPanelAction } from "../lib/panel-actions";
 import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
-import { peekToolView, recordObservedToolMs, resetAllToolViews, useToolViewVersion } from "../lib/tool-view-state";
+import { peekToolView, recordObservedToolSpan, resetAllToolViews, useToolViewVersion } from "../lib/tool-view-state";
 import type { BranchPoint } from "../../chat/rewind";
 import { BranchPointMarker } from "./Rewind";
 import { useTranscriptFind } from "./TranscriptFind";
@@ -286,7 +286,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const watchedTools = useRef(new Map<string, number>());
 	useEffect(() => {
 		const now = Date.now();
-		for (const [id, startedAt] of watchedTools.current) if (!activeTools.has(id)) { recordObservedToolMs(id, now - startedAt); watchedTools.current.delete(id); }
+		for (const [id, startedAt] of watchedTools.current) if (!activeTools.has(id)) { recordObservedToolSpan(id, startedAt, now); watchedTools.current.delete(id); }
 		// Only a call whose start was seen has a measurable duration: one first seen at an update began earlier than `startedAt` says.
 		for (const tool of activeTools.values()) if (tool.startObserved === true && !watchedTools.current.has(tool.toolCallId)) watchedTools.current.set(tool.toolCallId, tool.startedAt);
 	}, [activeTools]);

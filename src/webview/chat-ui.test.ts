@@ -963,6 +963,52 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.match(await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-body').textContent"), /Canonical source output/);
 		});
 
+		await t.test("a group's header says how long its calls worked: derived from saved timestamps (≈), nothing when short, ticking while they run and exact once this page watched them", async () => {
+			await reset("paseo-group-time");
+			const text = (selector: string): Promise<string | null> => ui.evaluate(`document.querySelectorAll(${JSON.stringify(selector)})[0]?.textContent ?? null`);
+			// Three calls of one message ran side by side (results 2 s, 5 s and 3 s after it): the group took 5 s, not the 10 s sum. A second group of two quick calls says nothing.
+			await ui.evaluate(`(()=>{
+			 const row=(id,at,message)=>({type:'message',id,parentId:null,timestamp:new Date(at).toISOString(),message});
+			 const call=(group,name)=>({type:'toolCall',id:group+name,name:'bash',arguments:{command:'echo '+name}});
+			 const result=(group,name,at)=>row(group+name+'-result',at,{role:'toolResult',toolCallId:group+name,toolName:'bash',timestamp:at,isError:false,content:[{type:'text',text:name}]});
+			 const entries=[
+			  row('slow-call',1000000,{role:'assistant',timestamp:999000,model:'m',stopReason:'toolUse',content:['a','b','c'].map(name=>call('slow-',name))}),
+			  result('slow-','a',1002000),result('slow-','b',1005000),result('slow-','c',1003000),
+			  row('between',1006000,{role:'assistant',timestamp:1005500,model:'m',stopReason:'stop',content:[{type:'text',text:'Now two quick ones'}]}),
+			  row('quick-call',2000000,{role:'assistant',timestamp:1999000,model:'m',stopReason:'toolUse',content:['a','b'].map(name=>call('quick-',name))}),
+			  result('quick-','a',2000100),result('quick-','b',2000300)];
+			 window.ui.push({entries,durableCount:entries.length,working:false,settled:true});
+			})()`);
+			await ui.wait("document.querySelectorAll('.omp-overview-head').length===2");
+			assert.equal(await text(".omp-overview-time"), "≈ 5.00 s");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-overview-head')[0].title"), "Ran 3 commands · ≈ 5.00 s");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-overview-head')[1].querySelector('.omp-overview-time')"), null, "a short total is not said");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-overview-head')[1].title"), "Ran 2 commands");
+			// Two calls this page saw start 4 s ago: the header counts from them and moves on the page's shared second tick (the fixture's clock), with no ≈.
+			await ui.evaluate(`(()=>{
+			 window.fixtureClock.setNow(1800000000000);
+			 const calls=['a','b'].map(name=>({type:'toolCall',id:'live-'+name,name:'bash',arguments:{command:'sleep '+name}}));
+			 const startedAt=1800000000000-4000;
+			 window.liveGroup={calls};
+			 window.ui.push({entries:[],working:true,stream:{messageId:'time-stream',message:{role:'assistant',timestamp:10,model:'m',stopReason:'toolUse',content:calls}},activeTools:calls.map(call=>({toolCallId:call.id,toolName:'bash',args:call.arguments,startedAt,startObserved:true}))});
+			})()`);
+			await ui.wait("document.querySelector('.omp-overview-time')?.textContent==='4.00 s'");
+			await ui.evaluate("window.fixtureClock.setNow(1800000003000);window.fixtureClock.fire(1000)");
+			await ui.wait("document.querySelector('.omp-overview-time')?.textContent==='7.00 s'");
+			// Both calls finish: the page watched them, so the total stays exact (no ≈), and a settled group no longer moves.
+			await ui.evaluate(`(()=>{
+			 const {calls}=window.liveGroup;const at=1800000003000;
+			 const row=(id,ts,message)=>({type:'message',id,parentId:null,timestamp:new Date(ts).toISOString(),message});
+			 const entries=[row('live-call',at-3500,{role:'assistant',timestamp:at-4500,model:'m',stopReason:'toolUse',content:calls}),
+			  ...calls.map(call=>row(call.id+'-result',at,{role:'toolResult',toolCallId:call.id,toolName:'bash',timestamp:at,isError:false,content:[{type:'text',text:'done'}]}))];
+			 window.ui.push({entries,durableCount:entries.length,stream:null,working:false,settled:true,activeTools:[]});
+			})()`);
+			await ui.wait("!document.querySelector('.omp-overview-head .codicon-modifier-spin') && document.querySelector('.omp-overview-time')?.textContent==='7.00 s'");
+			await ui.evaluate("window.fixtureClock.setNow(1800000060000);window.fixtureClock.fire(1000)");
+			assert.equal(await text(".omp-overview-time"), "7.00 s", "a settled group does not tick on");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("global density changes preserve focused tool headers and native selected detail both ways without opening manual disclosures", async () => {
 			await reset("paseo-density-interaction", "detailed");
 			await ui.evaluate(`(()=>{

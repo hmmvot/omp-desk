@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chat: a tool group's header shows how long its calls took.** `Edited 2 files · Ran 3 commands · 1 failed` now ends with the time, for example `12.4 s`: the time during which at least one call of the group was running, so calls that ran in parallel count once, calls that ran in sequence add up, and the pause between two calls (the model deciding on the next one) is not counted. A running group counts up every second; a time worked out from the saved timestamps is marked `≈`, as a call's own time is, and a group whose time is not known (a call whose result was not saved, one this window saw only after it had started) or is 1.5 seconds or less shows none.
+
 ## [0.4.15] - 2026-10-30
 
 ### Fixed

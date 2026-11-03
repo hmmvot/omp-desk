@@ -7,6 +7,7 @@
  * changes (`Ctrl+O`, `Ctrl+Shift+O`: a new default for every card), and the store is bounded.
  */
 import { useCallback, useState, useSyncExternalStore } from "react";
+import type { ObservedSpan } from "../../chat/tool-group-time";
 
 /** How far one tree of rows is folded: its containers at this depth and deeper are closed (`null`: the tree's own default), except the rows in `toggled`, which are the other way round. */
 export interface FoldState {
@@ -86,18 +87,33 @@ export function useToolViewState(key: string | undefined): readonly [ToolViewSta
 }
 
 const MAX_OBSERVED = 500;
-const observed = new Map<string, number>();
+const observed = new Map<string, ObservedSpan>();
+let observedVersion = 0;
 
-/** A page that watched call `callId` run says how long it took: exact, where a result's timestamps only give an approximation. */
-export function recordObservedToolMs(callId: string, ms: number): void {
-	if (!Number.isFinite(ms) || ms < 0) return;
+/** A page that watched call `callId` run says when it started and ended, on the page's clock: exact, where a result's timestamps only give an approximation. */
+export function recordObservedToolSpan(callId: string, start: number, end: number): void {
+	if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return;
 	observed.delete(callId);
-	observed.set(callId, Math.round(ms));
+	observed.set(callId, { start, end });
 	while (observed.size > MAX_OBSERVED) observed.delete(observed.keys().next().value!);
+	observedVersion++;
 	emit();
+}
+
+/** When this page saw call `callId` start and end, if it watched it run. */
+export function peekObservedToolSpan(callId: string): ObservedSpan | undefined {
+	return observed.get(callId);
 }
 
 /** How long call `callId` took, if this page watched it run. */
 export function useObservedToolMs(callId: string | undefined): number | undefined {
-	return useSyncExternalStore(subscribe, () => callId === undefined ? undefined : observed.get(callId), () => undefined);
+	return useSyncExternalStore(subscribe, () => {
+		const span = callId === undefined ? undefined : observed.get(callId);
+		return span === undefined ? undefined : Math.round(span.end - span.start);
+	}, () => undefined);
+}
+
+/** Changes whenever this page records a watched call, so a component that reads {@link peekObservedToolSpan} for many calls redraws then and only then. */
+export function useObservedToolVersion(): number {
+	return useSyncExternalStore(subscribe, () => observedVersion, () => 0);
 }
