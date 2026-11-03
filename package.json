@@ -353,6 +353,7 @@
         "ompDesk.moveFileToNewWindow",
         "ompDesk.newSession",
         "ompDesk.resumeWorkspaceFolder",
+        "ompDesk.showCommands",
         "omp.focusComposer",
         "omp.goToSession",
         "omp.moveFileToNewWindow",
@@ -459,13 +460,13 @@
       {
         "command": "ompDesk.addWorkspaceFolder",
         "enablement": "!ompDesk.catalogPending",
-        "title": "Add Folder",
+        "title": "Add Folder to Sessions",
         "category": "OMP Desk",
         "icon": "$(new-folder)"
       },
       {
         "command": "ompDesk.chooseSessionsLayout",
-        "title": "Sessions: Choose Layout…",
+        "title": "Choose Sessions Layout…",
         "category": "OMP Desk",
         "icon": "$(list-flat)"
       },
@@ -607,7 +608,8 @@
       },
       {
         "command": "ompDesk.copyTerminalScreen",
-        "title": "Copy screen",
+        "enablement": "ompDesk.sessionMode == terminal",
+        "title": "Copy Terminal Screen",
         "category": "OMP Desk",
         "icon": "$(copy)"
       },
@@ -621,6 +623,11 @@
       {
         "command": "ompDesk.moveFileToNewWindow",
         "title": "Toggle Files Window Next to Chat",
+        "category": "OMP Desk"
+      },
+      {
+        "command": "ompDesk.showCommands",
+        "title": "Show Commands",
         "category": "OMP Desk"
       },
       {
@@ -674,14 +681,14 @@
       {
         "command": "ompDesk.selectModel",
         "enablement": "ompDesk.sessionMode != terminal",
-        "title": "Select Host Model",
+        "title": "Select Session Model…",
         "category": "OMP Desk",
         "icon": "$(symbol-class)"
       },
       {
         "command": "ompDesk.selectThinking",
         "enablement": "ompDesk.sessionMode != terminal",
-        "title": "Select Host Thinking Level",
+        "title": "Select Session Thinking Level…",
         "category": "OMP Desk",
         "icon": "$(lightbulb)"
       },
@@ -1174,6 +1181,94 @@
         },
         {
           "command": "ompDesk.fileLink.revealInOs",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.openSession",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.openSessionInChat",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.openSessionInTerminal",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.switchToSessionWindow",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.stopSessionHost",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.renameSession",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.closeSession",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.reloadSession",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.forgetSession",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.deleteSession",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.pinWorkspaceFolder",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.unpinWorkspaceFolder",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.reconnectTerminal",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.refreshSkills",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.refreshTools",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.refreshMcp",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.refreshExtensions",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.sendPrompt",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.searchSymbolFromChat",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.searchFileFromChat",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.showHostControls",
+          "when": "false"
+        },
+        {
+          "command": "ompDesk.copyTools",
           "when": "false"
         },
         {
@@ -1670,6 +1765,11 @@
         "command": "ompDesk.resumeWorkspaceFolder",
         "key": "ctrl+alt+r",
         "mac": "cmd+alt+r"
+      },
+      {
+        "command": "ompDesk.showCommands",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
       },
       {
         "command": "ompDesk.sendPrompt",

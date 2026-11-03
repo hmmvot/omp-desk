@@ -60,10 +60,11 @@ export function terminalCopyChord(event: TerminalKeyEventLike, hasSelection: boo
  * - Ctrl+Alt+N, `OMP Desk: New Session`, and Ctrl+Alt+R, `OMP Desk: Resume Session`: encoded as Escape then Ctrl+N or Ctrl+R,
  *   which OMP would read as Alt+Ctrl+N and Alt+Ctrl+R; its documented defaults bind neither (Ctrl+R is history search,
  *   Alt+R retries). Ctrl+Alt+Shift+R above is the different Redraw Terminal chord.
+ * - Ctrl+Alt+P, `OMP Desk: Show Commands`: encoded as Escape then Ctrl+P, which OMP would read as Alt+Ctrl+P; OMP's sources bind no such chord.
  */
 export function isTerminalWorkbenchChord(event: TerminalKeyEventLike): boolean {
 	if (!(event.ctrlKey || event.metaKey)) return false;
-	if (!event.shiftKey) return event.altKey && (isPhysicalKey(event, "KeyQ") || isPhysicalKey(event, "KeyN") || isPhysicalKey(event, "KeyR"));
+	if (!event.shiftKey) return event.altKey && (isPhysicalKey(event, "KeyQ") || isPhysicalKey(event, "KeyN") || isPhysicalKey(event, "KeyR") || isPhysicalKey(event, "KeyP"));
 	return event.altKey ? isPhysicalKey(event, "KeyR") : isPhysicalKey(event, "KeyL") || isPhysicalKey(event, "KeyM");
 }
 

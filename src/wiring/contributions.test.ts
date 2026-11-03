@@ -68,6 +68,7 @@ if (typeof module.registerHooks === "function") {
 
 const sessionTree = await import("../views/session-tree.ts");
 const { ContextTreeProvider } = await import("../views/context-tree.ts");
+const { DESK_COMMANDS_QUERY } = await import("./palette-commands.ts");
 const { InventoryTreeProvider } = await import("../views/inventory-tree.ts");
 const { projectContext } = await import("../host/context/context-model.ts");
 const { projectView } = await import("../wire/inventory/inventory-model.ts");
@@ -83,7 +84,7 @@ interface PackageJson {
 	readonly contributes: {
 		readonly commands: readonly CommandDeclaration[];
 		readonly menus: Readonly<Record<string, readonly MenuEntry[]>>;
-		readonly keybindings: readonly { readonly command: string; readonly key?: string; readonly when?: string }[];
+		readonly keybindings: readonly { readonly command: string; readonly key?: string; readonly mac?: string; readonly when?: string }[];
 		readonly views: Readonly<Record<string, readonly ViewDeclaration[]>>;
 		readonly viewsContainers: Readonly<Record<string, readonly { readonly id: string }[]>>;
 		readonly viewsWelcome: readonly { readonly view: string; readonly when?: string; readonly contents: string }[];
@@ -644,7 +645,13 @@ describe("the palette", () => {
 		return palettePass;
 	}
 
-	it("hides only what needs a row or an editor, and everything it hides is reachable another way", async () => {
+	/** Hidden commands that no menu, key, welcome link or row runs: they stay registered for a user keybinding or another extension that names the id. Each says why it is not offered. */
+	const INTERNAL_COMMANDS = new Map<string, string>([
+		["ompDesk.showHostControls", "a diagnostic aid: it logs the active session's model, host instance and session file and shows the model in a notice"],
+		["ompDesk.copyTools", "a diagnostic aid: it copies the active session's tool names for a bug report"],
+	]);
+
+	it("hides only what needs a row or an editor, and everything it hides is reachable another way or is listed as internal", async () => {
 		const { executed } = await runPalette();
 		const rowCommands = new Set([...(await producedByView()).values()].flat().flatMap(row => (row.command === undefined ? [] : [row.command])));
 		const reachable = new Set<string>([
@@ -655,8 +662,36 @@ describe("the palette", () => {
 			...executed,
 		]);
 		assert.deepEqual([...hiddenFromPalette].filter(id => !declared.has(id)), [], "hidden from the palette but not declared");
-		assert.deepEqual([...hiddenFromPalette].filter(id => !reachable.has(id)), [], "hidden from the palette and reachable from no menu, keybinding, welcome link, row or command: nothing can run it");
+		assert.deepEqual([...hiddenFromPalette].filter(id => !reachable.has(id) && !INTERNAL_COMMANDS.has(id)), [], "hidden from the palette and reachable from no menu, keybinding, welcome link, row or command, and not listed as internal: nothing can run it");
+		assert.deepEqual([...INTERNAL_COMMANDS.keys()].filter(id => !hiddenFromPalette.has(id) || reachable.has(id)), [], "listed as internal but offered by the palette or reachable from a menu: drop it from the list");
 		assert.deepEqual(palette.filter(entry => entry.when !== "false").map(entry => entry.command), [], "a palette entry whose condition is not simply false: its commands need a case of their own");
+	});
+
+	it("hides the commands of a row's or a tab's own menu and keeps the ones a user starts from the palette", () => {
+		const rowMenus = new Set(["view/item/context", "view/title", "editor/title"]);
+		const hiddenWithRowMenu = [...hiddenFromPalette].filter(id => menus.some(({ menu, entry }) => rowMenus.has(menu) && entry.command === id));
+		for (const id of ["ompDesk.openSession", "ompDesk.openSessionInChat", "ompDesk.openSessionInTerminal", "ompDesk.switchToSessionWindow", "ompDesk.stopSessionHost", "ompDesk.renameSession", "ompDesk.closeSession", "ompDesk.reloadSession", "ompDesk.forgetSession", "ompDesk.deleteSession", "ompDesk.killSession", "ompDesk.pinWorkspaceFolder", "ompDesk.unpinWorkspaceFolder", "ompDesk.reconnectTerminal", "ompDesk.refreshSkills", "ompDesk.refreshTools", "ompDesk.refreshMcp", "ompDesk.refreshExtensions"]) {
+			assert.ok(hiddenWithRowMenu.includes(id), `${id} has a row or view menu entry and is hidden from the palette`);
+		}
+		for (const id of ["ompDesk.newSession", "ompDesk.resumeWorkspaceFolder", "ompDesk.goToSession", "ompDesk.showCommands", "ompDesk.moveSessionHere.palette", "ompDesk.openOmpSettings", "ompDesk.openModels", "ompDesk.openAgents", "ompDesk.switchSessionViewChat", "ompDesk.switchSessionViewTerminal", "ompDesk.findInChat", "ompDesk.showDiagnostics", "ompDesk.loginProvider", "ompDesk.logoutProvider"]) {
+			assert.ok(declared.has(id) && !hiddenFromPalette.has(id), `${id} stays in the palette`);
+		}
+	});
+
+	it("opens the palette on the OMP Desk category with Show Commands, bound to Ctrl+Alt+P everywhere and in the terminal's skip list, on a key nothing else of ours takes", async () => {
+		assert.equal(declared.get("ompDesk.showCommands")?.title, "Show Commands");
+		assert.equal(declared.get("ompDesk.showCommands")?.category, "OMP Desk", "the palette reads OMP Desk: Show Commands");
+		assert.ok(!hiddenFromPalette.has("ompDesk.showCommands"));
+		const bindings = contributes.keybindings.filter(binding => binding.command === "ompDesk.showCommands");
+		assert.deepEqual(bindings.map(binding => [binding.key, binding.mac, binding.when]), [["ctrl+alt+p", "cmd+alt+p", undefined]], "one binding, with no condition, so it works from a text editor, a Chat and the terminal");
+		const sameKey = contributes.keybindings.filter(binding => binding.command !== "ompDesk.showCommands" && binding.key?.toLowerCase() === "ctrl+alt+p");
+		assert.deepEqual(sameKey, [], "no other command of this extension takes Ctrl+Alt+P");
+		assert.ok((contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? []).includes("ompDesk.showCommands"), "the integrated terminal passes the chord to the workbench");
+		const before = recording.executed.length;
+		await recording.commands.get("ompDesk.showCommands")?.();
+		assert.deepEqual(recording.executed.slice(before), [["workbench.action.quickOpen", ">OMP Desk: "]], "Quick Open with the Command Palette's prefix and the category the extension's commands carry");
+		const outside = contributes.commands.filter(command => !`${command.category}: ${command.title}`.toLowerCase().startsWith(DESK_COMMANDS_QUERY.slice(1).toLowerCase()));
+		assert.deepEqual(outside.map(command => command.command), [], "every command's palette label starts with the query, so none escapes the filter");
 	});
 
 	it("runs every visible command without an argument and without throwing", { timeout: 120_000 }, async () => {
@@ -679,6 +714,22 @@ describe("the palette", () => {
 				const viewFocus = new Set([...viewIds].map(id => `${id}.focus`));
 		const missing = [...new Set(executed)].filter(id => id.startsWith("ompDesk.") && !viewFocus.has(id) && !recording.commands.has(id));
 		assert.deepEqual(missing, [], "executed by a command of this extension but registered by no one");
+	});
+});
+
+describe("the chat tab group setting", () => {
+	const properties = contributes.configuration.properties as Record<string, { type?: string; enum?: string[]; enumDescriptions?: string[]; default?: unknown; scope?: string; description?: string }>;
+
+	it("offers exactly left and right, left by default, as a window setting with a description for each choice", () => {
+		const setting = properties["ompDesk.chatTabGroup"];
+		assert.ok(setting, "ompDesk.chatTabGroup is contributed");
+		assert.equal(setting.type, "string");
+		assert.deepEqual(setting.enum, ["left", "right"]);
+		assert.equal(setting.default, "left", "the group has always been at the left edge");
+		assert.equal(setting.enumDescriptions?.length, 2);
+		assert.equal(setting.scope, undefined, "a window-scoped setting, like ompDesk.chatColumn");
+		assert.equal(setting.scope, properties["ompDesk.chatColumn"]?.scope);
+		assert.match(setting.description ?? "", /stays where it is/, "it says that an existing group is not moved");
 	});
 });
 
@@ -731,7 +782,8 @@ describe("the namespace (ADR-0068)", () => {
 		const defaults = contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? [];
 		const current = defaults.filter(id => id.startsWith("ompDesk."));
 		const legacy = defaults.filter(id => id.startsWith("omp."));
-		assert.deepEqual(legacy, current.map(id => "omp." + id.slice("ompDesk.".length)));
+		// A command added after the rename (Show Commands) has no old id and so no alias entry.
+		assert.deepEqual(legacy, current.filter(id => LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length))).map(id => "omp." + id.slice("ompDesk.".length)));
 		assert.ok(legacy.every(id => LEGACY_COMMAND_IDS.includes(id)));
 	});
 
@@ -741,7 +793,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.branchSession", "ompDesk.clearSession", "ompDesk.findInChat", "ompDesk.forkSession", "ompDesk.logoutProvider", "ompDesk.moveSessionHere", "ompDesk.moveSessionHere.palette", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
+		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.branchSession", "ompDesk.clearSession", "ompDesk.findInChat", "ompDesk.forkSession", "ompDesk.logoutProvider", "ompDesk.moveSessionHere", "ompDesk.moveSessionHere.palette", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.showCommands", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [

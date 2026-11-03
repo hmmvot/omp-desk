@@ -21,4 +21,4 @@ OMP Desk is an unofficial, independent integration, not an official OMP distribu
 | [Troubleshooting](troubleshooting.md) | OMP not found, the log and diagnostics, a blocked native module. |
 | [Upgrading](upgrading.md) | From 0.3.x and from the unpublished local build. |
 
-Everything is in the Command Palette under **OMP Desk**. Contributions are welcome: see [CONTRIBUTING.md](../../CONTRIBUTING.md), and [CHANGELOG.md](../../CHANGELOG.md) for what changed.
+Everything is in the Command Palette under **OMP Desk**; `Ctrl+Alt+P` opens the palette with `OMP Desk: ` already typed, so only OMP Desk's commands are listed ([Keyboard shortcuts](keyboard-shortcuts.md#the-command-palette)). Contributions are welcome: see [CONTRIBUTING.md](../../CONTRIBUTING.md), and [CHANGELOG.md](../../CHANGELOG.md) for what changed.

@@ -57,7 +57,7 @@ A background process on Bun keeps the `bun.exe` it started from, so after `bun u
 
 ### Folders
 
-- **Pin Folder** keeps a folder in every window. **Add Folder** picks and pins another one. **Unpin Folder** removes a pin.
+- **Pin Folder** (a folder row's menu) keeps a folder in every window. **Add Folder** (**Add Folder to Sessions** in the Command Palette) picks and pins another one. **Unpin Folder** removes a pin.
 - The folders open in this window are listed next to the pinned ones ([`ompDesk.showWorkspaceFolders`](settings.md)).
 - Sessions run at the root of the version-control checkout a folder lies in ([`ompDesk.runSessionsAtRepositoryRoot`](settings.md)).
 
