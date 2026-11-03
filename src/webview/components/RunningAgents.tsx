@@ -47,8 +47,8 @@ export function RunningAgents({ model, expanded, onToggle, lines }: RunningAgent
 			{window !== null && (
 				<ul id={listId} className="omp-hud-rows">
 					{window.rows.map(row => {
-						// The row names who and what it is doing; the spawn description and the full activity live in the tooltip.
-						const title = [`${row.id}${row.badge === "" ? "" : ` · ${row.badge}`} · ${row.status}`, row.description, row.activity].filter(part => part.length > 0).join("\n");
+						// The row names who and what it is doing; the spawn description, the full activity and the model's whole id live in the tooltip.
+						const title = [`${row.id}${row.badge === "" ? "" : ` · ${row.badge}`} · ${row.status}`, ...(row.model === null ? [] : [row.model.title]), row.description, row.activity].filter(part => part.length > 0).join("\n");
 						const elapsed = elapsedOf(row.id);
 						return (
 							<li key={row.id} className={`omp-hud-agent-item omp-hud-agent--${row.status}`}>
@@ -56,6 +56,7 @@ export function RunningAgents({ model, expanded, onToggle, lines }: RunningAgent
 									<span className={`codicon codicon-${row.icon}`} aria-hidden="true" />
 									<strong className="omp-hud-agent-id">{row.id}</strong>
 									{row.badge !== "" && <span className="omp-hud-dim omp-hud-badge">{row.badge}</span>}
+									{row.model !== null && <span className="omp-hud-dim omp-hud-model">{row.model.text}</span>}
 									{row.activity !== "" && <span className="omp-hud-dim omp-hud-activity">{row.activity}</span>}
 									{elapsed !== null && <span className="omp-hud-elapsed">{fmtDuration(elapsed)}</span>}
 								</button>

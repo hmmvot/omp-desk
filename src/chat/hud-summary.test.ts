@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentActivity, RunningAgent } from "./agents.ts";
 import {
+	agentModelLabel,
 	agentsSummary,
 	agentsSummaryText,
 	fitAgentNames,
@@ -196,6 +197,34 @@ describe("Agents rows", () => {
 	it("matches pending tasks against running agents only", () => {
 		const descriptions = runningAgentDescriptions([agent("A", { description: " Build it " }), agent("B", { status: "completed", description: "Done thing" }), agent("C", { progress: { description: "From progress" } })]);
 		assert.deepEqual(descriptions, ["Build it", "From progress"]);
+	});
+});
+
+describe("Agent model and thinking level", () => {
+	it("reads the identity and the level from native progress, preferring the identity over the selector", () => {
+		assert.deepEqual(agentModelLabel({ resolvedModelIdentity: "anthropic/claude-sonnet", resolvedModel: "anthropic/claude-sonnet:high", resolvedThinkingLevel: "high" }), {
+			model: "anthropic/claude-sonnet", thinking: "high", text: "anthropic/claude-sonnet · high", title: "Model: anthropic/claude-sonnet\nThinking: high",
+		});
+		const selector = agentModelLabel({ resolvedModel: "openai/gpt:medium", resolvedThinkingLevel: "medium" });
+		assert.equal(selector?.model, "openai/gpt", "the selector's own level suffix is not repeated");
+		assert.equal(selector?.text, "openai/gpt · medium");
+		assert.equal(agentModelLabel({ resolvedModel: "openai/gpt:fast", resolvedThinkingLevel: "medium" })?.model, "openai/gpt:fast", "a suffix that is not the level is part of the selector");
+	});
+
+	it("shows a model without a level, says so for fallback routing, and shows nothing before the progress names one", () => {
+		assert.equal(agentModelLabel({ resolvedModelIdentity: "mock/mock-model" })?.text, "mock/mock-model");
+		assert.equal(agentModelLabel({ resolvedModelIdentity: "mock/mock-model", resolvedModelIsFallback: true })?.title, "Model: mock/mock-model\nServed by fallback routing");
+		for (const progress of [undefined, {}, { resolvedThinkingLevel: "high" }, { resolvedModelIdentity: "   " }, { resolvedModelIdentity: 7 }]) assert.equal(agentModelLabel(progress), null);
+	});
+
+	it("collapses whitespace and bounds what a provider-controlled id can put on a row", () => {
+		assert.equal(agentModelLabel({ resolvedModelIdentity: " a\n b\t/c " })?.model, "a b /c");
+		assert.equal(agentModelLabel({ resolvedModelIdentity: "m".repeat(500) })?.model.length, 200);
+	});
+
+	it("is part of every agent row, absent for a row without progress", () => {
+		const named = agentWindow(view([agent("Prober", { progress: { resolvedModelIdentity: "mock/mock-model", resolvedThinkingLevel: "low" } }), agent("Idle", { index: 1, origin: "registry" })]), 8);
+		assert.deepEqual(named.rows.map(row => row.model?.text ?? null), ["mock/mock-model · low", null]);
 	});
 });
 

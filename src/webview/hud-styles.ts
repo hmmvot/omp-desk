@@ -43,6 +43,7 @@ export const HUD_STYLES = `
 .omp-hud-agent { flex-wrap: wrap; height: auto; min-height: ${HUD_LINE_PX}px; }
 .omp-hud-agent-id { flex: none; max-width: 100%; white-space: normal; overflow-wrap: anywhere; color: var(--vscode-charts-blue); font-weight: 600; }
 .omp-hud-agent .omp-hud-badge { flex: none; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.omp-hud-agent .omp-hud-model { flex: 1 1 0; min-width: 0; max-width: max-content; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omp-hud-agent .omp-hud-activity { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omp-hud-elapsed { flex: none; margin-left: auto; padding-left: 8px; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
 .omp-hud-agent--failed .omp-hud-agent-id { color: var(--vscode-errorForeground); }
@@ -71,6 +72,7 @@ export const HUD_STYLES = `
 .omp-detail-body--agent { flex: 1 1 auto; padding-bottom: 0; }
 .omp-detail-title { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin: 0 0 8px; font-size: 1.15em; font-weight: 600; }
 .omp-detail-count, .omp-detail-status { color: var(--omp-muted); font-size: 0.85em; font-weight: 400; }
+.omp-detail-model { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; color: var(--omp-muted); font-size: 0.85em; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .omp-detail-phase h2 { margin: 14px 0 4px; font-size: 1em; }
 .omp-detail-tasks, .omp-detail-agents { list-style: none; margin: 0; padding: 0; }
 .omp-detail-task { padding: 5px 0; border-bottom: 1px solid var(--omp-border); }
@@ -86,6 +88,7 @@ export const HUD_STYLES = `
 .omp-detail-agent > .omp-native-agent-progress { flex: 1 1 100%; }
 .omp-detail-agent-head { flex: none; }
 .omp-detail-assignment { flex: none; margin: 4px 0 8px; }
+.omp-detail-assignment > .omp-tool-head { padding-left: 0; }
 .omp-detail--agent .omp-native-child-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; border: 0; padding: 0; }
 .omp-detail--agent .omp-native-child-toolbar { flex: none; padding: 4px 0; }
 .omp-detail--agent .omp-transcript-frame { flex: 1 1 auto; min-height: 0; }

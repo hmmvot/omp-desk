@@ -250,6 +250,49 @@ export function agentElapsedMs(agent: RunningAgent): number | null {
 	return typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : null;
 }
 
+/** The model an agent runs on and its thinking level, as the native progress reports them once the agent's session has produced its first event. */
+export interface AgentModelLabel {
+	/** The model identity (`provider/id`, routing included) without the thinking suffix. */
+	model: string;
+	/** The concrete thinking level (`high`, `off`, …); empty when the progress carries none. */
+	thinking: string;
+	/** `model · thinking`, the compact chip text. */
+	text: string;
+	/** Tooltip lines: the whole model id, the thinking level, and a note when fallback routing owns the model. */
+	title: string;
+}
+
+/** The longest model id or level kept: ids are provider-controlled text. */
+const AGENT_MODEL_CHARS = 200;
+
+function progressText(progress: Record<string, unknown> | undefined, key: string): string {
+	const value = progress?.[key];
+	return typeof value === "string" ? collapse(value).slice(0, AGENT_MODEL_CHARS) : "";
+}
+
+/**
+ * The model and thinking level of an agent. Native progress names them in `resolvedModelIdentity` (preferred: no thinking
+ * suffix) or `resolvedModel` (the full selector, whose `:<level>` suffix is dropped when it repeats the level) and
+ * `resolvedThinkingLevel`, set when the agent's session emits its first event and kept current when routing changes them.
+ * `null` until then, and for a registry-only row, which has no progress.
+ */
+export function agentModelLabel(progress: Record<string, unknown> | undefined): AgentModelLabel | null {
+	const thinking = progressText(progress, "resolvedThinkingLevel");
+	let model = progressText(progress, "resolvedModelIdentity");
+	if (model === "") {
+		model = progressText(progress, "resolvedModel");
+		if (thinking !== "" && model.endsWith(`:${thinking}`)) model = model.slice(0, -(thinking.length + 1));
+	}
+	if (model === "") return null;
+	const fallback = progress?.resolvedModelIsFallback === true;
+	return {
+		model,
+		thinking,
+		text: thinking === "" ? model : `${model} · ${thinking}`,
+		title: [`Model: ${model}`, ...(thinking === "" ? [] : [`Thinking: ${thinking}`]), ...(fallback ? ["Served by fallback routing"] : [])].join("\n"),
+	};
+}
+
 export interface AgentRow {
 	id: string;
 	type: string;
@@ -260,6 +303,8 @@ export interface AgentRow {
 	description: string;
 	activity: string;
 	elapsedMs: number | null;
+	/** The model and thinking level the agent runs on; `null` until its progress reports them. */
+	model: AgentModelLabel | null;
 }
 
 export function agentRow(agent: RunningAgent, activity: AgentActivity | undefined): AgentRow {
@@ -273,6 +318,7 @@ export function agentRow(agent: RunningAgent, activity: AgentActivity | undefine
 		description: agentDescription(agent),
 		activity: agentActivityText(agent.progress, activity),
 		elapsedMs: agentElapsedMs(agent),
+		model: agentModelLabel(agent.progress),
 	};
 }
 

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChatModel } from "../../chat/model";
 import type { ActiveTool } from "../../chat/pending";
 import type { ChatEntry } from "../../chat/messages";
@@ -42,8 +42,12 @@ function unansweredTailCalls(entries: readonly ChatEntry[]): ReadonlyMap<string,
 type AvailablePage = Extract<SubagentTranscriptPage, { status: "available" }>;
 type ReadKind = "initial" | "refresh" | "older";
 
-/** Retain only the most recent bridge-sized page, never a growing child model. */
+/**
+ * Retain only the most recent bridge-sized page, never a growing child model. A read that brings nothing new keeps the
+ * page's `entries` array itself, so the caller can tell "the same page" without comparing rows.
+ */
 function appendChildPage(previous: AvailablePage, incoming: AvailablePage): AvailablePage {
+	if (incoming.entries.length === 0) return { ...previous, olderCount: previous.olderCount + incoming.olderCount, nextByte: incoming.nextByte, reset: false };
 	const updated = new Map(incoming.entries.map(entry => [entry.id, entry]));
 	const previousIds = new Set(previous.entries.map(entry => entry.id));
 	const entries = [
@@ -70,7 +74,16 @@ export interface ChildTranscriptBodyProps extends Required<Pick<ChildTranscriptP
 	assignment?: string;
 }
 
-export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keepOnFailure = false, assignment = "" }: ChildTranscriptBodyProps): ReactNode {
+/**
+ * The agent's child history. A refresh the user did not ask for (the timer, a return to the tab, the final read after the agent
+ * stopped) is a background read: it touches nothing the user sees until the rows actually change (no busy state, no disabled
+ * button, no note; a timer read that fails keeps the rows and says nothing, the next one tries again). A tick that finds a read
+ * in flight is dropped (the next one comes soon). The user's own request waits for that read and the newest one runs; the final
+ * read has a slot of its own, so neither a user request nor another read costs the agent's last rows, except that nothing
+ * background runs while the user is reading earlier history (the same rule as the timer's).
+ */
+type ReadMode = "user" | "tick" | "final";
+export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keepOnFailure = false, assignment = "" }: ChildTranscriptBodyProps): ReactNode {
 	const [page, setPage] = useState<SubagentTranscriptPage | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [failure, setFailure] = useState<string | null>(null);
@@ -78,11 +91,19 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 	const pageRef = useRef<SubagentTranscriptPage | null>(null);
 	const earlierRef = useRef(false);
 	const inFlight = useRef(false);
+	const queued = useRef<{ user: ReadKind | null; final: boolean }>({ user: null, final: false });
 	const generation = useRef(0);
 	const mounted = useRef(false);
+	const readRef = useRef<(kind: ReadKind, mode?: ReadMode) => boolean>(() => false);
 
-	const read = useCallback((kind: ReadKind): boolean => {
-		if (!mounted.current || inFlight.current || reader === undefined) return false;
+	const read = useCallback((kind: ReadKind, mode: ReadMode = "user"): boolean => {
+		if (!mounted.current || reader === undefined) return false;
+		if (inFlight.current) {
+			if (mode === "tick") return false;
+			if (mode === "final") queued.current.final = true;
+			else queued.current.user = kind;
+			return mode === "user";
+		}
 		const previous = pageRef.current;
 		const available = previous?.status === "available" ? previous : null;
 		const firstId = available?.entries[0]?.id;
@@ -93,7 +114,7 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 			: { fromByte: incremental ? available!.nextByte : 0 };
 		const request = ++generation.current;
 		inFlight.current = true;
-		setBusy(true);
+		if (mode === "user") setBusy(true);
 		void (async () => {
 			let result: SubagentTranscriptPage;
 			let reset = false;
@@ -119,23 +140,35 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 			const next = kept ? available : incremental && !reset && available !== null && result.status === "available"
 				? appendChildPage(available, result)
 				: result;
-			setFailure(kept && result.status === "unavailable" ? SUBAGENT_UNAVAILABLE_TEXT[result.reason] : null);
+			// A timer read that failed leaves the rows and the note as they are: only the user's request and the final read say why.
+			if (!(kept && mode === "tick")) setFailure(kept && result.status === "unavailable" ? SUBAGENT_UNAVAILABLE_TEXT[result.reason] : null);
+			// A background read that brought no row keeps the rendered page as it is (only its byte cursor moves).
+			const unchanged = incremental && available !== null && next.status === "available" && next.entries === available.entries && next.olderCount === available.olderCount;
 			pageRef.current = next;
-			setPage(next);
+			if (!unchanged) setPage(next);
 			const showingEarlier = next.status === "available" && kind === "older" && !reset;
 			earlierRef.current = showingEarlier;
 			setEarlier(showingEarlier);
 			inFlight.current = false;
 			setBusy(false);
+			const { user, final } = queued.current;
+			queued.current = { user: null, final };
+			if (user !== null) readRef.current(user, "user");
+			else if (final) {
+				queued.current.final = false;
+				if (!earlierRef.current) readRef.current("refresh", "final");
+			}
 		})();
 		return true;
 	}, [reader, subagentId, keepOnFailure]);
+	readRef.current = read;
 
 	useEffect(() => {
 		mounted.current = true;
 		pageRef.current = null;
 		earlierRef.current = false;
 		inFlight.current = false;
+		queued.current = { user: null, final: false };
 		setPage(null);
 		setEarlier(false);
 		setBusy(false);
@@ -150,6 +183,7 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 			mounted.current = false;
 			generation.current += 1;
 			inFlight.current = false;
+			queued.current = { user: null, final: false };
 		};
 	}, [read, reader]);
 
@@ -157,12 +191,16 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 		if (refreshMs === undefined || reader === undefined) return;
 		const timer = setInterval(() => {
 			if (document.hidden || earlierRef.current) return;
-			read("refresh");
+			read("refresh", "tick");
 		}, refreshMs);
+		// A tab that was hidden missed its ticks: catch up as soon as it shows again, not at the next tick.
+		const shown = (): void => { if (!document.hidden && !earlierRef.current) read("refresh", "tick"); };
+		document.addEventListener("visibilitychange", shown);
 		return () => {
 			clearInterval(timer);
+			document.removeEventListener("visibilitychange", shown);
 			// The agent stopped being live: pick up what it wrote last (a no-op when the document unmounts).
-			if (!earlierRef.current) read("refresh");
+			if (!earlierRef.current) read("refresh", "final");
 		};
 	}, [read, reader, refreshMs]);
 
@@ -220,7 +258,7 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 			)}
 		</div>
 	);
-}
+});
 
 function ChildDisclosure({ subagentId, reader, depth }: Required<Pick<ChildTranscriptProps, "subagentId" | "depth">> & Pick<ChildTranscriptProps, "reader">): ReactNode {
 	const [open, setOpen] = useState(false);

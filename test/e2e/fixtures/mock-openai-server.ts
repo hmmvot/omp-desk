@@ -9,6 +9,9 @@
  *   - `[bg:<command>]` anywhere in it (the command holds no `]`): the first completion calls OMP's `bash` tool once with
  *     `{ command, async: true }`, which starts a background job and returns at once; once the tool result is in the
  *     conversation the model answers with `Tool result received.`, as for `[tool:]`
+ *   - `[agent:<name>]` anywhere in it: the first completion calls OMP's `task` tool, spawning a subagent `<name>` whose assignment
+ *     carries `[subagent-work]`; the subagent works in `SUBAGENT_STEPS` blocking `bash` calls of `SUBAGENT_STEP_MS` each and then
+ *     answers `Probe finished.`, so it stays running long enough to watch its HUD row and its tab; the parent's follow-ups answer `Tool result received.`
  *   - `[slow]` : the text is streamed in small chunks with a delay, so a turn stays running for a while
  *   - anything else: `Mock reply to: <text>`, followed by ` [image bytes: <n>,…]` when the last user message carries images.
  *
@@ -47,11 +50,15 @@ interface ChatMessage {
 	readonly content?: unknown;
 }
 
+interface ToolDefinition {
+	readonly function?: { readonly name?: string; readonly parameters?: { readonly properties?: Record<string, unknown> } };
+}
+
 interface ChatRequest {
 	readonly model?: string;
 	readonly stream?: boolean;
 	readonly messages?: readonly ChatMessage[];
-	readonly tools?: readonly { readonly function?: { readonly name?: string } }[];
+	readonly tools?: readonly ToolDefinition[];
 }
 
 /** The user's own words: OMP prefixes some turns with `<system-reminder>…</system-reminder>` blocks the model sees. */
@@ -98,12 +105,32 @@ function chunk(id: string, model: string, delta: Record<string, unknown>, finish
 	return { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta, finish_reason: finishReason }] };
 }
 
-/** The one tool call a user marker asks for: `[tool:<path>]` is a `read`, `[bg:<command>]` a background `bash` job. Null for a message without a marker. */
-export function toolCallOf(userText: string): { readonly name: string; readonly target: string; readonly args: Record<string, unknown> } | null {
+/** A subagent (`[subagent-work]`) works in this many blocking `bash` calls of this many ms each: its transcript grows and its HUD row changes for tens of seconds. */
+export const SUBAGENT_STEPS = 10;
+export const SUBAGENT_STEP_MS = 4_000;
+export const SUBAGENT_WORK_MS = SUBAGENT_STEPS * SUBAGENT_STEP_MS;
+
+/**
+ * The one tool call a user marker asks for: `[tool:<path>]` is a `read`, `[bg:<command>]` a background `bash` job,
+ * `[agent:<name>]` a `task` call that spawns a subagent called `<name>` (its assignment carries `[subagent-work]`; the subagent's own
+ * requests then answer with {@link SUBAGENT_STEPS} blocking `bash` calls, one per completion, and a closing text). Null for a message without a marker
+ * or once a subagent's steps are done. `toolResults` is the number of tool results already in the conversation.
+ * The `task` tool is offered in a single-task or a batch shape depending on OMP's settings; the call follows the schema it was given.
+ */
+export function toolCallOf(userText: string, tools: readonly ToolDefinition[] = [], toolResults = 0): { readonly name: string; readonly target: string; readonly args: Record<string, unknown> } | null {
 	const read = /\[tool:([^\]]+)\]/.exec(userText);
 	if (read !== null) return { name: "read", target: read[1], args: { path: read[1] } };
 	const background = /\[bg:([^\]]+)\]/.exec(userText);
 	if (background !== null) return { name: "bash", target: background[1], args: { command: background[1], async: true, i: "Starting a background job" } };
+	const agent = /\[agent:([^\]]+)\]/.exec(userText);
+	if (agent !== null) {
+		const item = { name: agent[1], agent: "task", task: "Wait for the probe to finish and report. [subagent-work]", solutionSpace: "one measurement, no design choices" };
+		const properties = tools.find(tool => tool.function?.name === "task")?.function?.parameters?.properties ?? {};
+		return { name: "task", target: agent[1], args: "tasks" in properties ? { context: "Goal: wait for the probe, change nothing.", tasks: [item] } : item };
+	}
+	if (userText.includes("[subagent-work]") && toolResults < SUBAGENT_STEPS) {
+		return { name: "bash", target: `subagent-step-${toolResults + 1}`, args: { command: `node -e "/*step ${toolResults + 1}*/setTimeout(()=>{},${SUBAGENT_STEP_MS})"`, i: `Probe step ${toolResults + 1} of ${SUBAGENT_STEPS}` } };
+	}
 	return null;
 }
 
@@ -114,15 +141,17 @@ async function respond(request: IncomingMessage, response: ServerResponse, reque
 	const lastUser = [...messages].reverse().find(message => message.role === "user");
 	const userText = textOf(lastUser?.content);
 	const last = messages.at(-1);
-	const hasToolResult = messages.some(message => message.role === "tool");
+	const toolResults = messages.filter(message => message.role === "tool").length;
+	const hasToolResult = toolResults > 0;
 	const toolNames = (body.tools ?? []).map(tool => tool.function?.name ?? "");
-	const marker = toolCallOf(userText);
+	const marker = toolCallOf(userText, body.tools ?? [], toolResults);
+	const subagent = userText.includes("[subagent-work]");
 
-	// A turn that already carries a tool result is the follow-up completion; the user's marker is still in its history.
-	const call = marker !== null && last?.role === "user" && toolNames.includes(marker.name) ? marker : null;
+	// A turn that already carries a tool result is the follow-up completion; the user's marker is still in its history. A subagent goes on calling.
+	const call = marker !== null && (last?.role === "user" || subagent) && toolNames.includes(marker.name) ? marker : null;
 	const images = imageSizesOf(lastUser?.content);
 	const imageNote = images.length === 0 ? "" : ` [image bytes: ${images.join(",")}]`;
-	const reply = call !== null ? "" : hasToolResult && marker !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}${imageNote}`;
+	const reply = call !== null ? "" : subagent ? "Probe finished." : hasToolResult && marker !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}${imageNote}`;
 	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), fullUserText: userText.slice(0, FULL_USER_TEXT_LIMIT), messageCount: messages.length, hasToolResult, imageBytes: images, reply: call !== null ? `<tool call ${call.name} ${call.target}>` : reply });
 
 	const id = `chatcmpl-mock-${requests.length}`;
@@ -139,7 +168,7 @@ async function respond(request: IncomingMessage, response: ServerResponse, reque
 	sse(response, chunk(id, model, { role: "assistant", content: "" }, null));
 	if (call !== null) {
 		const args = JSON.stringify(call.args);
-		sse(response, chunk(id, model, { tool_calls: [{ index: 0, id: "call_mock_1", type: "function", function: { name: call.name, arguments: "" } }] }, null));
+		sse(response, chunk(id, model, { tool_calls: [{ index: 0, id: `call_mock_${requests.length}`, type: "function", function: { name: call.name, arguments: "" } }] }, null));
 		sse(response, chunk(id, model, { tool_calls: [{ index: 0, function: { arguments: args } }] }, null));
 		sse(response, chunk(id, model, {}, "tool_calls"));
 	} else {

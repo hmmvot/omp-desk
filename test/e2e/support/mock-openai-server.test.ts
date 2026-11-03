@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { startMockServer, toolCallOf, type MockServer } from "../fixtures/mock-openai-server.ts";
+import { startMockServer, SUBAGENT_STEPS, toolCallOf, type MockServer } from "../fixtures/mock-openai-server.ts";
 
 interface Delta {
 	readonly content?: string;
@@ -54,5 +54,24 @@ describe("mock model server tool markers", () => {
 		const without = await complete(server, [{ role: "user", content: "[bg:node -e 1]" }], ["read"]);
 		assert.equal(without.call, null);
 		assert.match(without.text, /^Mock reply to: \[bg:node -e 1\]/);
+	});
+
+	it("answers [agent:<name>] with a task call in the shape the offered schema asks for, and the subagent's own requests with blocking bash steps, then a closing text", async () => {
+		const single = toolCallOf("spawn [agent:Prober]", [{ function: { name: "task", parameters: { properties: { task: {}, solutionSpace: {} } } } }]);
+		assert.equal(single?.name, "task");
+		assert.equal(single?.args.name, "Prober");
+		assert.match(String(single?.args.task), /\[subagent-work\]/);
+		const batch = toolCallOf("spawn [agent:Prober]", [{ function: { name: "task", parameters: { properties: { context: {}, tasks: {} } } } }]);
+		assert.equal(typeof batch?.args.context, "string");
+		assert.deepEqual((batch?.args.tasks as { name: string }[]).map(item => item.name), ["Prober"]);
+		const task = String(single?.args.task);
+		const first = toolCallOf(task, [], 0);
+		assert.equal(first?.name, "bash");
+		assert.equal(first?.args.async, undefined, "the subagent's calls block, so its run lasts");
+		assert.match(String(first?.args.command), /setTimeout\(\(\)=>\{\},\d+\)/);
+		assert.equal(toolCallOf(task, [], SUBAGENT_STEPS - 1)?.args.i, `Probe step ${SUBAGENT_STEPS} of ${SUBAGENT_STEPS}`);
+		assert.equal(toolCallOf(task, [], SUBAGENT_STEPS), null, "after its steps the subagent only says it is done");
+		const finished = await complete(server, [{ role: "user", content: task }, ...Array.from({ length: SUBAGENT_STEPS }, () => ({ role: "tool", tool_call_id: "x", content: "ok" }))], ["bash"]);
+		assert.deepEqual(finished, { text: "Probe finished.", call: null });
 	});
 });

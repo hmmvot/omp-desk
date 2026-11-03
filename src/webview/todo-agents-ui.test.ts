@@ -692,10 +692,15 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			await ui.evaluate("window.fixtureClock.fire(2000)");
 			await ui.wait("window.ui.reads().length === 3");
 			await ui.evaluate("window.ui.answer(window.ui.reads()[2],{status:'unavailable',reason:'read-failed'})");
+			await ui.evaluate("new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-native-child-stale')"), null, "a timer read that failed says nothing: the next one tries again");
+			await ui.evaluate("document.querySelector('.omp-native-child-toolbar .omp-btn').click()");
+			await ui.wait("window.ui.reads().length === 4");
+			await ui.evaluate("window.ui.answer(window.ui.reads()[3],{status:'unavailable',reason:'read-failed'})");
 			await ui.wait("document.querySelector('.omp-native-child-stale')");
 			const body = await ui.evaluate<string>("document.querySelector('.omp-native-child-body').textContent");
 			assert.ok(body.includes("First child row") && body.includes("Second child row"), "a failed refresh does not blank the rows already read");
-			assert.match(body, /Showing the rows already read/);
+			assert.match(body, /Showing the rows already read/, "the user's own Refresh says why it failed");
 			await ui.evaluate("window.ui.push({agents:[]})");
 			await ui.wait("document.querySelector('.omp-detail-status')?.textContent.includes('no longer in the native registry')");
 			assert.equal(await ui.evaluate("window.fixtureClock.count(2000)"), 0, "the timer stops when the agent leaves the registry");
@@ -739,6 +744,133 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			await ui.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
 			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-detail-title .codicon-loading')).animationName"), "none");
 			await ui.call("Emulation.setEmulatedMedia", { features: MOTION_ALLOWED });
+		});
+
+		const longModel = "openrouter/anthropic/claude-opus-with-a-model-identifier-far-too-long-for-any-row";
+		const modelAgents = (level: string) => `[{id:'Worker One',index:0,agent:'implementer',agentSource:'bundled',status:'running',lastUpdate:1,description:'Job 0',progress:{id:'Worker One',status:'running',currentTool:'read',lastIntent:'Inspecting 0',resolvedModelIdentity:${JSON.stringify(longModel)},resolvedModel:${JSON.stringify(`${longModel}:${level}`)},resolvedThinkingLevel:'${level}'}},{id:'Reader1',index:1,agent:'scout',agentSource:'bundled',status:'running',lastUpdate:1,progress:{id:'Reader1',status:'running'}}]`;
+
+		await t.test("the Agents row names each agent's model and thinking level; a long id truncates with its whole text in the tooltip, and a row without a model shows none", async () => {
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 360, height: 900, deviceScaleFactor: 1, mobile: false });
+			await open("rows-model");
+			await ui.evaluate(`window.ui.push({agents:${modelAgents("high")},agentAvailability:'available',entries:[${message("m", null, "hello")}]})`);
+			await ui.wait("document.querySelector('.omp-hud--agents .omp-hud-toggle')");
+			await ui.evaluate("document.querySelector('.omp-hud--agents .omp-hud-toggle').click()");
+			await ui.wait("document.querySelectorAll('.omp-hud--agents .omp-hud-agent').length === 2");
+			const chips = "[...document.querySelectorAll('.omp-hud--agents .omp-hud-agent')].map(row=>row.querySelector('.omp-hud-model')?.textContent??null)";
+			assert.deepEqual(await ui.evaluate(chips), [`${longModel} · high`, null]);
+			const chip = await ui.evaluate<{ clipped: boolean; ellipsis: string; title: string; overflow: number; width: number; lines: number }>(`(()=>{const row=document.querySelector('.omp-hud--agents .omp-hud-agent'),chip=row.querySelector('.omp-hud-model');
+			 return{clipped:chip.scrollWidth>chip.clientWidth+1,ellipsis:getComputedStyle(chip).textOverflow,title:row.title,overflow:document.documentElement.scrollWidth,width:innerWidth,lines:Math.round(row.getBoundingClientRect().height/20)}})()`);
+			assert.equal(chip.clipped, true, "the id is cut at the chip's own width");
+			assert.equal(chip.ellipsis, "ellipsis");
+			assert.ok(chip.title.split("\n").includes(`Model: ${longModel}`) && chip.title.split("\n").includes("Thinking: high"), `the tooltip carries the whole id and the level (${JSON.stringify(chip.title)})`);
+			assert.ok(chip.overflow <= chip.width, "the row does not overflow the page");
+			assert.equal(chip.lines, 1, "the row stays one line");
+			await ui.evaluate(`window.ui.push({agents:${modelAgents("low")}})`);
+			await ui.wait(`${chips}[0]===${JSON.stringify(`${longModel} · low`)}`);
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 1000, height: 900, deviceScaleFactor: 1, mobile: false });
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the Agents tab and the agent's own tab name the model and thinking level beside the status", async () => {
+			await open("detail-agents-model");
+			await ui.evaluate(`window.ui.push({agents:${modelAgents("high")},agentAvailability:'available'})`);
+			await ui.wait("document.querySelectorAll('.omp-detail-agent').length === 2");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-detail-agent')].map(row=>row.querySelector('.omp-detail-model')?.textContent??null)"), [`${longModel} · high`, null]);
+			await open("detail-agent-model");
+			await ui.evaluate(`window.ui.push({agents:${modelAgents("high")},agentAvailability:'available'})`);
+			await ui.wait("document.querySelector('.omp-detail-title .omp-detail-model')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-detail-title .omp-detail-model').textContent"), `${longModel} · high`);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-detail-title .omp-detail-model').title"), `Model: ${longModel}\nThinking: high`);
+			await ui.evaluate(`window.ui.push({agents:${modelAgents("medium")}})`);
+			await ui.wait(`document.querySelector('.omp-detail-title .omp-detail-model').textContent===${JSON.stringify(`${longModel} · medium`)}`);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-detail-title .omp-detail-model').closest('.omp-detail-title') === document.querySelector('.omp-detail-title')"), true);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const nextFrames = "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))";
+		const firstRow = `{type:'message',id:'c1',parentId:null,timestamp:'2026-10-02T00:00:00Z',message:{role:'assistant',timestamp:1,model:'m',stopReason:'stop',content:[{type:'text',text:'First child row'}]}}`;
+		async function openRunningAgentWithRows(name: string): Promise<void> {
+			await open(name);
+			await ui.evaluate(`window.ui.push({agents:${agents(1)},agentAvailability:'available'})`);
+			await ui.wait("window.ui.reads().length === 1");
+			await ui.evaluate(`window.ui.answer(window.ui.reads()[0],{status:'available',entries:[${firstRow}],olderCount:0,fromByte:0,nextByte:100,reset:false})`);
+			await ui.wait("document.querySelector('.omp-native-child-body')?.textContent.includes('First child row') && document.querySelector('.omp-native-child-body').getAttribute('aria-busy')==='false'");
+		}
+
+		await t.test("a working agent's tab does not blink: background reads that bring no row change no node, attribute or text, and the rows keep their nodes when one does", async () => {
+			await openRunningAgentWithRows("detail-agent-steady");
+			await ui.evaluate(`(()=>{
+			 const body=document.querySelector('.omp-native-child-body');
+			 window.watch={body,button:body.querySelector('.omp-native-child-toolbar .omp-btn'),transcript:body.querySelector('.omp-transcript'),row:[...body.querySelectorAll('*')].find(node=>node.children.length===0&&node.textContent==='First child row'),records:[]};
+			 window.watcher=new MutationObserver(records=>{for(const record of records)window.watch.records.push(record.type+':'+(record.attributeName??'')+':'+record.addedNodes.length+'/'+record.removedNodes.length+'@'+(record.target.className||record.target.nodeName))});
+			 window.watcher.observe(body,{subtree:true,childList:true,attributes:true,characterData:true});
+			})()`);
+			for (let cycle = 1; cycle <= 3; cycle += 1) {
+				await ui.evaluate("window.fixtureClock.fire(2000)");
+				await ui.wait(`window.ui.reads().length === ${cycle + 1}`);
+				assert.equal(await ui.evaluate("window.ui.reads().at(-1).fromByte"), 100, "each background read continues from the byte cursor");
+				assert.deepEqual(await ui.evaluate("(()=>{const body=document.querySelector('.omp-native-child-body');return[body.getAttribute('aria-busy'),body.querySelector('.omp-native-child-toolbar .omp-btn').disabled,body.querySelector(':scope > .omp-native-note')!==null]})()"), ["false", false, false], "a read in flight is not shown: the button stays enabled, no busy state, no note");
+				await ui.evaluate(`window.ui.answer(window.ui.reads()[${cycle}],{status:'available',entries:[],olderCount:0,fromByte:100,nextByte:100,reset:false})`);
+				await ui.evaluate(nextFrames);
+			}
+			assert.deepEqual(await ui.evaluate("window.watch.records"), [], "three background reads with nothing new left the DOM untouched");
+			assert.equal(await ui.evaluate("window.ui.reads().length"), 4);
+			await ui.evaluate("window.fixtureClock.fire(2000)");
+			await ui.wait("window.ui.reads().length === 5");
+			await ui.evaluate(`window.ui.answer(window.ui.reads()[4],{status:'available',entries:[${message("c2", "c1", "Second child row")}],olderCount:0,fromByte:100,nextByte:200,reset:false})`);
+			await ui.wait("document.querySelector('.omp-native-child-body').textContent.includes('Second child row')");
+			assert.deepEqual(await ui.evaluate("({body:window.watch.body===document.querySelector('.omp-native-child-body'),button:window.watch.button===document.querySelector('.omp-native-child-toolbar .omp-btn'),transcript:window.watch.transcript===document.querySelector('.omp-native-child-body .omp-transcript'),row:window.watch.row.isConnected})"), { body: true, button: true, transcript: true, row: true }, "a new row keeps the body, the button, the transcript and the rows already drawn");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-native-child-body').getAttribute('aria-busy')"), "false");
+			await ui.evaluate("window.watcher.disconnect()");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a reconnect of the parent does not blank, reload or mislabel an agent tab that shows history", async () => {
+			await openRunningAgentWithRows("detail-agent-reconnect");
+			await ui.evaluate("window.keep=document.querySelector('.omp-native-child-body');0");
+			await ui.evaluate("window.ui.push({phase:'resyncing',agents:[],agentAvailability:'loading'})");
+			await ui.wait("document.querySelector('.omp-notice, .omp-detail-status')");
+			await ui.evaluate(nextFrames);
+			assert.equal(await ui.evaluate("window.keep===document.querySelector('.omp-native-child-body')"), true, "the history stays mounted while the parent reconnects");
+			assert.ok((await ui.evaluate<string>("document.querySelector('.omp-native-child-body').textContent")).includes("First child row"));
+			assert.equal(await ui.evaluate("document.querySelector('.omp-detail-status').textContent"), "running", "a roster that is being reloaded does not say the agent is gone");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-detail-body--agent > [aria-busy=\"true\"]')"), null, "no loading placeholder replaces the history");
+			await ui.evaluate(`window.ui.push({phase:'live',agents:${agents(1)},agentAvailability:'available'})`);
+			await ui.wait("document.querySelector('.omp-detail-status')?.textContent==='running'");
+			await ui.evaluate(nextFrames);
+			assert.equal(await ui.evaluate("window.keep===document.querySelector('.omp-native-child-body')"), true, "and stays the same document nodes once it is live again");
+			assert.ok((await ui.evaluate<string>("document.querySelector('.omp-native-child-body').textContent")).includes("First child row"));
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the last read after an agent stops is not lost when a read is still in flight", async () => {
+			await openRunningAgentWithRows("detail-agent-final");
+			await ui.evaluate("window.fixtureClock.fire(2000)");
+			await ui.wait("window.ui.reads().length === 2");
+			await ui.evaluate("window.ui.push({agents:[]})");
+			await ui.wait("document.querySelector('.omp-detail-status')?.textContent.includes('no longer in the native registry')");
+			assert.equal(await ui.evaluate("window.ui.reads().length"), 2, "the last read waits for the one in flight");
+			await ui.evaluate("window.ui.answer(window.ui.reads()[1],{status:'available',entries:[],olderCount:0,fromByte:100,nextByte:100,reset:false})");
+			await ui.wait("window.ui.reads().length === 3");
+			assert.equal(await ui.evaluate("window.ui.reads()[2].fromByte"), 100);
+			await ui.evaluate(`window.ui.answer(window.ui.reads()[2],{status:'available',entries:[${message("c2", "c1", "Last child row")}],olderCount:0,fromByte:100,nextByte:200,reset:false})`);
+			await ui.wait("document.querySelector('.omp-native-child-body').textContent.includes('Last child row')");
+			assert.equal(await ui.evaluate("window.ui.reads().length"), 3, "and it is the only one: nothing polls once the agent is gone");
+		});
+
+		await t.test("a Refresh the user queued behind a read in flight does not take the place of the last read", async () => {
+			await openRunningAgentWithRows("detail-agent-final-queued");
+			await ui.evaluate("window.fixtureClock.fire(2000)");
+			await ui.wait("window.ui.reads().length === 2");
+			await ui.evaluate("document.querySelector('.omp-native-child-toolbar .omp-btn').click()");
+			await ui.evaluate("window.ui.push({agents:[]})");
+			await ui.wait("document.querySelector('.omp-detail-status')?.textContent.includes('no longer in the native registry')");
+			await ui.evaluate("window.ui.answer(window.ui.reads()[1],{status:'available',entries:[],olderCount:0,fromByte:100,nextByte:100,reset:false})");
+			await ui.wait("window.ui.reads().length === 3");
+			await ui.evaluate("window.ui.answer(window.ui.reads()[2],{status:'available',entries:[],olderCount:0,fromByte:100,nextByte:100,reset:false})");
+			await ui.wait("window.ui.reads().length === 4");
+			await ui.evaluate(`window.ui.answer(window.ui.reads()[3],{status:'available',entries:[${message("c2", "c1", "Last child row")}],olderCount:0,fromByte:100,nextByte:200,reset:false})`);
+			await ui.wait("document.querySelector('.omp-native-child-body').textContent.includes('Last child row')");
 		});
 
 		await t.test("a detail document that names nothing the extension can show says so and shows no session", async () => {

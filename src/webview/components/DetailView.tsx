@@ -3,7 +3,7 @@ import { ArtifactEpochContext } from "../lib/artifact-opener";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import type { RunningAgent } from "../../chat/agents";
 import type { ChatModel } from "../../chat/model";
-import { agentActivityText, agentDescription, agentRow, AGENT_STATUS_ICON, runningAgentDescriptions, sortedAgents, todoGlyph, todoNoteMarker, todoSummary, TODO_STATUS_WORD } from "../../chat/hud-summary";
+import { agentActivityText, agentDescription, agentModelLabel, agentRow, AGENT_STATUS_ICON, runningAgentDescriptions, sortedAgents, todoGlyph, todoNoteMarker, todoSummary, TODO_STATUS_WORD } from "../../chat/hud-summary";
 import { todoMatchesDescriptions } from "../../chat/todos";
 import type { DetailTarget } from "../../protocol/detail-target";
 import type { ChatClient } from "../lib/chat-client";
@@ -119,6 +119,7 @@ function AgentsDetail({ snapshot }: { snapshot: DetailSlice }): ReactNode {
 								<strong>{row.id}</strong>
 								{row.badge !== "" && <span className="omp-hud-dim">{row.badge}</span>}
 								<span className="omp-detail-status">{row.status}</span>
+								{row.model !== null && <span className="omp-detail-model" title={row.model.title}>{row.model.text}</span>}
 								{elapsed !== null && <span className="omp-hud-elapsed">{fmtDuration(elapsed)}</span>}
 								{row.description !== "" && <span className="omp-detail-agent-line">{row.description}</span>}
 								{row.activity !== "" && <span className="omp-detail-agent-line omp-hud-dim">{row.activity}</span>}
@@ -139,7 +140,13 @@ function AgentDetail({ client, snapshot, agentId }: { client: ChatClient; snapsh
 	if (current !== undefined) lastSeen.current = current;
 	const agent = current ?? lastSeen.current;
 	const live = current !== undefined && snapshot.phase === "live" && current.status === "running";
-	const loading = snapshot.epoch === null || snapshot.phase === "starting" || snapshot.phase === "attaching" || snapshot.phase === "resyncing";
+	const connecting = snapshot.epoch === null || snapshot.phase === "starting" || snapshot.phase === "attaching" || snapshot.phase === "resyncing";
+	// The conversation drops its roster while it reconnects and loads it again afterwards: only a live, loaded roster can say an agent is gone. Until then the tab keeps the last status it saw.
+	const settling = connecting || (snapshot.phase === "live" && snapshot.agentAvailability === "loading");
+	// A child history already on screen stays mounted through a reconnect (its reads fail quietly and keep the rows); only a tab that never showed one says "loading".
+	const bodyShown = useRef(false);
+	if (!connecting) bodyShown.current = true;
+	const loading = connecting && !bodyShown.current;
 	const readChild = useCallback(async (id: string, options?: { fromByte?: number; beforeId?: string }) => {
 		const page = await client.readSubagent(id, options);
 		const phase = client.getSnapshot().phase;
@@ -156,6 +163,7 @@ function AgentDetail({ client, snapshot, agentId }: { client: ChatClient; snapsh
 	const elapsed = current === undefined && agent?.status === "running" ? shown.current ?? measured : measured;
 	const description = agent === null ? "" : agentDescription(agent);
 	const assignment = agent?.assignment ?? "";
+	const model = agent === null ? null : agentModelLabel(agent.progress);
 	return (
 		<article className="omp-detail-body omp-detail-body--agent" aria-label={`Agent ${agentId}`}>
 			<header className="omp-detail-agent-head">
@@ -163,7 +171,8 @@ function AgentDetail({ client, snapshot, agentId }: { client: ChatClient; snapsh
 					{agent !== null && <span className={`codicon codicon-${AGENT_STATUS_ICON[agent.status]}`} aria-hidden="true" />}
 					<span>{agentId}</span>
 					{agent !== null && agent.agent.trim() !== "" && agent.agent.trim() !== "task" && <span className="omp-hud-dim"> {agent.agent.trim()}</span>}
-					<span className="omp-detail-status">{current !== undefined ? current.status : agent === null ? "not in the native registry" : "no longer in the native registry"}</span>
+					<span className="omp-detail-status">{current !== undefined ? current.status : settling ? agent?.status ?? "waiting for the registry" : agent === null ? "not in the native registry" : "no longer in the native registry"}</span>
+					{model !== null && <span className="omp-detail-model" title={model.title}>{model.text}</span>}
 					{elapsed !== null && <span className="omp-hud-elapsed">{fmtDuration(elapsed)}</span>}
 				</h1>
 				{description !== "" && <div className="omp-detail-agent-line">{description}</div>}
