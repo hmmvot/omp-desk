@@ -25,7 +25,7 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -33,6 +33,8 @@ import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { BrokerHandle } from "./broker-handle.ts";
 import { PTY_PROTOCOL_VERSION, attestationOf, type PtyBrokerFrame, type PtyRequestFrame } from "../wire/pty-protocol.ts";
+import { ptyRecordPath, ptyStateDirectory } from "../wire/pty-registry.ts";
+import { RPC_PACED_REASON } from "../broker/rpc-ring.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import { RpcHandle, RpcWriteError } from "./rpc-handle.ts";
 import { loadWin32Native, setWin32NativeForTest } from "../wire/win32-native.ts";
@@ -385,8 +387,21 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 		// About 12 MiB: more than any socket buffer plus the pace bound (2 MiB), less than a ring the stuck window is behind by.
 		void send(first, { type: "history", lines: 700, bytes: 16 * 1024, name: "flood" });
 		await new Promise(resolve => setImmediate(resolve));
-		const until = Date.now() + 4_000;
-		while (Date.now() < until) { /* a stuck extension host: nothing reads the socket */ }
+		// Nothing reads the socket until the broker has closed this consumer as paced, which its own log records. A fixed
+		// stretch of blocking is a guess about how fast the flood reaches the broker: on a slow runner the flood arrives
+		// late, the pace limit has not run out when the window starts reading again, the queue drains and the ring has
+		// meanwhile evicted the lines the cursor was behind, so the broker names the close `fell-behind`, not `paced`.
+		const brokerLog = path.join(ptyStateDirectory(storage), "logs", `${path.basename(ptyRecordPath(storage, slot), ".json")}.log`);
+		const closedAsPaced = (): boolean => {
+			try {
+				return readFileSync(brokerLog, "utf8").includes(`client closed: ${RPC_PACED_REASON}`);
+			} catch {
+				return false;
+			}
+		};
+		const stuckUntil = Date.now() + 60_000;
+		while (!closedAsPaced() && Date.now() < stuckUntil) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+		assert.ok(closedAsPaced(), "the broker closed the stuck consumer as paced within a minute");
 		const event = await closed;
 		assert.equal(event.type === "closed" ? event.reason : null, "disconnected");
 		// The wire carries no reason: the broker ends the connection, and says why only on the next attach (`lastForcedClose`).
