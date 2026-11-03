@@ -34,7 +34,8 @@ import { LocalRecordedStop } from "./runtime/local-recorded-stop";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
 import { registerEditorPanels, type EditorPanelsDeps } from "./wiring/editor-panels";
 import { registerSessionActions } from "./wiring/session-actions";
-import { createWindow, type DeskWindow, type TabState, type WindowState } from "./wiring/window";
+import { createWindow, type DeskWindow } from "./wiring/window";
+import type { TabState, WindowState } from "./wiring/window-state";
 
 // The ids the lifecycle test's fixtures use for its one editor: the same values as `EDITOR`, `TAB` and `DOCUMENT` there.
 const EDITOR = "b".repeat(32);

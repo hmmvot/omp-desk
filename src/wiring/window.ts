@@ -11,40 +11,34 @@
  * immediately; verified local/legacy writers offer one confirmed stop-and-Open/Delete path. External writers are the user's
  * responsibility.
  */
+import { createProviderModels } from "./provider-models";
+import { createFolderCommands } from "./folder-commands";
+import { createSessionInsertions, INSERT_TARGET_TIMEOUT_MS, INSERT_POLL_MS } from "./session-insertions";
+import { createFolderShells, SHELL_VIEW_TYPE, TERMINAL_PANEL_TYPES } from "./folder-shells";
+import { createFileEvidence } from "./file-evidence";
+import { createSessionDiagnostics, DIAGNOSTICS_DOCUMENT_SCHEME } from "./session-diagnostics";
 import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { MODULE_EVALUATION_STARTED_AT, MODULE_EVALUATION_STARTED_CPU_MS } from "../host/module-clock";
 import { ActivationTimer } from "../host/activation-timing";
-import { PAGE_START_FAILED_MESSAGE, PAGE_START_FAILURE_REASONS, UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "../host/guest-webview";
-import { createHtmlPageServer, type HtmlPageServer } from "../host/html-page-server";
+import { PAGE_START_FAILED_MESSAGE, PAGE_START_FAILURE_REASONS, UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml } from "../host/guest-webview";
+import { createHtmlPageServer } from "../host/html-page-server";
 import { chatExitText, type ChatExitReason } from "../chat/exit-reason";
 import { installedNerdFonts } from "../host/terminal-fonts";
 import { terminalFontFamily } from "../shared/terminal-theme";
-import {
-  DEFAULT_OMP_PROFILE,
-  delay,
-  renameStoppedSessionTitle,
-  resolveBunRuntime,
-  resolveOmpBinary,
-  resolveOmpPackageRoot,
-  setOmpBackgroundRunner,
-  setOmpPathReader,
-  setOmpResolutionLog,
-  terminalWriterForHandle,
-} from "../host/native-terminal";
-import { configuredChatBrokerRuntime, configuredOmpPath, findTerminalForPid, openProviderLoginTerminal } from "../host/omp-vscode";
+import { DEFAULT_OMP_PROFILE, delay, renameStoppedSessionTitle, resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot, setOmpBackgroundRunner, setOmpPathReader, setOmpResolutionLog, terminalWriterForHandle } from "../host/native-terminal";
+import { configuredChatBrokerRuntime, configuredOmpPath, findTerminalForPid } from "../host/omp-vscode";
 import type { LoginFlowDeps } from "../host/provider-login-flow";
-import { rareSubsystems, type RareSubsystems } from "./rare-subsystems-loader";
 import { runOmpCli, type OmpCliResult } from "../host/native-terminal";
-import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS, UsageFailureNotes } from "../host/provider-usage";
+import { ProviderUsageCache, UsageFailureNotes } from "../host/provider-usage";
 import { HelperScheduler, isHelperCancelled } from "../host/helper-scheduler";
 import { createHelperSlots } from "../host/helper-slots";
 import { readOmpSetting, readOmpSettings, TODO_CLEAR_DELAY_SETTING } from "../host/omp-setting-read";
 import { enabledMagicKeywords, MAGIC_KEYWORD_SETTING_KEYS } from "../shared/magic-keywords";
 import { observeSessionBranch } from "../host/session-branch";
-import type { GitApi, BranchObservation } from "../host/session-branch";
+import type { BranchObservation } from "../host/session-branch";
 import type { FooterMetadataMessage } from "../shared/footer-metadata";
 import { relativeAge } from "../shared/relative-age";
 import { reduceFileBlocks, splitFileBlocks } from "../shared/file-blocks";
@@ -58,26 +52,13 @@ import { startFsTurnaroundProbe } from "../host/fs-turnaround";
 import { startLoopLagMonitor, trackOperation } from "../wire/loop-lag";
 import type { OmpBinary, OmpCommand, OmpPackageRoot } from "../host/native-terminal";
 import { startChatRuntimeWarmup } from "../host/chat-runtime-warmup";
-import {
-  SESSION_INDEX_LOCAL_KEY,
-  SESSION_INDEX_STORAGE_KEY,
-  mergeSessionIndexRecords,
-  SessionIndex,
-} from "../host/session-index";
+import { SESSION_INDEX_STORAGE_KEY, mergeSessionIndexRecords, SessionIndex } from "../host/session-index";
 import { isManagedHost } from "../host/session-model";
-import { normalizeSessionIdentityKey, readSessionFileHeader } from "../host/session-files";
-import { LocalLauncher, brokerLossProven } from "../runtime/local-launcher";
+import { readSessionFileHeader } from "../host/session-files";
+import { LocalLauncher } from "../runtime/local-launcher";
 import type { LauncherWindow } from "../runtime/local-launcher";
-import {
-  LocalHostControl,
-  controlDirectoryOf,
-  controlOwnerFor,
-  controlProcessRecordKey,
-  controlReleaseRecordKey,
-  describeControlError,
-  recordedControlOwner,
-} from "../runtime/local-control";
-import type { ControlStore, ControlWindow, RecordedControlProcess, RecordedControlRelease } from "../runtime/local-control";
+import { LocalHostControl, controlDirectoryOf, describeControlError, recordedControlOwner } from "../runtime/local-control";
+import type { ControlStore, ControlWindow } from "../runtime/local-control";
 import { LocalExitOperations } from "../runtime/local-exit";
 import type { ExitWindow } from "../runtime/local-exit";
 import { LocalIdentity } from "../runtime/local-identity";
@@ -91,7 +72,6 @@ import { createRuntimeStaging } from "../runtime/runtime-entries";
 import { timedStep } from "../host/session-restore-trace";
 import type { RestorePassPhases } from "../host/session-restore-trace";
 import { runNativeStage } from "../runtime/native-stage-client";
-import type { RuntimeStaging } from "../runtime/runtime-entries";
 import { LocalSessionRuntime } from "../runtime/local-runtime";
 import type { LocalSessionRuntimeDeps } from "../runtime/local-runtime";
 import { LocalRecordedStop, createRecordedHostStopPort, readBrokerProvenance } from "../runtime/local-recorded-stop";
@@ -102,30 +82,18 @@ import type { ConversationRecord } from "../runtime/runtime-record";
 import type { TransitionWindow } from "../runtime/local-transition";
 import type { LiveConversation, StopResult, TransitionToken } from "../runtime/session-runtime";
 import { LocalStopOperations, withSessionReadDeadline } from "../runtime/local-stop";
-import type {
-  OmpHostLauncher,
-  RestoreOutcome,
-  RestoreReport,
-  SessionConflictKind,
-} from "../host/session-index";
-import type {
-  AttachPin,
-  DeferredReconcileReport,
-  DeferredReconciliation,
-  OwnerReconciler,
-} from "../host/session-availability";
+import type { OmpHostLauncher, RestoreOutcome, RestoreReport, SessionConflictKind } from "../host/session-index";
 import type { SessionIndexEntry, SessionViewMode } from "../host/session-model";
-import type { SessionFileHeader } from "../host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "../host/session-claim";
 import { formatToolSpawn, setToolSpawnObserver } from "../wire/tool-spawn-trace";
-import { type Logger, prefixedLogger } from "../shared/logger";
+import { type Logger } from "../shared/logger";
 import { LaunchTimeline, type LaunchKind } from "../host/launch-timeline";
 import { PendingOperations, type PendingHandle } from "../host/pending-operations";
 import { PendingDisplay } from "../host/pending-display";
 import { observeLaunchSteps } from "../host/pending-steps";
 import { launchReadiness, stepAfterChatPhase } from "../host/launch-readiness";
 import type { LaunchReadiness } from "../host/pending-operations";
-import type { PendingEnd, PendingKind, PendingOrigin, PendingStep } from "../shared/pending-operation";
+import type { PendingKind, PendingOrigin, PendingStep } from "../shared/pending-operation";
 import { pendingDisplayShell } from "./pending-shell";
 import { PersistFailureReporter } from "../host/persist-report";
 import { holderSeemsAlive } from "../host/holder-liveness";
@@ -138,112 +106,66 @@ import { describeLoadSteps, startWin32Native, win32Native, win32NativeFailure, w
 import { warmNativeAsset } from "../host/native-proof";
 import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, simulatedNativeFailure } from "./native-module-notice";
 import { nativeTroubleshootingAnchor } from "../wire/native-module-failure";
-import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "../host/folder-history";
-import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "../host/folder-history";
 import { comparablePosix, findFileMentions } from "../host/file-mentions";
-import {
-  EditorRecency,
-  candidateDescription as sendCandidateDescription,
-  composeEditorQuotes,
-  composeHunkQuote,
-  composeInsertion,
-  composeLineReference,
-  folderName as sessionFolderName,
-  insertAvailability,
-  newSessionFolder,
-  pickerEntries,
-  visibleQuoteTarget,
-} from "./editor-context";
-import type { EditorQuoteSource, HunkQuoteSource, LineReferenceSource, ReferenceSource, SendCandidate } from "./editor-context";
+import { EditorRecency } from "./editor-context";
 import { quoteHunkOf } from "./quote-hunk";
 import { quoteSourceOf } from "./quote-source";
 import { composePreviewQuote } from "./preview-quote";
 import type { PreviewDocument } from "./preview-quote";
 import type { ActivePreview } from "./preview-selection";
-import { activePreview, copyPreviewSelection, previewDocumentOf } from "./preview-selection";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "../wire/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "../wire/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "../host/session-unread";
 import { sendDesktopNotification } from "../host/desktop-notifications";
 import { notificationLine } from "../shared/notification-text";
 import { NativeActivityLedger } from "../wire/native-activity";
-import {
-  isOpenControlClient,
-  mayRefreshControlSnapshot,
-  mayReportControlFailure,
-} from "../host/control-attempt";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "../wire/runtime-assets";
+import { isOpenControlClient, mayRefreshControlSnapshot, mayReportControlFailure } from "../host/control-attempt";
+import { stageRuntimeAssets, type StagedRuntimeAsset } from "../wire/runtime-assets";
 import { PackageDrift } from "../host/package-drift";
-import {
-  DIAGNOSTICS_DOCUMENT_PATH,
-  DiagnosticsRecorder,
-  WINDOW_DIAGNOSTIC_SUBJECT,
-  redactCapabilities,
-} from "../host/diagnostics";
-import type { DiagnosticEnvironment, DiagnosticStageId } from "../host/diagnostics";
-import {
-  folderHeadline,
-  sessionFileLabel,
-  sessionItemState,
-  sessionStateLabel,
-  sessionHeadline,
-  SessionTreeItem,
-  SessionTreeProvider,
-  sizeText,
-  WorkspaceFolderTreeItem,
-} from "../views/session-tree";
+import { DiagnosticsRecorder, WINDOW_DIAGNOSTIC_SUBJECT, redactCapabilities } from "../host/diagnostics";
+import { sessionFileLabel, sessionHeadline, SessionTreeItem, SessionTreeProvider, WorkspaceFolderTreeItem } from "../views/session-tree";
 import { ProcessTreeItem } from "../views/process-rows";
-import { registerInventoryViews, type InventoryHandle } from "./inventory-wiring";
-import { registerContextView, type ContextHandle } from "./context-wiring";
-import { registerUsageStatus, type UsageStatusHandle } from "./usage-status-wiring";
+import { registerInventoryViews } from "./inventory-wiring";
+import { registerContextView } from "./context-wiring";
+import { registerUsageStatus } from "./usage-status-wiring";
 import { registerCodeTheme } from "./code-theme-wiring";
-import { registerKeyHints, type KeyHintsHandle } from "./key-hints-wiring";
+import { registerKeyHints } from "./key-hints-wiring";
 import type { ContextSession, ContextTarget } from "../host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./window-routing";
-import type { HandOverResult, WindowRouting, WindowRoutingDeps } from "./window-routing";
+import type { HandOverResult, WindowRoutingDeps } from "./window-routing";
 import { createFileWindow } from "./file-window";
-import type { FileWindow } from "./file-window";
 import { registerSessionActions } from "./session-actions";
 import { adoptSessionTitle } from "./session-title";
-import type { SessionActions, SessionActionsDeps } from "./session-actions";
+import type { SessionActionsDeps } from "./session-actions";
 import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./guest-dispatcher";
-import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./guest-dispatcher";
+import type { CarriedDraft, GuestDispatcherDeps } from "./guest-dispatcher";
 import { registerRecentSessions } from "./recent-sessions";
 import { registerArtifactDocuments } from "./artifact-documents";
-import type { ArtifactDocuments } from "./artifact-documents";
 import { registerSessionFileDocuments } from "./session-file-documents";
-import type { SessionFileDocuments } from "./session-file-documents";
 import { registerBridgeHost } from "./bridge-host";
-import type { BridgeHost, BridgeHostDeps } from "./bridge-host";
+import type { BridgeHostDeps } from "./bridge-host";
 import { EDITOR_TAB_ICON, UPDATED_ON_DISK_DETAIL, registerEditorPanels } from "./editor-panels";
-import type { EditorPanels, EditorPanelsDeps, PanelDocument } from "./editor-panels";
+import type { EditorPanelsDeps, PanelDocument } from "./editor-panels";
 import { registerDeskSettingsView } from "./desk-settings-view";
 import type { SessionToolsTarget } from "../host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "../views/session-tree";
-import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "../views/workspace-folders";
+import { WorkspaceFolderRegistry, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "../views/workspace-folders";
 import { LauncherFolders } from "../views/launcher-folders";
 import { SessionFolderResolver } from "../wire/session-folder";
 import { displayFolderPath } from "../host/folder-display";
 import type { LauncherFolder } from "../views/launcher-folders";
-import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "../views/workspace-folders";
-// The chat over rpc-ui (ADR-0038): a host-owned conversation per tab, served to any page.
+import type { FolderPathInspector, FolderPathVerdict } from "../views/workspace-folders";
 import { ChatRuntime } from "../host/chat-runtime";
 import { activateAgentDebugger } from "../host/debug/index";
 import type { ChatPage, ChatRuntimeEvent } from "../host/chat-runtime";
-import { attachRpcHost, launchRpcHost, stopRpcHost } from "../host/rpc-launch";
+import { attachRpcHost, launchRpcHost } from "../host/rpc-launch";
 import { PendingForks } from "../host/pending-forks";
 import { FORK_REFUSAL_SENTENCES } from "../chat/fork";
 import { attachNativeHost, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "../host/native-session";
 import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session";
-import {
-  createOwnerReconciler,
-  kernelProcessIdentity,
-  probeBrokerSlotForRunningChild,
-  probeRpcHost,
-} from "../host/rpc-reconcile";
-import type { NativeStopVerdict } from "../host/rpc-reconcile";
+import { createOwnerReconciler, kernelProcessIdentity, probeBrokerSlotForRunningChild, probeRpcHost } from "../host/rpc-reconcile";
 import type { ChoiceOutcome, CommandResult, CompactMode, SendRefusal, ShakeMode } from "../host/rpc/session";
-import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "../host/slash-registry";
+import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction } from "../host/slash-registry";
 import { readServedModels, ServedModelMemo } from "../host/served-model";
 import type { ServedModelPair, ServedModelVerdict } from "../chat/served-model";
 import { NAVIGATE_REFUSAL_SENTENCES } from "../chat/rewind";
@@ -254,41 +176,28 @@ import { activitySignature, withRegistrySubagentWork } from "../protocol/activit
 import type { TurnActivityReport } from "../protocol/activity";
 import { STATE_UNCONFIRMED_REASON } from "../protocol/rpc";
 import type { ChatDisplayPreferences, ChatWebviewMessage } from "../protocol/chat-messages";
-// The reconnecting bridge (ADR-0023): one exact listener per actual editor, durable
-// records, one route per document, and one admission path for irreversible changes.
 import { BridgeEditorEndpoint, BRIDGE_GUEST_RELOAD_REASON } from "../host/bridge-endpoint";
 import { BridgeAdmissionError } from "../host/bridge-route";
-import type { BridgeDocumentRoute, BridgeEndpointState, BridgeReservation } from "../host/bridge-route";
+import type { BridgeDocumentRoute, BridgeReservation } from "../host/bridge-route";
 import { EditorCoordinator } from "../host/editor-coordinator";
 import type { BridgeAdmittedRequest, BridgeSession } from "../host/bridge-listener";
 import { tabInputIdentity } from "../host/bridge-identity";
-import {
-  BRIDGE_MAX_PLAINTEXT_BYTES,
-  asciiJsonText,
-  createToken,
-  decodeBase64Url,
-  encodeHex,
-  randomBytes,
-  sha256,
-} from "../protocol/bridge-protocol";
-import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "../shared/panel-identity";
+import { BRIDGE_MAX_PLAINTEXT_BYTES, asciiJsonText, createToken, encodeHex, randomBytes } from "../protocol/bridge-protocol";
+import { isPanelTabId } from "../shared/panel-identity";
 import { isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestRecallPromptMessage } from "../protocol/messages";
 import { DETAIL_VIEW_TYPE, DetailTabs } from "../host/detail-tabs";
 import { MERMAID_PREVIEW_VIEW_TYPE, MermaidPreviews } from "../host/mermaid-previews";
 import { EDITOR_GROUP_FOCUS_COMMANDS } from "../host/chat-layout";
 import { selectEditorTab as selectEditorTabThrough } from "../host/editor-tab-selection";
 import type { TabSelectionApi } from "../host/editor-tab-selection";
-// The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
-// panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "../host/pty-client";
 import { ptyStateDirectory } from "../wire/pty-registry";
 import { ptyRecordedTreeDigestFile } from "../host/pty-runtime";
 import { createPtyReadinessGate } from "../host/pty-readiness";
-import type { PtyReadinessGate } from "../host/pty-readiness";
 import { createBrokerSlotStore, mergeBrokerSlotRecords, BROKER_SLOTS_KEY } from "../host/broker-slots";
 import { createEditorSlotRegistry } from "../host/editor-slots";
-import type { EditorSlotRegistry, EditorSlotRole } from "../host/editor-slots";
-import type { BrokerSlotProvenance, BrokerSlotStore } from "../host/broker-slots";
+import type { EditorSlotRole } from "../host/editor-slots";
+import type { BrokerSlotProvenance } from "../host/broker-slots";
 import type { PtyHandle } from "../host/pty-client";
 import { TerminalPipeline } from "../host/terminal-pipeline";
 import type { TerminalHostMessage } from "../host/terminal-pipeline";
@@ -300,7 +209,7 @@ import { FileNameLinkResolver, excludePatterns, fileChoiceLabel, folderExcludeSe
 import { FileEventGate } from "../host/link-watch";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "../shared/code-symbols";
 import { handleInternalLink } from "../host/internal-links";
-import { CommitLinkResolver, handleCommitLink } from "../host/commit-links";
+import { handleCommitLink } from "../host/commit-links";
 import { createCommitLinkResolver } from "./commit-links";
 import { parseCommitLinkTarget } from "../shared/commit-links";
 import { handleLinkRuleOpen } from "../host/link-rules";
@@ -308,27 +217,12 @@ import type { LinkRuleSource } from "../host/link-rules";
 import { createWindowLinkRules } from "./link-rules";
 import { showDeskCommands } from "./palette-commands";
 import { parseInternalLink } from "../shared/internal-links";
-import {
-  createShellSlotId,
-  createShellSlotStore,
-  mergeShellSlotRecords,
-  shellClosePrompt,
-  reconnectableShellSlots,
-  shellLaunchOutcome,
-  shellSlotsForFolder,
-  SHELL_SLOTS_KEY,
-} from "../host/shell-slots";
-import type { ShellLiveness, ShellSlotRecord, ShellSlotStore } from "../host/shell-slots";
-import { stopShellAndBroker, watchShellExit, type ShellExitWatchStop } from "../host/shell-exit";
+import { createShellSlotStore, mergeShellSlotRecords, SHELL_SLOTS_KEY } from "../host/shell-slots";
 import { watchBrokerLoss } from "../host/broker-loss";
 import { setTimeout as delayMs } from "node:timers/promises";
-// The profile catalog (ADR-0034) is the one authority for this extension's durable
-// state; it is profile-wide, so opening another VS Code folder neither hides the
-// user's sessions and folders nor forks them.
-import { catalogPaths, createCatalogStore, startCatalogWatch } from "../host/profile-catalog";
-import type { CatalogStore } from "../host/profile-catalog";
+import { catalogPaths, startCatalogWatch } from "../host/profile-catalog";
 import { openProfileCatalog } from "./catalog-recovery";
-import type { CatalogRecoveryHandle, OpenedCatalog } from "./catalog-recovery";
+import type { OpenedCatalog } from "./catalog-recovery";
 import { importPredecessorFolders } from "./predecessor-import";
 import { registerCatalogAdoption } from "./catalog-adoption";
 import type { CatalogAdoption, CatalogAdoptionDeps } from "./catalog-adoption";
@@ -343,89 +237,19 @@ import { announceRename, foreignOmpNames, legacyContextKey, registerLegacyAliase
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import { announceUpdaterTerminations, updaterNoticeFiles } from "./updater-notice";
-import type { SessionProcesses } from "./process-wiring";
 import { registerSettingsEditors } from "./settings-editors";
 import type { SettingsEditorContext } from "../host/omp-settings-editor";
 import { SETTINGS_APPLY_NOT_LIVE } from "../host/omp-settings-apply";
-// The folder-shell owner hint and the broker's own answer about it (ADR-0030): the
-// extension can only *discover* the candidate owning instance, and it may only report
-// what the broker actually admitted.
 import { folderShellOwnerHint } from "../host/shell-owner";
-import { shellEditorTitle, shellCleanupDescription, watchShellOwnerStop } from "../host/shell-title";
-import type { PtyOwnerHint, PtyOwnerStopState } from "../wire/pty-protocol";
-import { filetimeToEpochMs } from "../wire/pty-protocol";
-import type {
-  GuestControlRequestMessage,
-  GuestControlStateMessage,
-  GuestPanelAction,
-  GuestPanelActionMessage,
-  GuestInsertQuoteMessage,
-  GuestInsertTextMessage,
-  GuestHostMessage,
-  GuestSessionViewMessage,
-  GuestTerminalFontMessage,
-  GuestTerminalCopyReplyMessage,
-  GuestTerminalCopyRequestMessage,
-  GuestTerminalActivateMessage,
-} from "../protocol/messages";
-// Host control — every symbol from the `src/host/control-*` modules is imported in
-// this one block, so a rename there is a change here and nowhere else. The channel
-// is optional: a failure to establish it never blocks a session.
-import {
-  createControlRequestId,
-  controlPathEquals,
-  readControlRendezvous,
-} from "../wire/control-protocol";
+import { shellCleanupDescription } from "../host/shell-title";
+import type { PtyOwnerHint } from "../wire/pty-protocol";
+import type { GuestControlRequestMessage, GuestControlStateMessage, GuestPanelAction, GuestPanelActionMessage, GuestHostMessage, GuestSessionViewMessage, GuestTerminalFontMessage, GuestTerminalCopyReplyMessage, GuestTerminalCopyRequestMessage, GuestTerminalActivateMessage } from "../protocol/messages";
+import { createControlRequestId, controlPathEquals } from "../wire/control-protocol";
 import type { ControlModelRef } from "../protocol/control";
-import type {
-  ControlHostSnapshot,
-} from "../wire/control-protocol";
-import {
-  HostControlClient,
-  HostControlRefusedError,
-  queryControlProcessGeneration,
-} from "../host/control-client";
-// Native file observation — read-only evidence. The producer lives in the native
-// host (`src/omp/file-evidence.ts`, wired in `src/omp/host-control.ts`); these are
-// the extension-side policy, reader and display helpers it is bound to.
-import {
-  fileEvidenceStoreRoot,
-  observationCallKey,
-  observationCallViews,
-  observationComparisonNotice,
-  observationComparisonTitle,
-  observationDetailLines,
-  observationDocumentPath,
-  observationPathLabel,
-  observationPairs,
-  observationShortStage,
-  observationSummaryLine,
-  observationTextState,
-  observationTokenFromPath,
-  OBSERVATION_DOCUMENT_SCHEME,
-} from "../wire/file-evidence-reader";
-import type { ObservationPair, ObservationTextState } from "../wire/file-evidence-reader";
-import {
-  NATIVE_FILE_OBSERVATION_DISCLOSURE,
-  NATIVE_FILE_OBSERVATION_DISCLOSURE_ID,
-  deleteNativeFileObservationHistory,
-  disableNativeFileObservationCapture,
-  grantNativeFileObservationConsent,
-  openNativeFileObservationJournal,
-  readNativeFileObservationConsent,
-  readNativeFileObservationDisable,
-  resolveNativeFileObservationStorePaths,
-  restrictNativeFileObservationStorage,
-  revokeNativeFileObservationConsent,
-} from "../wire/native-file-observation-storage";
-import type {
-  NativeFileObservationJournal,
-  NativeFileObservationStorePaths,
-} from "../wire/native-file-observation-storage";
-import type {
-  NativeFileObservationCallView,
-  NativeFileObservationRecord,
-} from "../wire/native-file-observation";
+import type { ControlHostSnapshot } from "../wire/control-protocol";
+import { HostControlClient, HostControlRefusedError } from "../host/control-client";
+import { OBSERVATION_DOCUMENT_SCHEME } from "../wire/file-evidence-reader";
+import type { ControlChannel, ObservationDocumentEntry, TabState, TerminalCopyRequest, WindowState } from "./window-state";
 
 const PANEL_VIEW_TYPE = "omp.session";
 
@@ -504,554 +328,12 @@ const STREAMING_CONTEXT = "ompDesk.streaming";
  */
 const COMPOSER_POPUP_CONTEXT = "ompDesk.composerPopupOpen";
 
-
 /** What the user is told when a session cannot be opened safely. */
 const CONFLICT_LABEL: Record<SessionConflictKind, string> = {
   live: "Another OMP process is already hosting this session",
   "claim-conflict": "Another OMP Desk window holds this session",
   duplicate: "This session is already open in another tab",
 };
-
-
-/**
- * One editor's live resources and one conversation's native side, as this window
- * holds them.
- *
- * A record belongs to an **immutable editor slot** (ADR-0025): its key in
- * {@link WindowState.tabs} is the editor id `E` (32 hex) for a session editor, the shell slot
- * id for a folder shell, or — only while a conversation has been launched or
- * navigated but no editor exists for it yet — the conversation's own `tab:<uuid>`
- * id. {@link bindSlotToConversation} moves that pre-editor record under the
- * editor's immutable key, so one editor's resources are never reachable under two
- * keys.
- *
- * `tabId` is therefore *mutable*: a settled native switch changes which
- * conversation this editor shows and moves nothing else. Two editors of one
- * conversation (its controller and a passive one that keeps an unsent draft) are
- * two records, each under its own editor id, and can never collide.
- *
- * Whether a slot may *act* is not stored here: the {@link WindowState.editorSlots} registry owns
- * role, generation and the reason a slot is passive, and {@link passiveReasonOf} is
- * the one way to read it.
- */
-export interface TabState {
-  /** The immutable key this record is filed under in {@link WindowState.tabs}. */
-  slotId: string;
-  /** The conversation this editor shows, or `null` for a folder shell. */
-  tabId: string | null;
-  panel: vscode.WebviewPanel | null;
-  mode: SessionViewMode;
-  viewProjection: GuestSessionViewMessage | null;
-  /**
-   * Which document the bound panel shows: the guest bundle, a bounded explanation while
-   * the bridge endpoint it needs does not exist yet, or `null` while it has none. A panel
-   * can be bound before that endpoint exists (VS Code may restore an editor during
-   * activation), so it starts on the explanation document and is pointed at the guest
-   * bundle once one is known. Ordinary updates never reload a live document;
-   * replacing its native child explicitly starts a fresh document incarnation.
-   */
-  document: PanelDocument | null;
-  /**
-   * The detach function of the route currently carrying this editor's conversation (panel or
-   * bridge), and that route's id. The conversation is the host's; this is only how one editor
-   * is pointed at it.
-   */
-  chatDetach: (() => void) | null;
-  chatPageId: string | null;
-  /**
-   * The document facts a page reported with `omp:ready` while this editor was not yet
-   * controlling. That report is the only chance the host gets to pin the document's Origin
-   * (a page announces itself once), so it is held here and applied the moment the editor
-   * may act; without it the document is never committed and a page that outlives a
-   * host-only restart has no bridge secret to reconnect with.
-   */
-  heldReadyReport: { readonly documentId: string; readonly bootstrapId: string; readonly origin: string } | null;
-  /**
-   * How the bound panel came to exist. VS Code's own restored editor wins over a
-   * transient panel an explicit open created, and the first restored editor wins
-   * over a second one for the same tab; the origin is what tells them apart.
-   */
-  origin: "created" | "restored" | null;
-  /**
-   * Sequence numbers of this tab's two editor events — the last open/view
-   * request and the last close — both from {@link WindowState.editorEventSequence}, so their
-   * order is known rather than guessed. `-1` means the event never happened in this
-   * window. An open attempt that waited for the activation pass compares them
-   * on resume so its continuation cannot reopen an editor closed meanwhile.
-   */
-  lastOpenRequest: number;
-  lastEditorClose: number;
-  /**
-   * This tab's editor was created by the open attempt now in flight (not already open when it began): a Cancel of that attempt's
-   * external-writer question closes it again unless the row's run intent is `stopped` (ADR-0046, editor first). Cleared when the attempt ends.
-   */
-  editorOfAttempt: boolean;
-  /** The verb of the open attempt now in flight for this tab, or `null`: a `resumed` click joining a history view upgrades it to a launch. */
-  openingVerb: "started" | "opened" | "resumed" | null;
-  /** The last open attempt of this tab ended at a Cancel of its external-writer question (so `openSession` reports it as not opened). */
-  openDeclined: boolean;
-  /** Frontend for a folder shell or the managed native session. */
-  pipeline: TerminalPipeline | null;
-  /** The folder-shell slot this editor carries, when this tab *is* a folder shell. */
-  shellSlot: string | null;
-  /**
-   * The live subscription keeping this shell editor's title in step with the broker's own
-   * owner-stop verdict, or `null` when this tab has none (every non-shell tab, and a shell
-   * whose editor is gone). A verdict can change while the editor is open — a lost helper
-   * disarms an armed shell — so the title is refreshed on each transition rather than
-   * decided once, and the subscription dies with the editor it belongs to.
-   */
-  ownerStopWatch: ShellExitWatchStop | null;
-  /**
-   * The bridge endpoint this tab's editor owns, once one exists.
-   *
-   * `editorId` is the actual editor (`E`) — what VS Code itself restores, what the
-   * endpoint's listener is bound for, and what its durable records are filed under.
-   * A tab with no entry has not been given a bridge editor yet (a legacy panel
-   * before its one-time migration, or a window that never created one).
-   */
-  bridge: {
-    readonly editorId: string;
-    readonly endpoint: BridgeEditorEndpoint;
-    /** The document incarnation whose HTML this tab's panel currently shows. */
-    documentId: string | null;
-    /** Whether the page acknowledged the current secret delivery. */
-    bound: boolean;
-  } | null;
-}
-
-
-/**
- * Everything one window mutates while it runs, in one object.
- *
- * `activate` builds it with {@link createWindowState} and installs it in the one module
- * binding, {@link window}; every function reads it through {@link windowState}. Grouped by concern.
- */
-export interface WindowState {
-  // Session index and claims
-  /**
-   * Ownership reconciliation for this window, built by activation.
-   *
-   * It is not a bare module function on purpose: reconciling a surviving writer needs
-   * the durable broker-slot locator and the PTY broker client, and the transport it
-   * proves must be the transport the later attach uses. Activation owns both, so it
-   * builds the ports here — before any restore, open or draft pass runs.
-   */
-  reconciler: OwnerReconciler;
-  /** This window's session runtime (ADR-0066): open, restore and reattach go through it, never to the index directly. */
-  sessionRuntime: LocalSessionRuntime;
-  /** The session index this activation created, for the bridge's own eligibility checks. */
-  indexForBridge: SessionIndex | null;
-  /** This window's view of the profile catalog, built once at activation (ADR-0034). */
-  catalogStore: CatalogStore | undefined;
-  /** The private backup and loss report of the catalog (ADR-0081); set with the catalog. */
-  catalogRecovery: CatalogRecoveryHandle | undefined;
-  /**
-   * Reads the catalog at activation, adopts what the catalog's commits change (this window's and a peer's, by record key),
-   * runs the startup restore pass over the rows this window is responsible for, and owns the state of that pass (the
-   * pending flag, the pass and its kept broker connections, the deferral display-only reads wait on). See
-   * `src/wiring/catalog-adoption.ts`.
-   *
-   * Editor restoration and commands consult `ready()`: VS Code may hand this window a restored editor (or a command may
-   * arrive) before the catalog has been read, and resolving a row against a not-yet-read catalog would report a stored
-   * session as gone.
-   */
-  readonly catalogAdoption: CatalogAdoption;
-  /** The session-lease observer of this window (ADR-0046); `null` where there is no probe. */
-  externalLeases: ExternalLeaseObserver | null;
-  /** Claim file name per row target, resolved once: the name needs the filesystem, and a watch batch asks for every row. */
-  readonly claimFileNames: Map<string, string | null>;
-
-  // Window registry and routing
-  /** The leased registry of this profile's windows (ADR-0056), once this window activated. */
-  windowRegistry: WindowRegistry | undefined;
-  /** Remembers the editor slots this window has held and drops the passive bindings of the ones that closed (ADR-0025 amendment 2026-10-19); set at activation. */
-  editorSlotPruner: EditorSlotPruner | undefined;
-  /** Re-probe the session folders (the checkout roots) of every live window's folders; set at activation. */
-  resolveSessionFolders: () => Promise<void>;
-  /**
-   * Tabs whose editor a window request has made visible and whose serializer revival has not
-   * happened yet. The revival consumes the mark ({@link WindowRouting.openRestoredTabIfUncovered}) and, for a
-   * session with no live host, then opens nothing; an explicit Open of the tab clears it.
-   * Nothing releases it on elapsed time: a request selects an editor, it never starts, restores
-   * or claims a session, however late VS Code revives the editor.
-   */
-  readonly requestSelections: Set<string>;
-  /** Hands sessions and launches to the other windows of the profile and serves their requests (ADR-0056, ADR-0057). */
-  readonly routing: WindowRouting;
-  /** The Ctrl+Shift+M file window: files from Chat links open in it while it lasts. */
-  readonly fileWindow: FileWindow;
-
-  // Editor panels and bridge
-  /**
-   * The one authoritative map of every editor's live resources (ADR-0025).
-   *
-   * The key is the immutable editor slot (see {@link TabState}), never the
-   * conversation: a settled native switch changes what its editor shows and moves
-   * nothing, and two editors of one conversation each keep their own record. A key
-   * that names a conversation exists only while that conversation has no editor yet
-   * (its launch or navigation record); binding an editor moves it under the editor's
-   * key. Read it through {@link stateOf}, which resolves both key kinds, and never by
-   * taking whichever entry happens to show a conversation.
-   */
-  readonly tabs: Map<string, TabState>;
-  /**
-   * The window's reconnecting bridge (ADR-0023): the endpoints and documents of its editors, their routes and the host
-   * generation. It owns the workspace hash, the record store, the endpoints being created and the serializer types. The
-   * lifecycle harness never replaces it: its host generation is the one every endpoint of the window is fenced to.
-   */
-  readonly bridgeHost: BridgeHost<TabState>;
-  /** The loopback server of a reply's HTML page frame (ADR-0079): bound lazily, only while `ompDesk.chatHtmlPages` is on. */
-  readonly htmlPageServer: HtmlPageServer;
-  /**
-   * The window's session editors as VS Code panels: where one opens, how a panel becomes a chat surface, the document it
-   * shows and the serializers that revive it. Mutable only because the lifecycle harness replaces it with a handle built
-   * from fake facts; no product code assigns it.
-   */
-  editorPanels: EditorPanels;
-  /** One endpoint per actual editor (`E`) this window serves; the bridge host creates them and `dispose` closes them. */
-  readonly bridgeEndpoints: Map<string, BridgeEditorEndpoint>;
-  /**
-   * Builds one editor's endpoint for the bridge host. Product code never assigns it; the lifecycle harness swaps in an
-   * endpoint whose listener cannot bind, so its editors run on the panel route with the host's real creation path.
-   */
-  createBridgeEndpoint: BridgeHostDeps<TabState>["createEndpoint"];
-  /**
-   * Whether a runtime's recorded OMP root has already ended (`recordedRootGone` over this window's broker client). Product
-   * code never assigns it; the lifecycle harness, whose runtimes carry process ids no real process has, answers for the
-   * roots it models.
-   */
-  rootGone: (root: { readonly pid: number; readonly creationTime: string | null }) => Promise<boolean>;
-  /** Editor ids present in this window's actual editor membership right now. */
-  readonly bridgeLiveEditors: Set<string>;
-  /** The one-winner reservation table of this window's editors (ADR-0019/0023). */
-  readonly bridgeEditors: EditorCoordinator;
-  /** Last restore outcome per tab: real refused/failed status the launcher shows. */
-  readonly outcomes: Map<string, RestoreOutcome>;
-  /**
-   * Explicit opens in flight, one promise per tab.
-   *
-   * Two clicks on one row must converge on one attempt: without this, the second
-   * reaches `SessionIndex.restore` for a tab the first is already restoring, the
-   * index refuses it as a duplicate, and the panel that click had just created is
-   * left disconnected. The entry is removed when the attempt settles, so a later
-   * click is a fresh attempt — which is what keeps a refused or failed open
-   * retryable.
-   */
-  readonly openingTabs: Map<string, Promise<void>>;
-  /** A Chat /new or /delete replaces its editor in that editor's own group. */
-  readonly sessionPanelColumns: Map<string, vscode.ViewColumn>;
-  /** Confirmed recorded-host stops still awaiting their broker verdict. */
-  readonly stoppingTabs: Set<string>;
-  /**
-   * The document each editor's page has announced (`omp:ready`) it is listening in. A reference is
-   * posted to a chat page only once its current document is in here: a page that has not announced
-   * itself has no composer to receive it.
-   */
-  readonly readyDocuments: WeakMap<TabState, PanelDocument>;
-  /** Callers waiting for one editor slot's panel handle, resolved by {@link bindPanel}. */
-  readonly panelBindWaiters: Map<string, Set<() => void>>;
-  /** Pending view requests disable title actions before initialization is ready to be fenced. */
-  readonly pendingSessionViewChanges: Map<TabState, number>;
-  /** One id per panel handle, so a route can be detached without keeping the panel alive. */
-  readonly panelPageIds: WeakMap<vscode.WebviewPanel, string>;
-  /** Source of the next {@link WindowState.panelPageIds} id. */
-  panelPageSequence: number;
-  /** The native-screen copy request in flight per terminal editor; it expires after a short deadline. */
-  readonly terminalCopyRequests: WeakMap<TabState, TerminalCopyRequest>;
-  /**
-   * Elections in flight, by editor slot: the durable record of which editor controls a
-   * session is being written, and a command that arrives before it settles waits for it
-   * instead of being judged on the interim, passive answer.
-   */
-  readonly slotElections: Map<string, Set<Promise<void>>>;
-  /** The footer metadata each chat tab last published, with the branch observer that keeps it current. */
-  readonly footerBindings: Map<string, {
-    cwd: string;
-    message: FooterMetadataMessage;
-    observer: BranchObservation | null;
-    modelId: string | null;
-    /** When the provider usage behind `message` was last read successfully (host-only; the status bar's tooltip). */
-    usageReadAt?: number | null;
-  }>;
-
-  // Guest dispatch
-  /** The page-message dispatcher; it owns the selection and draft-capture request tables. */
-  readonly guestDispatcher: GuestDispatcher<TabState>;
-  /** Tabs whose composer currently shows its `@`-completion popup (reported by the page). */
-  readonly composerPopupTabs: Set<string>;
-  /** Watches the liveness reports of this window's Chat pages and logs a page that stops answering (one timer, only while a page is watched). */
-  readonly pageHealth: PageHealthMonitor;
-  /** Drafts captured from a replaced document, waiting for its successor to be ready (by editor slot). */
-  readonly draftRestores: Map<string, CarriedDraft<TabState>>;
-  /**
-   * The installed OMP's builtin slash registry, read once per install by `media/slash-registry.mjs` and re-checked at
-   * most once a minute, so an OMP update changes which typed commands are terminal-only without a Desk release.
-   * `null` while unknown: nothing is refused as terminal-only then.
-   */
-  slashRegistry: SlashRegistry | null;
-  /** The install whose registry could not be read: its helper is not started again until the install changes. */
-  slashRegistryFailedKey: string | null;
-  /** When the slash registry was last read (epoch ms). */
-  slashRegistryCheckedAt: number;
-  /** The slash registry read in flight, if any. */
-  slashRegistryLoading: Promise<void> | null;
-  /** The served-model verdicts read from the installed OMP, per install: a page asks only about replies that name another served id. */
-  servedModels: ServedModelMemo;
-  /**
-   * The window's code-symbol resolver (docs/designs/2026-10-10-code-symbol-links.md): created by the first Chat
-   * request, asking VS Code's workspace symbol providers, and dropped whenever files or folders change. Only
-   * `file` locations count; a provider's library or metadata location has no path inside any session folder.
-   */
-  symbolLinks: SymbolLinkResolver | undefined;
-  /** The window's commit-hash link resolver (docs/designs/2026-10-17-commit-hash-links.md): created by the first Chat request that names a hash. */
-  commitLinks: CommitLinkResolver | undefined;
-  /** Slots whose pages asked about symbols, told when parked tokens may be asked again. */
-  readonly symbolAskers: Set<string>;
-  /** The installed Nerd Font families, once read. */
-  installedTerminalFonts: readonly string[];
-  /** The one read of the installed terminal fonts, started by the first terminal pane that asks. */
-  installedTerminalFontsRead: Promise<void> | null;
-
-  // PTY and broker
-  /**
-   * The extension-owned PTY broker client: the only way this window starts or
-   * re-adopts a managed writer (ADR-0024).
-   *
-   * Created once per activation. Its presence is not evidence that a broker exists —
-   * {@link ready} answers that — and nothing here starts a process by itself.
-   */
-  ptyClient: PtyBrokerClient | undefined;
-  /**
-   * This window's readiness gate over {@link WindowState.ptyClient}.
-   *
-   * `PtyBrokerClient.ready()` refuses to cache a failure on purpose — a half-finished
-   * staging pass is the usual cause — so the window must not cache one either: a
-   * transient self-check failure at startup would otherwise make every surviving
-   * broker unadoptable for the rest of the activation. The gate latches a *proven*
-   * runtime, shares one attempt between callers that arrive together, and retries a
-   * failed check when a later row, click, recheck or attach asks again.
-   */
-  ptyGate: PtyReadinessGate | undefined;
-  /**
-   * Which broker slot each managed host occupies, keyed by the editor slot that
-   * opened it and by the conversation it currently serves.
-   *
-   * The slot is the only way a broker record is found again, so it must survive both
-   * a conversation switch and an extension-host restart — which is why it is neither
-   * derived from the conversation id nor from anything the process reports.
-   */
-  brokerSlots: BrokerSlotStore | undefined;
-  /**
-   * This window's map from an immutable editor slot to the live resources it holds.
-   *
-   * Derived state, rebuilt as panels are bound: it tells a slot apart from the
-   * conversation it currently shows, so two editors of one conversation (a stopped
-   * editor and the editor a native switch moved onto that conversation) coexist with
-   * exactly one controller and no key collisions.
-   */
-  readonly editorSlots: EditorSlotRegistry;
-  /** The durable folder-shell slot registry; folder shells are never sessions. */
-  shellSlots: ShellSlotStore | undefined;
-  /**
-   * Folder-shell editors this window carries: slot id to the tab id its editor uses.
-   *
-   * A shell is not an indexed tab, but it needs the same panel plumbing (one editor,
-   * one serializer identity, one protocol for its page). The mapping is what lets a
-   * close, a reconnect and a serializer revival find the same slot.
-   */
-  readonly shellEditors: Map<string, string>;
-  /** Launch, recovery and the native watch share one connection attempt for the exact runtime. */
-  readonly hostControlAttempts: WeakMap<SessionHostRuntime, Promise<void>>;
-
-  // Views
-  /** The inventory views' registration handle; `null` before they register and after they are disposed. */
-  inventoryViews: InventoryHandle | null;
-  /** The context view's registration handle; `null` before it registers. */
-  contextView: ContextHandle | null;
-  /** The provider-usage status bar item; `null` before it registers. */
-  usageStatus: UsageStatusHandle | null;
-  /** The effective keys of the empty state and what may take them; `null` before they register. */
-  keyHints: KeyHintsHandle | null;
-  /** The user's link rules (`ompDesk.chatLinkRules`, user settings only); created on first use. */
-  linkRules: LinkRuleSource | null;
-  /** The Sessions view's background processes: its reader, poll and stop commands. */
-  sessionProcesses: SessionProcesses | null;
-  /**
-   * What the Sessions view's commands do to one session or process (click, open, forget, stop, kill, delete, refresh) and the
-   * processes of its brokers. Created with the window. It is mutable only because the lifecycle harness replaces it with a handle
-   * built from fake broker facts; no product code assigns it.
-   */
-  sessionActions: SessionActions;
-  /**
-   * The compound flows of one session's editor: open or focus a tab, open it in an explicit view, change an editor's view,
-   * restart an unresponsive Chat and resume a stopped one. See `src/wiring/session-flows.ts`. Created with the window; the
-   * tables its flows mark (`openingTabs`, `pendingSessionViewChanges`, `draftRestores`, `editorEventSequence`, `outcomes`) stay
-   * here, because the launcher, the editors and the close handlers read them too.
-   */
-  readonly sessionFlows: SessionFlows<TabState>;
-  /** The activity-bar launcher, when this window created it. */
-  launcherProvider: SessionTreeProvider | undefined;
-  /** The Sessions tree view of the launcher. */
-  launcherView: vscode.TreeView<LauncherTreeItem> | undefined;
-  /** The reveal loop of the launcher, while it runs: concurrent requests share it. */
-  launcherRevealInFlight: Promise<void> | null;
-  /** A reveal was asked for while the loop was running, so it runs once more. */
-  launcherRevealRequested: boolean;
-  /** The tree row the launcher last selected for the active session. */
-  launcherSelectedPath: string | null;
-  /** The tab whose folder the next reveal may expand because the user just activated it, or `null`. */
-  launcherExpandFor: string | null;
-  /**
-   * The folders the launcher shows in this window: the folders VS Code has open, the
-   * profile-wide pinned list and folders kept visible by a live session, deduplicated
-   * by path identity. It owns no session identity and no history;
-   * `src/views/launcher-folders.ts` owns the merge, `src/views/workspace-folders.ts`
-   * owns the pinned list's schema, and `src/host/folder-history.ts` owns the on-demand
-   * discovery a folder's Resume action asks for.
-   */
-  launcherFolders: LauncherFolders | undefined;
-  /** The layout the user last used that serves session rows (flat until one is seen): where a reveal goes when Terminals has no row for the session. */
-  lastSessionServingLayout: SessionsGrouping | null;
-  /** The debounce that restores the pinned session's row after the user selects another. */
-  pinnedSelectionTimer: NodeJS.Timeout | undefined;
-  /**
-   * Open observation documents, by opaque token. Only the binding is held: the
-   * bytes are re-read from the store on every request, so a deleted or replaced
-   * observation can never be served from a copy this window once made.
-   */
-  readonly observationDocuments: Map<string, ObservationDocumentEntry>;
-  /** Fires when an observation the window may be showing has changed. */
-  readonly observationDocumentChanges: vscode.EventEmitter<vscode.Uri>;
-  /** Fires so an already-open report document re-reads its content. */
-  readonly diagnosticsDocumentChanges: vscode.EventEmitter<vscode.Uri>;
-
-  // Providers and models
-  /** Whether the default profile lists any model; `null` while unknown. */
-  defaultProviderModelsAvailable: boolean | null;
-  /** The one default-profile model read in flight, if any. */
-  defaultProviderModelsRead: Promise<void> | null;
-  /** A read was asked for while one ran, so it repeats once. */
-  defaultProviderModelsDirty: boolean;
-  /** The model read in flight per session tab. */
-  readonly sessionModelReads: Map<string, Promise<void>>;
-  /** Session tabs whose model list must be read again once their turn ends. */
-  readonly sessionModelRefreshOwed: Set<string>;
-  /** The provider login terminal while it is open. */
-  providerLoginTerminal: vscode.Terminal | null;
-  /** The provider login or logout flow running in this window, if any: aborting it ends its OMP process. */
-  providerAuthRun: AbortController | null;
-  /** Provider usage per launch scope. */
-  readonly usageCaches: Map<string, ProviderUsageCache>;
-  /**
-   * Every helper process this window starts for what a conversation shows (provider usage, model catalogue, settings reads, inventory,
-   * served-model check): bounded, background work held back until the startup restore is over and spread across windows (ADR-0084).
-   */
-  helpers: HelperScheduler;
-
-  // Lifecycle
-  /**
-   * The activation context, for the few callbacks this module wires without one.
-   *
-   * It is set once in `activate` and only ever read by callbacks the window owns
-   * (the turn notifier's "show terminal" action), so nothing else has to thread it.
-   */
-  context: vscode.ExtensionContext | undefined;
-  /** The "OMP Desk" output channel; `log` writes to it. */
-  output: vscode.LogOutputChannel | undefined;
-  /** The window's diagnostics recorder: the timeline the report document renders. */
-  readonly diagnostics: DiagnosticsRecorder;
-  /** Where a new session's launch spends its time: begun by New Session, reported by the launcher and the host-control step. */
-  readonly launchTimeline: LaunchTimeline;
-  /**
-   * The actions the user asked for that are still being processed in this window: display only (`docs/designs/2026-10-15-immediate-click-feedback.md`).
-   * The Sessions rows, the Sessions view's progress bar, the status bar and every Chat page of the tab read it; nothing decides from it.
-   */
-  readonly pending: PendingOperations;
-  /** Carries `pending` to the Sessions tree, the view's progress bar and the status bar; disposed with the window. */
-  readonly pendingDisplay: PendingDisplay;
-  /** What a failed save of the session index tells the user: contention is only logged, a fault is shown once per cause. */
-  readonly persistFailures: PersistFailureReporter;
-  /** Settles when this window's move of the old `omp.*` settings ended (ADR-0068); never rejects. Awaited, bounded, by the first launch. */
-  legacySettingsMoved: Promise<void>;
-  legacySettingsLateLogged: boolean;
-  /** Wall-clock time (`Date.now()`) the extension host activated; the startup timeline lines are relative to it. */
-  activatedAt: number;
-  /**
-   * One window-wide counter numbering every editor event — an open/view request
-   * and a panel close — so their order per tab is known (`TabState.lastOpenRequest`,
-   * `TabState.lastEditorClose`). A counter rather than a timestamp: two events in
-   * the same millisecond still have to be ordered, and nothing outside this window
-   * reads it.
-   */
-  editorEventSequence: number;
-  /** Source of the next {@link WindowState.launcherRuntimeIds} identity. */
-  nextLauncherRuntimeId: number;
-  /** The fingerprint of the package this host started from; `null` outside a packaged (production) install. */
-  packageDrift: PackageDrift | null;
-  /** The updated-on-disk warning was shown for the current drift. */
-  packageDriftAnnounced: boolean;
-  /** The last verdict of {@link packageChangedOnDisk}; published in this window's registry record (`stale`) so no other window hands it a launch. */
-  packageStale: boolean;
-
-  // Conversations
-  /**
-   * Read-only detail tabs (TODO, agent roster, one agent) of the conversations in this window. They
-   * are presentation pages of a conversation, not editor slots: no binding, claim, bridge or restore.
-   */
-  detailTabs: DetailTabs;
-  /** Diagram tabs: a mermaid source the chat page would not draw inline, drawn in a tab of its own (ADR-0069 amendment). */
-  mermaidPreviews: MermaidPreviews;
-  /** The read-only `omp-artifact:` documents (tool output design, slice 5); registered at the start of `activate`. */
-  artifactDocuments: ArtifactDocuments;
-  /** The read-only `omp-session-file:` documents (subagent outputs and `local://` files opened from a Chat link); registered at the start of `activate`. */
-  sessionFileDocuments: SessionFileDocuments;
-  /**
-   * Last host-observed turn activity per tab, projected from the conversation's own model.
-   *
-   * This is the extension host's view of whether a turn is running: the `ompDesk.streaming`
-   * context key, the Sessions rows and the completion notifications all derive from it, so a
-   * hidden or closed tab is reported exactly like a visible one.
-   */
-  readonly turnActivities: Map<string, TurnActivity>;
-  /** The OMP editors of this window in the order the user last focused them; orders the add-to-session picker. */
-  readonly editorRecency: EditorRecency;
-  /**
-   * This window's turn notifier, created once per session index.
-   *
-   * Its ledger must outlive any single panel document: a Webview reload
-   * re-reports the session's current activity, and the ledger is what keeps that
-   * from becoming a second notice for an event the user was already told about.
-   */
-  turnNotifier: { readonly index: SessionIndex; readonly notifier: TurnNotifier } | undefined;
-  /** Conversations whose Chat /new or /delete replacement is running; a second request is refused. */
-  readonly replacingConversations: Set<string>;
-  /**
-   * Folders whose New Session started in this window and has not finished: the session being started (`null` until its draft exists).
-   * A repeated New Session for the folder is ignored and reveals that session. A guard, not a display: it is not part of `pending`.
-   */
-  readonly newSessionsInFlight: Map<string, string | null>;
-  /** Drafts that are forks: the original's session file their first launch passes to OMP's `--fork`. */
-  readonly pendingForks: PendingForks;
-  /** The last connection-relevant phase logged per tab, so a restoration is reported against the failure it ends. */
-  readonly loggedChatPhases: Map<string, ChatPhase>;
-  /**
-   * Chat tabs whose OMP child reports a subagent that is running or has messages queued, which its
-   * own settle state ignores (see {@link hasLiveSubagents}): a parked agent revived by an IRC
-   * message is in the registry but is neither a job of the parent nor in the lifecycle-frame roster.
-   */
-  readonly subagentWork: Map<string, boolean>;
-  /** The subagent-work poll per chat tab. */
-  readonly subagentWatches: Map<string, ReturnType<typeof setInterval>>;
-
-  // Caches
-  /** The verified copies of the runtime entries and the lease helper, staged on first use (ADR-0066). */
-  staging: RuntimeStaging;
-  /** The identity the launcher gave each runtime, so a restarted host reads as a new one. */
-  readonly launcherRuntimeIds: WeakMap<SessionHostRuntime, number>;
-  /** The broker watch of each runtime this window drives; a runtime that starts again replaces its own. */
-  readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
-}
 
 /** The longest the first launch of a process waits, counted from activation, for the move of the old settings. */
 const LEGACY_SETTINGS_MOVE_WAIT_MS = 10_000;
@@ -1062,52 +344,28 @@ const RENAME_NOTICE_KEY = "ompDesk.renameNotice.v1";
 /** The profile-wide name of the VS Code updater log this extension already told the user about. */
 const UPDATER_NOTICE_KEY = "ompDesk.updaterNotice.v1";
 
-
-/** The "choose another folder" entry of the Add picker. */
-const BROWSE_FOR_FOLDER_LABEL = "Browse…";
-
-
-/** The one per-row action a Resume row carries: delete this session. */
-const HISTORY_ROW_TRASH: vscode.QuickInputButton = {
-  iconPath: new vscode.ThemeIcon("trash"),
-  tooltip: "Delete this session and its transcript…",
-};
-
-
-/** One row of the folder Resume picker. */
-interface FolderHistoryPickItem extends vscode.QuickPickItem {
-  readonly candidate: FolderHistoryCandidate;
-}
-
-
 /** How long a revealed, not-yet-revived editor may take to hand this window its panel. */
 const EDITOR_REVIVE_TIMEOUT_MS = 5_000;
 
-
 const SESSION_DEFAULT_MODE_KEY = "omp.session.defaultMode";
-
 
 /** How long after the startup restore the installed broker tree is hashed to check the build's record of its digest. */
 const PACKAGED_TREE_CHECK_DELAY_MS = 10_000;
-
 
 // The profile catalog
 
 /** Context key telling the sidebar the catalog is still being read. */
 const CATALOG_PENDING_CONTEXT = "ompDesk.catalogPending";
 
-
 /** Shown by a restored panel for a draft that no explicit action has started yet. */
 const DRAFT_NO_HOST_DETAIL =
   "This OMP session has not been started yet. Its tab was kept; click the session's row in the Sessions view to start it.";
-
 
 /** The largest chat message the bridge carries in one encrypted frame, with headroom. */
 const BRIDGE_CHAT_MESSAGE_LIMIT = BRIDGE_MAX_PLAINTEXT_BYTES - 4096;
 
 /** Row grouping stays compatible with panel snapshots; large DTOs are fragmented by the bridge writer. */
 const BRIDGE_CHAT_CHUNK_BYTES = 248 * 1024;
-
 
 /** The only operations the bridge carries: the controls and the chat commands. */
 const BRIDGE_OPERATIONS: Record<string, true> = {
@@ -1141,7 +399,6 @@ const BRIDGE_OPERATIONS: Record<string, true> = {
   "terminal-link-open": true,
 };
 
-
 /** The webview message type each bridge chat operation carries. */
 const BRIDGE_CHAT_OPERATION_TYPE: Record<string, string> = {
   "chat-prompt": "omp:chat-prompt",
@@ -1157,18 +414,6 @@ const BRIDGE_CHAT_OPERATION_TYPE: Record<string, string> = {
   "chat-btw-request": "omp:chat-btw-request",
 };
 
-
-interface TerminalCopyRequest {
-  readonly nonce: string;
-  readonly panel: vscode.WebviewPanel;
-  readonly document: PanelDocument;
-  readonly bridgeDocumentId: string | null;
-  readonly generation: string;
-  readonly deadline: number;
-  readonly timer: NodeJS.Timeout;
-}
-
-
 /** Prompts the user sent from any Chat, newest first; VS Code's global state, so one list per VS Code profile. */
 const PROMPT_HISTORY_KEY = "omp.chat.promptHistory";
 
@@ -1177,51 +422,11 @@ const MAX_PROMPT_HISTORY = 200;
 /** A prompt longer than this is not remembered: history search is for prompts one retypes. */
 const MAX_REMEMBERED_PROMPT = 20_000;
 
-
 const SLASH_REGISTRY_RECHECK_MS = 60_000;
-
-
-// "OMP Desk: Add File to Session" and "OMP Desk: Quote Selection to Session"
-// What Add File adds is a reference (`@src/a.ts`), composed by `wiring/editor-context` for the chosen session's cwd. Quote
-// Selection to Session sends the selected text with its location as a quote the page places like a Chat quote, or, with nothing
-// selected, the location of the caret's line as inline code. The target of Add File is always the user's choice from a picker, most
-// recently focused editor first; a quote or a line reference skips the picker when a Chat of this window is visible and goes into that
-// composer. Nothing is ever submitted, and the destination is revealed and focused.
-
-/** How long a session being opened may take to be able to receive the text. */
-const INSERT_TARGET_TIMEOUT_MS = 30_000;
-
-const INSERT_POLL_MS = 100;
-
-
-type SendTarget =
-  | { readonly kind: "session"; readonly candidate: SendCandidate }
-  | { readonly kind: "new"; readonly folder: string };
-
-
-/** What goes to the chosen session: `@path` references (Add File to Session), a quote of editor text, the hunk of a diff under the caret, or the reference to a caret's line (the last three are Alt+Q). */
-type InsertionRequest =
-  | { readonly kind: "references"; readonly sources: readonly ReferenceSource[] }
-  | { readonly kind: "quote"; readonly source: EditorQuoteSource }
-  | { readonly kind: "hunk"; readonly source: HunkQuoteSource }
-  | { readonly kind: "line"; readonly source: LineReferenceSource }
-  | { readonly kind: "preview"; readonly document: PreviewDocument; readonly text: string };
-
-
-/** How the status bar and the warnings word what went where. */
-const SEND_WORDS = {
-  references: { past: "added", Past: "Added", to: "to" },
-  quote: { past: "quoted", Past: "Quoted", to: "into" },
-  hunk: { past: "quoted", Past: "Quoted", to: "into" },
-  preview: { past: "quoted", Past: "Quoted", to: "into" },
-  line: { past: "referenced", Past: "Referenced", to: "in" },
-} as const;
-
 
 const SUBAGENT_WORK_POLL_MS = 3_000;
 
 const SUBAGENT_WORK_MAX_FAILURES = 3;
-
 
 /**
  * The thinking toggle (`Ctrl+Alt+T` in Desk; the TUI's `Ctrl+T`), `Ctrl+O` and Desk's `Ctrl+Shift+O`: one remembered default for every Chat in this VS Code profile.
@@ -1230,23 +435,6 @@ const SUBAGENT_WORK_MAX_FAILURES = 3;
 const THINKING_EXPANDED_KEY = "omp.chat.thinkingExpanded";
 
 const TOOLS_EXPANDED_KEY = "omp.chat.toolsExpanded";
-
-
-// Host control: the native model/thinking channel
-//
-// The channel is established only after the host proves it is the exact process
-// this window launched (same pid, same kernel process generation, same pipe
-// server) and completes the HMAC handshake. Until then host control is reported
-// as unavailable, and a launch never depends on it succeeding. The runtime owns it
-// (`src/runtime/local-control.ts`); this is the window's read side.
-
-/** A verified channel plus the tab it belongs to. */
-interface ControlChannel {
-  readonly tabId: string;
-  readonly client: HostControlClient;
-  readonly snapshot: ControlHostSnapshot | null;
-}
-
 
 /**
  * One admitted irreversible change, whichever route asked for it.
@@ -1262,7 +450,6 @@ interface MutationAdmission {
   readonly fence?: () => void;
   readonly settle?: (outcome: "applied" | "refused" | "unknown") => void;
 }
-
 
 /**
  * Where one guest answer goes, and what may be dispatched for it.
@@ -1284,37 +471,14 @@ interface GuestResponder {
   invalidate(): void;
 }
 
-
-
-/**
- * Where one provider login or logout runs: the session's own OMP, directory and profile, so the credential lands
- * where that session will read it.
- */
-interface ProviderAuthScope {
-  readonly runtime: SessionHostRuntime | null;
-  readonly profile: string | null;
-  readonly cwd: string;
-}
-
-
-/** The modules of one provider login or logout flow, loaded together with the first flow. */
-interface ProviderLoginModules {
-  readonly flow: RareSubsystems["providerLoginFlow"];
-  readonly rpc: RareSubsystems["providerLoginRpc"];
-  readonly ui: RareSubsystems["providerLoginUi"];
-}
-
-
 /** The default reason a passive slot is not allowed to act. */
 const PASSIVE_REASON_DEFAULT = "This editor is not controlling its session.";
 
 /** Shown while this window has not yet recorded this editor's control of its session. */
 const ELECTING_REASON = "This editor is waiting for this window to record its control of the session.";
 
-
 /** The longest a command waits for an election before it is refused with the reason. */
 const ELECTION_WAIT_MS = 15_000;
-
 
 /** The page messages that need the editor to control its session, and so wait for an election. */
 const ELECTION_GATED_TYPES: Readonly<Record<string, true>> = {
@@ -1331,13 +495,10 @@ const ELECTION_GATED_TYPES: Readonly<Record<string, true>> = {
   "omp:chat-command": true,
 };
 
-
 /** Why a slot bound to a conversation another writer owns may not act. */
 const LIVE_INCUMBENT_REASON = "Another window or writer already holds this session, so this editor is not controlling it.";
 
-
 const PINNED_SELECTION_RESTORE_MS = 250;
-
 
 const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
   flat: "the flat list",
@@ -1345,158 +506,10 @@ const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
   terminals: "terminals",
 };
 
-
 const OPEN_ANYWAY = "Open Anyway";
-
-
-// Native file observation — read-only evidence
-//
-// The native producer (`src/omp/file-evidence.ts`, wired into the OMP `-e`
-// extension by `src/omp/host-control.ts`) writes content-addressed bytes and a
-// bounded journal under this extension's own host-control directory, and only
-// after the user records an explicit consent for one workspace and session.
-//
-// Everything in this section is read-only: it lists committed records, renders
-// bounded stored text, and offers a native diff between two observations of one
-// path inside exactly one producer binding. It never writes a file inside the
-// workspace, never restores anything and never sends stored bytes to a Webview
-// (ADR-0007; docs/designs/2026-09-24-native-file-observation-and-reversibility.md).
-
-/** Observations one picker lists; the journal enforces its own tighter bound. */
-const OBSERVATION_LIST_LIMIT = 200;
-
-/** How many read-only observation document bindings stay resolvable per window. */
-const OBSERVATION_DOCUMENT_LIMIT = 32;
-
-/** Button that grants capture; dismissing the dialog any other way leaves it off. */
-const ENABLE_EVIDENCE_LABEL = "Enable observation";
-
-/** Button that deletes one session's stored history. */
-const DELETE_SESSION_LABEL = "Delete this session's history";
-
-/** Button that deletes every session namespace this launch recorded. */
-const DELETE_LAUNCH_LABEL = "Delete every session of this launch";
-
-const SHOW_OBSERVATION_LABEL = "Show this observation (read-only)";
-
-const COMPARE_OBSERVATION_LABEL = "Compare with the previous observation of this path";
-
-
-/**
- * Shown when a document no longer has a binding, or its observation is gone.
- *
- * It says what it is not — an empty observation — because a document that simply
- * rendered nothing would be indistinguishable from a file that was empty when it
- * was observed, which the store reports separately.
- */
-const OBSERVATION_DOCUMENT_UNAVAILABLE =
-  "This observation document cannot be shown: it is no longer resolvable or the stored observation is gone. It is not an empty observation — reopen the list from the OMP Desk file-observation command.";
-
-
-/** What one read-only observation document displays; never stored bytes. */
-interface ObservationDocumentBinding {
-  readonly tabId: string;
-  readonly recordId: string;
-  /** `detail` is the provenance header plus the text; `side` is a diff side. */
-  readonly kind: "detail" | "side";
-}
-
-
-interface ObservationDocumentEntry {
-  readonly uri: vscode.Uri;
-  readonly binding: ObservationDocumentBinding;
-}
-
-
-/** Verified facts of one tab's live control channel; null when it has none yet. */
-interface EvidenceLiveChannel {
-  readonly slotId: string;
-  /** The host-control subsystem's own instance id; not the broker child's identity. */
-  readonly instanceId: string;
-  /** PID the authenticated channel's binding names. */
-  readonly pid: number;
-  readonly cwd: string;
-  /**
-   * PID the OS proved for the server end of the pipe this channel carries, and that
-   * process's kernel creation time. Both come from `ControlPeerProof`, which refuses
-   * after the channel closes — so this accessor's proof is a *live* one.
-   */
-  readonly serverPid: number;
-  readonly serverCreationTime: string;
-}
-
-
-/** One launch's evidence namespace for one workspace and session. */
-interface EvidenceNamespace {
-  readonly slotId: string;
-  readonly paths: NativeFileObservationStorePaths;
-  /** Host-control directory this launch published into. */
-  readonly directory: string;
-  /** Kernel instance of the launch; null when no verified channel names this slot. */
-  readonly processInstanceId: string | null;
-  readonly pid: number | null;
-  /** Kernel creation time recorded for that pid at launch, when one was recorded. */
-  readonly processCreation: string | null;
-  /**
-   * Set only when *this exact slot* was released by this claim after a confirmed
-   * stop. A claim's release speaks for the launch it released and for no other,
-   * so it is looked up per slot rather than threaded in from the current tab.
-   */
-  readonly releaseProof: string | null;
-}
-
-
-interface EvidenceSession {
-  readonly tabId: string;
-  readonly directory: string;
-  readonly sessionId: string;
-  /** The launch this window owns first, then older namespaces of the same session. */
-  readonly namespaces: readonly EvidenceNamespace[];
-}
-
-
-type EvidenceSessionResult =
-  | { readonly ok: true; readonly session: EvidenceSession }
-  | { readonly ok: false; readonly reason: string };
-
-
-/** Positive evidence that one namespace's producer stopped, or why it cannot be shown. */
-type ProducerStopProof =
-  | { readonly stopped: true; readonly detail: string }
-  | { readonly stopped: false; readonly detail: string };
-
-
-/** The exact launch and session identity one consent grant is bound to. */
-interface ConsentBinding {
-  readonly namespace: EvidenceNamespace;
-  /** Everything that must still agree when the grant is written, and again after. */
-  readonly key: string;
-}
-
-
-type ConsentBindingResult =
-  | { readonly ok: true; readonly binding: ConsentBinding }
-  | { readonly ok: false; readonly reason: string };
-
-
-// Startup and performance diagnostics
-//
-// `OMP Desk: Show Diagnostics` renders one extension-owned, read-only document from
-// measurements this window already took while launching and attaching sessions.
-// Nothing in this section starts a process, probes OMP, changes a setting or
-// warms anything to produce a number: it records what happened, marks every
-// stage it did not observe as such, and never carries a secret or a bearer
-// capability — no host-control key and no bridge secret.
-// `src/host/diagnostics.ts` owns the recording rules and the redaction; this
-// section only supplies the observations and the environment.
-
-/** Diagnostics document scheme; the provider answers only the fixed report path. */
-const DIAGNOSTICS_DOCUMENT_SCHEME = "omp-diagnostics";
-
 
 /** The action of the notice a window shows when a session it opened is held by another window (ADR-0080). */
 const MOVE_TO_THIS_WINDOW_ACTION = "Move to This Window";
-
 
 // Reinstall under a running window
 
@@ -1505,38 +518,15 @@ const EXTENSION_MODE_PRODUCTION = 1;
 
 const PACKAGE_DRIFT_POLL_MS = 10_000;
 
-
 const RELOAD_WINDOW_LABEL = "Reload Window";
 
 /** Why a launch is refused after a reinstall: a fixed sentence, no path or file name. */
 const UPDATED_ON_DISK_ERROR = "OMP Desk was updated while this window was open. Reload the window to finish updating, then try again.";
 
-
-// In-tab terminal: one managed writer, one frontend per editor (ADR-0024)
-
-/** The folder-shell editor's own view type; a folder shell is never a session editor. */
-const SHELL_VIEW_TYPE = "omp.shellTerminal";
-
-
 const TERMINAL_FONT_CONFIGURATION_KEYS = [
   "terminal.integrated.fontFamily", "terminal.integrated.fontSize", "terminal.integrated.lineHeight",
   "terminal.integrated.letterSpacing", "editor.fontFamily",
 ] as const;
-
-
-/** The parsed inbound terminal messages a folder-shell panel may send. */
-const TERMINAL_PANEL_TYPES: Record<string, true> = {
-  "omp:terminal-attach": true,
-  "omp:terminal-probe": true,
-  "omp:terminal-input": true,
-  "omp:terminal-resize": true,
-  "omp:terminal-focus": true,
-  "omp:terminal-visibility": true,
-  "omp:terminal-link-validate": true,
-  "omp:terminal-link-symbols": true,
-  "omp:terminal-link-open": true,
-};
-
 
 /** The longest session title the control channel, the tree and the slot all accept. */
 const MAX_SESSION_TITLE_CHARS = 200;
@@ -1560,8 +550,6 @@ export function createWindow(deps: WindowDeps) {
     if (state === undefined) throw new Error("The OMP Desk window state is not created yet.");
     return state;
   }
-
-
 
   async function activate(): Promise<void> {
     const { context } = deps;
@@ -2459,7 +1447,6 @@ export function createWindow(deps: WindowDeps) {
     log.info("extension activated");
   }
 
-
   function deactivate(): void {
     const s = state;
     if (s === undefined) return;
@@ -2481,7 +1468,6 @@ export function createWindow(deps: WindowDeps) {
     // The window's state stays, disposed: subscriptions are disposed after this returns, and a late timer, watcher or
     // promise continuation must read the disposed window as it read the module bindings before, not throw.
   }
-
 
   /**
    * What the window routing reads of this window and calls into. The getters read the installed window when
@@ -2533,7 +1519,6 @@ export function createWindow(deps: WindowDeps) {
       error: showError,
     };
   }
-
 
   /**
    * What the session actions read of this window and call into. The getters read the installed window when they run,
@@ -2595,7 +1580,6 @@ export function createWindow(deps: WindowDeps) {
       error: showError,
     };
   }
-
 
   /**
    * What the guest dispatcher reads of this window and calls into. The getters read the installed window when they
@@ -2676,7 +1660,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /**
    * What the editor panels read of this window and call into. The getters read the installed window when they run, so the
    * panels can be created with the window, before it is installed. The lifecycle harness builds its handle from these with a
@@ -2729,7 +1712,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /**
    * What the bridge host reads of this window and calls into. The getters read the installed window when they run, so the
    * host can be created with the window, before it is installed; the endpoint factory is the window's `createBridgeEndpoint`,
@@ -2760,7 +1742,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** What the catalog adoption and the startup restore read of this window and call into. */
   function catalogAdoptionDeps(activatedAt: number): CatalogAdoptionDeps {
     return {
@@ -2788,7 +1769,6 @@ export function createWindow(deps: WindowDeps) {
       timing: windowTiming,
     };
   }
-
 
   /**
    * What the session flows read of this window and call into. The getters read the installed window when they run, so the
@@ -2849,7 +1829,6 @@ export function createWindow(deps: WindowDeps) {
       error: showError,
     };
   }
-
 
   /** The initial state of one window: every collection empty, every handle not yet created. */
   function createWindowState(context: vscode.ExtensionContext): WindowState {
@@ -3007,10 +1986,8 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** ADR-0068: whether the three context keys default keybindings used are also set under their old names (not when another extension owns `omp.` names). */
   let legacyContextMirror = true;
-
 
   /** Records that the page of the editor's current document announced itself, so text can be sent to its composer. */
   function noteReadyDocument(state: TabState, announcedDocumentId: string | undefined): void {
@@ -3019,7 +1996,6 @@ export function createWindow(deps: WindowDeps) {
     if (document === null || (announcedDocumentId ?? null) !== document.bridgeDocumentId) return;
     s.readyDocuments.set(state, document);
   }
-
 
   async function revealDesktopNotification(index: SessionIndex, extensionId: string, uri: vscode.Uri): Promise<void> {
     const s = windowState();
@@ -3060,7 +2036,6 @@ export function createWindow(deps: WindowDeps) {
     }
     log.warn("The notified session has no retained editor or Sessions row in this window.");
   }
-
 
   // Commands
 
@@ -3127,7 +2102,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Reserve a draft in the folder and open its editor: the launch itself, in this window. `onDraft` is told the draft's tab once it exists. */
   async function startNewSession(
     context: vscode.ExtensionContext,
@@ -3162,7 +2136,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Slash commands are local to the editor that received them, even for an unpinned folder. */
   async function createSessionInColumn(
     context: vscode.ExtensionContext, index: SessionIndex, cwd: string, column: vscode.ViewColumn,
@@ -3189,7 +2162,6 @@ export function createWindow(deps: WindowDeps) {
       s.sessionPanelColumns.delete(entry.tabId);
     }
   }
-
 
   async function newSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
     const s = windowState();
@@ -3227,7 +2199,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   async function deleteSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
     const entry = index.get(tabId);
     const panel = stateOf(tabId)?.panel;
@@ -3239,7 +2210,6 @@ export function createWindow(deps: WindowDeps) {
     if (!(await windowState().sessionActions.confirmAndDelete(index, tabId))) return;
     await createSessionInColumn(context, index, entry.cwd, column);
   }
-
 
   /**
    * The live Chat session one command names, or `null` after saying why there is none (docs/designs/2026-10-18-fork-branch-clear-session-actions.md).
@@ -3264,7 +2234,6 @@ export function createWindow(deps: WindowDeps) {
     if (refused !== null) { showWarning(refused); return null; }
     return target;
   }
-
 
   /**
    * Fork a live Chat session into a new Chat tab beside it (`ompDesk.forkSession`, typed `/fork`). The original's process, tab and file are
@@ -3300,7 +2269,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Wait (bounded) for the Chat page of a tab to announce itself, then ask its composer to run one panel action. `false` when it never could. */
   async function deliverPanelAction(tabId: string, action: GuestPanelAction): Promise<boolean> {
     const s = windowState();
@@ -3316,7 +2284,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * Branch: show the live Chat session and open its Rewind message picker, exactly as a typed `/branch` does (`ompDesk.branchSession`).
    * The editor is opened or revealed like Show in Chat; the page's own `onRewind` opens the picker once the page is ready.
@@ -3327,7 +2294,6 @@ export function createWindow(deps: WindowDeps) {
     await windowState().sessionFlows.openSessionInMode(context, index, target.tabId, "chat", "show");
     if (!(await deliverPanelAction(target.tabId, "open-rewind"))) showWarning("The Chat page did not become ready, so its Rewind picker was not opened. Try Branch again.");
   }
-
 
   /**
    * Clear Context (`ompDesk.clearSession`): ask first with a modal dialog, then run the typed `/clear` flow of the live Chat session
@@ -3346,7 +2312,6 @@ export function createWindow(deps: WindowDeps) {
     if (choice !== confirm) return;
     await windowState().sessionRuntime.conversations.clearConversation(tabId, (text, outcome) => { if (outcome === "refused") showWarning(text); else showInfo(text); });
   }
-
 
   /**
    * Open or resume one session from its launcher row, its context menu or the palette.
@@ -3388,7 +2353,6 @@ export function createWindow(deps: WindowDeps) {
     return pendingEntry(tabId, verb === "resumed" ? "resume" : "open", { origin, step: "routing" }, handle =>
       openIndexedSession(context, index, tabId, verb, noRouting, keepLiveView, commandAt, handle));
   }
-
 
   /** The rest of {@link openSession} for a row the window indexes. `handle` is the pending operation the caller began for it. */
   async function openIndexedSession(
@@ -3452,7 +2416,6 @@ export function createWindow(deps: WindowDeps) {
     return true;
   }
 
-
   /** Whether a process with this id exists, by the null signal; `EPERM` still means it exists. */
   function isProcessAlive(pid: number): boolean {
     try {
@@ -3462,7 +2425,6 @@ export function createWindow(deps: WindowDeps) {
       return (error as NodeJS.ErrnoException).code === "EPERM";
     }
   }
-
 
   // Folders
 
@@ -3496,598 +2458,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
-  /**
-   * Ask which folder to pin, then pin it.
-   *
-   * The folders VS Code has open that are not pinned yet are offered first: they are what
-   * the user is already looking at (and already shown in Sessions), and a short list beats
-   * a filesystem dialog. Nothing is pinned without an explicit choice — "Browse…" opens
-   * the native folder dialog for any other absolute local directory. When there is nothing
-   * to suggest, the dialog is used directly.
-   */
-  async function addWorkspaceFolder(index: SessionIndex): Promise<LauncherFolder | null> {
-    const s = windowState();
-    const folders = s.launcherFolders;
-    if (folders === undefined) return null;
-    const chosenPath = await pickFolderToAdd(folders);
-    if (chosenPath === null) return null;
-    const added = await folders.add(chosenPath);
-    if (!added.ok) {
-      showError(`The folder was not added: ${added.reason}`);
-      return null;
-    }
-    refreshLauncher();
-    s.sessionActions.reportFolderSaveFailure(folders);
-    return added.folder;
-  }
-
-
-  /**
-   * One folder path the user picked to pin, or `null` when they dismissed the
-   * question. The open VS Code folders that are not pinned are suggestions; the dialog is
-   * the way to reach anything else, and only a local (`file`) location is ever returned.
-   */
-  async function pickFolderToAdd(folders: LauncherFolders): Promise<string | null> {
-    const suggestions = folders.list().filter(folder => folder.open && !folder.pinned);
-    if (suggestions.length === 0) return await browseForFolder();
-    const picked = await vscode.window.showQuickPick(
-      [
-        ...suggestions.map(folder => ({
-          label: folderHeadline(folder.path),
-          description: displayFolderPath(folder.path),
-          detail: "Open in this window",
-          addPath: folder.path as string | null,
-        })),
-        {
-          label: BROWSE_FOR_FOLDER_LABEL,
-          description: "Choose another local folder",
-          detail: "Opens the folder dialog",
-          addPath: null,
-        },
-      ],
-      {
-        title: "Pin a folder to the Sessions view",
-        placeHolder: "Pick the folder to pin, or browse for another one",
-      },
-    );
-    if (picked === undefined) return null;
-    return picked.addPath ?? (await browseForFolder());
-  }
-
-
-  /** The native folder dialog, which is how a directory outside the workspace is added. */
-  async function browseForFolder(): Promise<string | null> {
-    const chosen = await vscode.window.showOpenDialog({
-      canSelectFiles: false,
-      canSelectFolders: true,
-      canSelectMany: false,
-      openLabel: "Add Folder",
-      title: "Add a folder to the Sessions view",
-    });
-    const uri = chosen?.[0];
-    if (uri === undefined) return null;
-    if (uri.scheme !== "file") {
-      showError(`Only local folders can be added to Sessions, and "${uri.toString()}" is not local.`);
-      return null;
-    }
-    return uri.fsPath;
-  }
-
-
-  /**
-   * Pin one folder the launcher shows, so it stays after VS Code closes it and appears in
-   * every window.
-   *
-   * This is metadata only. The folder's id is the one it will keep once pinned, and it is
-   * resolved again here, so a stale row cannot pin a different folder.
-   */
-  async function pinWorkspaceFolder(index: SessionIndex, argument: unknown): Promise<void> {
-    const s = windowState();
-    const folders = s.launcherFolders;
-    if (folders === undefined) return;
-    const folder = await chooseFolder(index, folders, argument, {
-      title: "Pin a folder to the Sessions view",
-      addWhenEmpty: false,
-      only: "unpinned",
-      nothing: "Every folder shown in Sessions is already pinned.",
-    });
-    if (folder === null) return;
-    const result = await folders.pin(folder.id);
-    if (!result.ok) {
-      showWarning(result.reason);
-      refreshLauncher();
-      return;
-    }
-    refreshLauncher();
-    s.sessionActions.reportFolderSaveFailure(folders);
-  }
-
-
-  /**
-   * Unpin one folder: it leaves the pinned list of every window.
-   *
-   * This is the only way a folder is dropped from the launcher, and it is metadata only: no
-   * editor is closed, no native host is stopped, no session is forgotten and no session file
-   * is deleted. A folder VS Code has open here, or runs a session in, stays visible in this
-   * window (unpinned); a running session never refuses it. The folder's id is resolved again here, so a
-   * stale row cannot unpin a different folder.
-   */
-  async function unpinWorkspaceFolder(index: SessionIndex, argument: unknown): Promise<void> {
-    const s = windowState();
-    const folders = s.launcherFolders;
-    if (folders === undefined) return;
-    const folder = await chooseFolder(index, folders, argument, {
-      title: "Unpin a folder from Sessions",
-      addWhenEmpty: false,
-      only: "pinned",
-      nothing: "No folder is pinned in Sessions.",
-    });
-    if (folder === null) return;
-    const result = await folders.unpin(folder.id);
-    if (!result.unpinned) {
-      showWarning(result.reason);
-      refreshLauncher();
-      return;
-    }
-    refreshLauncher();
-    s.sessionActions.reportFolderSaveFailure(folders);
-  }
-
-
-  /**
-   * The folder a folder-scoped command acts on.
-   *
-   * A folder row supplies its stable id, which is resolved again here against the folders
-   * the launcher shows now: an id that went stale — the folder was unpinned and closed, or
-   * the row belongs to another window — reports and stops instead of falling back to a
-   * different folder. An absent argument asks the user (among the pinned or unpinned folders
-   * when `only` says so; this window's folders first, in workspace order, when `openHereFirst` says so,
-   * so that Enter picks the current project); with no folder shown at all there is nothing to choose from, so a
-   * command that can create its subject (New Session, Resume) offers the Add flow and one
-   * that cannot says so.
-   */
-  async function chooseFolder(
-    index: SessionIndex,
-    folders: LauncherFolders,
-    argument: unknown,
-    options: {
-      readonly title: string;
-      readonly addWhenEmpty: boolean;
-      readonly only?: "pinned" | "unpinned";
-      /** List the folders open in this window first, in workspace order, so the first (pre-selected) row is the current project. */
-      readonly openHereFirst?: boolean;
-      /** What to say when `only` leaves nothing to choose from. */
-      readonly nothing?: string;
-    },
-  ): Promise<LauncherFolder | null> {
-    const shown = folders.list();
-    const supplied = folderArgument(argument, shown);
-    if (supplied.kind === "stale") {
-      showError("That folder is no longer in Sessions. Refresh Sessions and try again.");
-      return null;
-    }
-    if (supplied.kind === "folder") return supplied.folder;
-    const candidates = (options.openHereFirst === true ? folders.listForPicker() : shown).filter(folder => options.only === undefined || folder.pinned === (options.only === "pinned"));
-    if (candidates.length === 0) {
-      if (options.only !== undefined) {
-        showInfo(options.nothing ?? "No folder matches.");
-        return null;
-      }
-      if (!options.addWhenEmpty) {
-        showInfo("No folder is shown in Sessions yet. Open a folder or add one first.");
-        return null;
-      }
-      return await addWorkspaceFolder(index);
-    }
-    if (candidates.length === 1) return candidates[0];
-    const picked = await vscode.window.showQuickPick(
-      candidates.map(folder => {
-        // Why the folder is listed: pinned, open in this window or another one, or only kept for a running session.
-        const where = folder.openHere ? "open in this window" : folder.openElsewhere ? "open in another window" : null;
-        const source = folder.pinned
-          ? (where === null ? "pinned" : `pinned, ${where}`)
-          : (where ?? "kept because a session runs in it");
-        return {
-          label: folderHeadline(folder.path),
-          description: displayFolderPath(folder.path),
-          detail: `${source}, ${folder.collapsed ? "collapsed" : "expanded"} in Sessions`,
-          folder,
-        };
-      }),
-      { title: options.title },
-    );
-    return picked?.folder ?? null;
-  }
-
-
-  /**
-   * Every materialized index row, narrowed to what the folder query needs.
-   *
-   * All of them are passed, not only the ones that look like they match: the query
-   * owns the folder comparison, needs the index's own session directories because a
-   * custom `--session-dir` can sit outside every profile root, and is the one place
-   * that decides whether a row appears as an indexed candidate or a discovered one.
-   */
-  function indexedRowsForHistory(index: SessionIndex): FolderHistoryIndexedEntry[] {
-    return index.list().map(entry => ({
-      tabId: entry.tabId,
-      sessionFile: entry.sessionFile,
-      cwd: entry.cwd,
-      sessionId: entry.sessionId,
-      profile: entry.scope.profile,
-      sessionDirs: [entry.sessionDir, entry.scope.sessionDir].filter((dir): dir is string => dir !== null),
-    }));
-  }
-
-
-  /**
-   * Record one folder-scoped discovery pass in the output channel.
-   *
-   * Every issue's own text goes here and nowhere else: the pass's exception detail
-   * and uncontrolled file paths are local evidence for the user reading the OMP
-   * channel, while what a notification says stays a bounded statement about how
-   * complete the pass was. A root or file that is simply absent is logged too — it
-   * is a fact about the pass, not a hidden session.
-   */
-  function logFolderScan(folder: WorkspaceFolder, scan: FolderHistoryScan): void {
-    log.debug(
-      `folder history: ${scan.candidates.length} candidate(s) for ${folder.path} over ${scan.roots.length} root(s), ` +
-        `${scan.issues.length} issue(s), ${scan.skippedFiles} skipped, incomplete=${scan.incomplete}, cancelled=${scan.cancelled}`,
-    );
-    for (const issue of scan.issues) {
-      log.warn(`folder history (${issue.kind})${issue.path === null ? "" : ` ${issue.path}`}: ${issue.detail}`);
-    }
-  }
-
-
-  /** What a discovered session file is called: its own title, or its file name. */
-  function candidateLabel(candidate: FolderHistoryCandidate): string {
-    const title = candidate.title?.trim() ?? "";
-    if (title.length > 0) return title;
-    const name = path.basename(candidate.file, ".jsonl");
-    return name.length > 0 ? name : candidate.file;
-  }
-
-
-  /** What the picker row says about one candidate: this window's state, profile, age, size. */
-  function candidateDescription(
-    candidate: FolderHistoryCandidate,
-    state: { readonly open: boolean; readonly running: boolean },
-  ): string {
-    // Where the row was found is deliberately absent: an indexed row and a discovered
-    // one are one row per canonical file with the same actions (ADR-0027). What the
-    // user is told is this window's own state for it, which is the thing that changes.
-    const parts: string[] = [];
-    if (state.open) parts.push("Open");
-    else if (state.running) parts.push("Running in this window");
-    if (!candidate.available) parts.push("Unavailable");
-    parts.push(candidate.profile === null ? "default profile" : `profile ${candidate.profile}`);
-    if (candidate.modifiedAt !== null) parts.push(relativeAge(candidate.modifiedAt, Date.now()));
-    if (candidate.sizeBytes !== null) parts.push(sizeText(candidate.sizeBytes));
-    return parts.join(" · ");
-  }
-
-
-  /**
-   * Offer one folder's sessions, newest first, one row per exact file.
-   *
-   * The list merges the index's own rows with what the scan discovered and the query
-   * has already collapsed both onto one row per canonical exact file, so a session that
-   * is open is offered once and says so. Choosing an open session focuses its editor;
-   * choosing any other indexed row uses the row the index already owns; only a
-   * discovered file needs importing. A file whose indexed row has vanished from disk
-   * stays visible as unavailable instead of disappearing between passes, and nothing is
-   * resumed until one row is chosen.
-   *
-   * Every row carries its own trash button, and deleting one goes through exactly the
-   * same confirmed transaction as a stopped row's Delete — the file, its artifacts, its
-   * rewrite backups and its retained raw recordings. A row that was deleted disappears
-   * from the list the user is still looking at, in place; a refusal is reported by name
-   * and leaves the row exactly where it is.
-   *
-   * The picker never claims to be exhaustive when the scan could not read everything:
-   * its own wording follows the pass's `incomplete` flag, and the reasons stay in the OMP
-   * output channel rather than in this prompt.
-   */
-  async function pickFolderHistoryCandidate(
-    index: SessionIndex,
-    folder: WorkspaceFolder,
-    scan: FolderHistoryScan,
-  ): Promise<FolderHistoryCandidate | null> {
-    const s = windowState();
-    const open = new Set<string>();
-    const running = new Set<string>();
-    for (const state of s.tabs.values()) {
-      if (state.tabId === null) continue;
-      if (state.panel !== null) open.add(state.tabId);
-      if (hostOf(state) !== null) running.add(state.tabId);
-    }
-    let remaining = [...scan.candidates];
-    const rows = (): FolderHistoryPickItem[] =>
-      remaining.map(candidate => ({
-        label: candidateLabel(candidate),
-        description: candidateDescription(candidate, {
-          open: candidate.tabId !== null && open.has(candidate.tabId),
-          running: candidate.tabId !== null && running.has(candidate.tabId),
-        }),
-        // An unavailable row names its file too, and says that choosing it cannot open
-        // anything: the file is re-read at selection time, so a file that came back or
-        // changed in the meantime is decided there rather than here.
-        detail: candidate.available
-          ? candidate.file
-          : `${candidate.file}\nThis session file is not readable on disk, so it cannot be resumed.`,
-        buttons: [HISTORY_ROW_TRASH],
-        candidate,
-      }));
-    const picker = vscode.window.createQuickPick<FolderHistoryPickItem>();
-    picker.title = scan.incomplete
-      ? `Resume an OMP session in ${folderHeadline(folder.path)} (this list may be incomplete)`
-      : `Resume an OMP session in ${folderHeadline(folder.path)}`;
-    picker.placeholder = scan.incomplete
-      ? "Some session locations could not be read, so sessions may be missing from this list"
-      : "Every readable OMP session whose own header records this folder";
-    picker.canSelectMany = false;
-    picker.items = rows();
-    picker.onDidTriggerItemButton(event => {
-      const candidate = event.item.candidate;
-      void (async () => {
-        const deleted = await s.sessionActions.confirmAndDelete(index, folderHistoryDeletionSubject(candidate));
-        if (!deleted) return;
-        // In place: the row the user just deleted leaves the list they are looking at,
-        // and every other row keeps its position.
-        remaining = remaining.filter(other => other.file !== candidate.file);
-        picker.items = rows();
-      })();
-    });
-    return await new Promise<FolderHistoryCandidate | null>(resolve => {
-      picker.onDidAccept(() => {
-        resolve(picker.selectedItems[0]?.candidate ?? null);
-        picker.hide();
-      });
-      picker.onDidHide(() => {
-        resolve(null);
-        picker.dispose();
-      });
-      picker.show();
-    });
-  }
-
-
-  /**
-   * Resume one of a folder's sessions, discovered on demand.
-   *
-   * The folder comes from a folder row or from a choice among the registered
-   * folders. The scan is read-only, shows progress and can be cancelled, and it is
-   * the only thing that ever enumerates OMP's session files: the launcher itself
-   * never scans. The folder is resolved again after the scan and again after the
-   * picker, so a folder removed while a dialog was open is never resumed from.
-   */
-  async function resumeWorkspaceFolder(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    argument: unknown,
-  ): Promise<void> {
-    const s = windowState();
-    const folders = s.launcherFolders;
-    if (folders === undefined) return;
-    const folder = await chooseFolder(index, folders, argument, {
-      title: "Choose the folder to resume a session from",
-      addWhenEmpty: true,
-      openHereFirst: true,
-    });
-    if (folder === null) return;
-    if (await s.routing.routeLaunch(index, folder, { kind: "resume-folder", folderId: folder.id })) return;
-    await resumeFromFolderHistory(context, index, folders, folder);
-  }
-
-
-  /** The scan, the picker and the launch of Resume Session for one folder, in this window. */
-  async function resumeFromFolderHistory(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    folders: LauncherFolders,
-    folder: LauncherFolder,
-    keepLiveView = false,
-  ): Promise<void> {
-    const scan = await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: `Looking for OMP sessions in ${folderHeadline(folder.path)}…`,
-        cancellable: true,
-      },
-      async (_progress, token) => {
-        const controller = new AbortController();
-        const registration = token.onCancellationRequested(() => controller.abort());
-        try {
-          return await scanFolderHistory({
-            cwd: folder.path,
-            indexed: indexedRowsForHistory(index),
-            signal: controller.signal,
-            isCancelled: () => token.isCancellationRequested,
-          });
-        } finally {
-          registration.dispose();
-        }
-      },
-    );
-    logFolderScan(folder, scan);
-    if (scan.cancelled) {
-      // Cancelling means "stop waiting", so no picker is forced on the user
-      // afterwards — but the partial result is reported rather than dropped: what
-      // was already found is named here and every issue stays in the output channel.
-      showInfo(
-        scan.candidates.length === 0
-          ? "Looking for OMP sessions was cancelled before any session was read, so nothing was resumed."
-          : `Looking for OMP sessions was cancelled after ${scan.candidates.length} session(s) had been read, so nothing was resumed. ` +
-              `Run Resume Session again to see the list.`,
-      );
-      return;
-    }
-    if (folders.get(folder.id) === null) {
-      showWarning("That folder was removed from Sessions while its sessions were being read, so nothing was resumed.");
-      refreshLauncher();
-      return;
-    }
-    if (scan.candidates.length === 0) {
-      // An empty answer is never presented as a complete one: a pass that could not
-      // read everything says so instead, and the exact paths and errors are in the
-      // OMP output channel rather than in this notification.
-      if (scan.incomplete) {
-        showWarning(
-          `No OMP session could be read for "${folderHeadline(folder.path)}", and some session locations could not be read either, ` +
-            `so this is not a complete answer. The OMP Desk output channel names every path and error.`,
-        );
-      } else {
-        showInfo(`No readable OMP session records "${folderHeadline(folder.path)}" as its working directory.`);
-      }
-      return;
-    }
-    if (scan.incomplete) {
-      showWarning(
-        `Some OMP session locations of "${folderHeadline(folder.path)}" could not be read, so this list may be incomplete. ` +
-          `The OMP Desk output channel names every path and error.`,
-      );
-    }
-    const picked = await pickFolderHistoryCandidate(index, folder, scan);
-    if (picked === null) return;
-    const current = folders.get(folder.id);
-    if (current === null) {
-      showWarning("That folder was removed from Sessions, so nothing was resumed.");
-      refreshLauncher();
-      return;
-    }
-    await openFolderHistoryCandidate(context, index, current, picked, keepLiveView);
-  }
-
-
-  /**
-   * Open one chosen folder-scoped session, after re-checking what it is.
-   *
-   * Everything is re-read at selection time, because between the scan and the click
-   * a folder can be removed, a session file can change or disappear, another window
-   * can import the same file, and a file's own header — the only authority on which
-   * folder it belongs to — can record a different working directory than the row was
-   * offered under. Any of those refuses or refreshes instead of launching an
-   * unrelated session, and this is a selection-time check, not a filesystem snapshot:
-   * a foreign OMP writer can still change the file a moment later.
-   */
-  async function openFolderHistoryCandidate(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    folder: WorkspaceFolder,
-    candidate: FolderHistoryCandidate,
-    keepLiveView = false,
-  ): Promise<void> {
-    const commandAt = Date.now();
-    const inspection = await inspectSessionFile(candidate.file);
-    if (inspection.kind === "missing") {
-      showError(`That OMP session file is no longer there: ${inspection.detail}`);
-      refreshLauncher();
-      return;
-    }
-    if (inspection.kind === "unreadable") {
-      showError(`That OMP session file could not be read: ${inspection.detail}`);
-      refreshLauncher();
-      return;
-    }
-    if (inspection.kind === "invalid") {
-      showError(`That file is no longer a readable OMP session: ${inspection.detail}`);
-      refreshLauncher();
-      return;
-    }
-    const folderKey = canonicalFolderKey(folder.path);
-    const headerKey = canonicalFolderKey(inspection.header.cwd);
-    if (folderKey === null || headerKey === null || folderKey !== headerKey) {
-      showWarning(
-        `That OMP session no longer records "${displayFolderPath(folder.path)}" as its working directory, so it was not resumed here. ` +
-          `Refresh Sessions, or resume it from the folder it now records.`,
-      );
-      refreshLauncher();
-      return;
-    }
-
-    const existing = candidate.tabId === null ? null : index.get(candidate.tabId);
-    if (candidate.tabId !== null && existing === null) {
-      showWarning("That session is no longer in Sessions. Refresh Sessions and try again.");
-      refreshLauncher();
-      return;
-    }
-    // A row the index already holds is never re-registered: it is opened with its own
-    // recorded scope, so a session launched with an explicit `--session-dir` keeps
-    // writing where it always did. Registration below is therefore always for a file
-    // the scan discovered, and there `candidate.sessionDir` is the root OMP was
-    // pointed at — a profile root or a custom directory — which is exactly the
-    // `--session-dir` that resumes it in place. (An indexed candidate carries `null`
-    // for the same field, and `trackSession` re-uses an existing row for a file it
-    // already owns without reading this input at all.)
-    let entry = existing;
-    // A file that has no row but whose conversation does (the row went on in a newer file, or this is the newer file of an
-    // older row) opens that row: one conversation is one row.
-    if (entry === null) entry = await index.rowOfChain(candidate.file);
-    if (entry === null) {
-      try {
-        entry = await index.trackSession({
-          sessionFile: candidate.file,
-          cwd: folder.path,
-          scope: { profile: candidate.profile, sessionDir: candidate.sessionDir },
-        });
-      } catch (error) {
-        showError(`The OMP session could not be registered: ${messageOf(error)}`);
-        refreshLauncher();
-        return;
-      }
-    }
-
-    // One file, one row: whatever row is about to be opened must still stand for the
-    // exact file the user chose. A competing import can have registered that file
-    // while the picker was open, and `trackSession` returns the row it found — so the
-    // check is made on the row itself rather than on the click that produced it.
-    //
-    // The folder question was answered by the file's own header above and is not
-    // asked of the row: an indexed row's recorded working directory can be stale,
-    // and the header is the authority on which folder a session belongs to. The
-    // index repairs that recorded value from the same header evidence when the row
-    // opens, so the launch that follows runs in the folder the user selected rather
-    // than in whatever the row remembered.
-    if (entry.sessionFile === null || (normalizeSessionIdentityKey(entry.sessionFile) !== normalizeSessionIdentityKey(candidate.file) && (await index.rowOfChain(candidate.file))?.tabId !== entry.tabId)) {
-      showWarning(
-        "That session file now belongs to a different row in Sessions, so it was not resumed. Refresh Sessions and try again.",
-      );
-      refreshLauncher();
-      return;
-    }
-
-    // An already-open session is focused, never re-opened: a second restore of one
-    // row is what the index refuses as a duplicate, and a second panel would be a
-    // second guest for one seat.
-    const openPanel = stateOf(entry.tabId)?.panel ?? null;
-    if (openPanel !== null && hostOf(stateOf(entry.tabId)) != null) {
-      showInfo(`"${candidateLabel(candidate)}" is already open in this window.`);
-      await revealExistingTab(index, entry.tabId, openPanel);
-      return;
-    }
-    log.info(`tab ${entry.tabId}: resumed folder session ${candidate.file} (${candidate.source}) from ${folder.path}`);
-    await pendingEntry(entry.tabId, "resume", { origin: "command" }, () => timedLaunch(entry.tabId, "resume", commandAt, () => windowState().sessionFlows.openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView)));
-  }
-
-
-  /**
-   * Bring this window's panel for a tab to the front and record it as active.
-   *
-   * The user asked for a tab this window already has an editor for, so nothing is
-   * created, restored or claimed here: the panel is revealed, the tab is recorded
-   * as the active one and the launcher is refreshed.
-   */
-  async function revealExistingTab(index: SessionIndex, tabId: string, panel: vscode.WebviewPanel): Promise<void> {
-    panel.reveal();
-    requestSessionRowExpand(tabId);
-    await setActiveTab(index, tabId);
-    refreshLauncher();
-    void revealActiveSession(index);
-  }
-
-
   /** VS Code's own tab for one editor slot, in whichever group holds it, or `null`. */
   function editorTabOf(slot: string): vscode.Tab | null {
     for (const group of vscode.window.tabGroups.all) {
@@ -4098,7 +2468,6 @@ export function createWindow(deps: WindowDeps) {
     }
     return null;
   }
-
 
   /** What {@link selectEditorTab} reads from VS Code and where it reports a refusal. */
   const tabSelectionApi: TabSelectionApi = {
@@ -4120,7 +2489,6 @@ export function createWindow(deps: WindowDeps) {
     info: message => log.info(message),
   };
 
-
   /**
    * Make VS Code show this slot's tab. `WebviewPanel.reveal` needs the panel handle this window
    * may not have yet, so the tab itself is selected through its group and position; `openEditorAtIndex`
@@ -4130,7 +2498,6 @@ export function createWindow(deps: WindowDeps) {
   function selectEditorTab(slot: string): Promise<boolean> {
     return selectEditorTabThrough(tabSelectionApi, slot, EDITOR_GROUP_FOCUS_COMMANDS);
   }
-
 
   /**
    * Show the editor of a tab this window has no panel handle for, and wait for the handle.
@@ -4183,7 +2550,6 @@ export function createWindow(deps: WindowDeps) {
     return { selected: true, panel };
   }
 
-
   /**
    * Wait (bounded) until a freshly revived editor has finished taking its seat:
    * controlling, not mid-open and not mid-transition. Its panel exists as soon as
@@ -4202,7 +2568,6 @@ export function createWindow(deps: WindowDeps) {
       await new Promise<void>(resolve => setTimeout(resolve, 50));
     }
   }
-
 
   /**
    * Run one explicit launch command (`openTab` or the view change that ends in it) under a timeline run that began when the
@@ -4223,7 +2588,6 @@ export function createWindow(deps: WindowDeps) {
       timeline.abandon(tabId, stateOf(tabId)?.openDeclined === true ? "the Cancel of the external-writer question" : undefined);
     }
   }
-
 
   /**
    * Run the entry of an action the user asked for as a pending operation (display only, `src/host/pending-operations.ts`): it begins
@@ -4247,14 +2611,12 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   // Launch and reconciliation ports
 
   /** This window's session runtime: its index, chat runtime, reconciler, launcher, stop operations and process services behind the `SessionRuntime` port. */
   function createSessionRuntime(index: SessionIndex, chat: ChatRuntime): LocalSessionRuntime {
     return new LocalSessionRuntime(sessionRuntimeDeps(index, chat));
   }
-
 
   /** The ports of this window's session runtime; read at call time, so a replaced reconciler, launcher or root probe is used by the next call. */
   function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: () => OmpHostLauncher, held?: RuntimeRecords): LocalSessionRuntimeDeps {
@@ -4320,9 +2682,7 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   const transitionChecks = new WeakMap<TransitionToken, TransitionChecks>();
-
 
   /** Raise the admission fence of a conversation for one flow, with the checks it makes under the gate. */
   function beginTransition(conversation: string, checks: TransitionChecks): TransitionToken {
@@ -4333,7 +2693,6 @@ export function createWindow(deps: WindowDeps) {
     transitionChecks.set(token, checks);
     return token;
   }
-
 
   /** The window's side of the gated transitions: the fence's projection onto the editors, the flow's own checks, the frontends and memories a stop ends. */
   function transitionWindow(index: SessionIndex): TransitionWindow {
@@ -4354,7 +2713,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** The window's side of Kill: what it reads of this window's runtime copy and the surfaces it reports through. */
   function killWindow(index: SessionIndex): KillWindow {
     return {
@@ -4371,18 +2729,15 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** The editor's tab record behind a runtime record: the one under the slot the record says serves its conversation. */
   function tabRecord(record: RuntimeRecord): TabState {
     return slotState(record.slotId) ?? tabState(record.slotId);
   }
 
-
   /** What the runtime holds for the conversation an editor shows; `undefined` for a folder shell and for an editor that never hosted one. */
   function recordOf(state: { readonly tabId: string | null } | null | undefined): ConversationRecord | undefined {
     return state === null || state === undefined ? undefined : windowState().sessionRuntime.records.get(state.tabId);
   }
-
 
   /** The runtime's record of the conversation an editor shows, created for the editor on first use. */
   function recordFor(state: TabState): ConversationRecord {
@@ -4390,12 +2745,10 @@ export function createWindow(deps: WindowDeps) {
     return windowState().sessionRuntime.records.acquire(state.tabId, state.slotId);
   }
 
-
   /** The process this window runs for the editor's conversation. */
   function hostOf(state: { readonly tabId: string | null } | null | undefined): SessionHostRuntime | null {
     return recordOf(state)?.runtime ?? null;
   }
-
 
   /**
    * Whether the writer a launch started is ready for what the user opened it for (`src/host/launch-readiness.ts`): the Sessions row
@@ -4413,18 +2766,15 @@ export function createWindow(deps: WindowDeps) {
     });
   }
 
-
   /** The verified host-control channel of the editor's conversation. */
   function controlOf(state: { readonly tabId: string | null } | null | undefined): ConversationRecord["control"] {
     return recordOf(state)?.control ?? null;
   }
 
-
   /** Whether the conversation's admission fence is up. */
   function fencedOf(state: { readonly tabId: string | null } | null | undefined): boolean {
     return recordOf(state)?.transitioning === true;
   }
-
 
   /** Where this window keeps host-control material: the profile's global state and secret storage, read at call time. */
   function controlStore(): ControlStore {
@@ -4443,7 +2793,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** The window's side of host control (design §2.5): what a published channel starts on this side. */
   function controlWindow(index: SessionIndex): ControlWindow {
     return {
@@ -4456,7 +2805,6 @@ export function createWindow(deps: WindowDeps) {
       },
     };
   }
-
 
   /** The window's side of identity binding: what a bound file changes in the tab and the document. */
   function identityWindow(index: SessionIndex): IdentityWindow {
@@ -4473,7 +2821,6 @@ export function createWindow(deps: WindowDeps) {
       refresh: () => refreshLauncher(),
     };
   }
-
 
   /** The window's side of the end of a process: its terminal pane, views, launcher and notifications. */
   function exitWindow(index: SessionIndex): ExitWindow {
@@ -4494,7 +2841,6 @@ export function createWindow(deps: WindowDeps) {
       notice: (level, text) => { if (level === "error") showError(text); else showWarning(text); },
     };
   }
-
 
   /** The window's side of the native watch: completion notices, turn activity and the editor that follows a handover. */
   function nativeWatchWindow(index: SessionIndex): NativeWatchWindow {
@@ -4584,7 +2930,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /**
    * The window's side of launch and attach (design §2.5): the hooks `LocalLauncher` calls while it
    * starts or re-adopts a host, in the order a launch runs them.
@@ -4641,7 +2986,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** The host launcher the runtime hands to the index: this window's launch and attach, over `launcherWindow`'s hooks. */
   function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, chat: ChatRuntime): LocalLauncher {
     const s = windowState();
@@ -4676,7 +3020,6 @@ export function createWindow(deps: WindowDeps) {
     return context.globalState.get<string>(SESSION_DEFAULT_MODE_KEY) === "terminal" ? "terminal" : "chat";
   }
 
-
   async function chooseDefaultSessionView(context: vscode.ExtensionContext): Promise<void> {
     const current = defaultSessionMode(context);
     const picked = await vscode.window.showQuickPick([
@@ -4688,13 +3031,11 @@ export function createWindow(deps: WindowDeps) {
     refreshLauncher();
   }
 
-
   function sessionAdmissionReason(state: TabState): string | null {
     if (fencedOf(state)) return "The session view is changing or its process is stopping.";
     if (state.mode === "terminal") return "Chat commands are unavailable in Terminal; use the native TUI.";
     return passiveReasonForSlot(state.slotId);
   }
-
 
   function pushSessionView(index: SessionIndex | null, state: TabState, force = false): void {
     const s = windowState();
@@ -4715,20 +3056,17 @@ export function createWindow(deps: WindowDeps) {
     else if (state.bridge?.documentId != null) state.bridge.endpoint.pushTerminal(state.bridge.documentId, message);
   }
 
-
   /** Only explicit activation and fresh-document readiness issue keyboard intent. */
   function activateNativeEditor(state: TabState): void {
     if (state.mode !== "terminal" || state.document?.kind !== "guest" || activePanelTab() !== state || !vscode.window.state.focused) return;
     void state.panel?.webview.postMessage({ type: "omp:terminal-activate", token: encodeHex(randomBytes(16)) } satisfies GuestTerminalActivateMessage);
   }
 
-
   function fenceSessionAdmission(index: SessionIndex, state: TabState, fenced: boolean): void {
     recordFor(state).transitioning = fenced;
     if (state.tabId !== null) windowState().sessionRuntime.conversations.setFence(state.tabId, fenced ? "Session lifecycle transition." : null);
     projectFence(index, state);
   }
-
 
   /** What the editors show of a fence that changed: the guest context, the control picker, the slot's authority and the view. */
   function projectFence(index: SessionIndex, state: TabState): void {
@@ -4737,7 +3075,6 @@ export function createWindow(deps: WindowDeps) {
     applySlotAuthority(state.slotId);
     pushSessionView(index, state);
   }
-
 
   // Restore
 
@@ -4757,7 +3094,6 @@ export function createWindow(deps: WindowDeps) {
     if (s.sessionRuntime.conversations.kindOf(tabId) === "view-only") attachChatRoutes(tabId, true);
   }
 
-
   /**
    * `attachRpcHost` with the startup pass's kept broker connections, while the pass runs: a row whose reconcile kept the connection
    * that proved its host attaches over it (after a new status and every proof); any other attach, and any attach after the pass,
@@ -4767,7 +3103,6 @@ export function createWindow(deps: WindowDeps) {
     const parking = windowState().catalogAdoption.restoreParking();
     return attachRpcHost(parking === null ? input : { ...input, parking });
   }
-
 
   /**
    * Whether this window currently has an editor showing that conversation.
@@ -4792,7 +3127,6 @@ export function createWindow(deps: WindowDeps) {
       .editorMembership()
       .some(entry => (index === null ? s.bridgeEditors.tabOfEditor(entry.editorId) ?? entry.tabId : s.bridgeHost.editorConversation(index, entry)) === tabId);
   }
-
 
   /**
    * Build this window's view of the profile catalog.
@@ -4823,7 +3157,6 @@ export function createWindow(deps: WindowDeps) {
       },
     });
   }
-
 
   /**
    * Reconcile, launch and publish every row the activation cohort covers.
@@ -4923,7 +3256,6 @@ export function createWindow(deps: WindowDeps) {
     });
   }
 
-
   async function handleRestoreOutcome(
     context: vscode.ExtensionContext,
     index: SessionIndex,
@@ -4957,7 +3289,6 @@ export function createWindow(deps: WindowDeps) {
         return;
     }
   }
-
 
   /**
    * Tell a tab's page why it has no live conversation.
@@ -4997,7 +3328,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Present a positively verified writer; a legacy writer remains explicitly stoppable. */
   function presentConflict(index: SessionIndex, tabId: string, detail: string): void {
     const s = windowState();
@@ -5009,7 +3339,6 @@ export function createWindow(deps: WindowDeps) {
     }
     s.guestDispatcher.presentUnavailable(index, tabId, detail, "blocked");
   }
-
 
   /**
    * The window's part of giving a live session to another window (ADR-0080). The runtime's `detach` takes the tab's
@@ -5046,7 +3375,6 @@ export function createWindow(deps: WindowDeps) {
     return { status: "moved" };
   }
 
-
   // Panels and the guest link
 
   /**
@@ -5075,7 +3403,6 @@ export function createWindow(deps: WindowDeps) {
     })());
   }
 
-
   /**
    * Make this window's local editor roles match the durable bindings.
    *
@@ -5099,7 +3426,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** The editor slot this window currently shows a conversation in, or `null`. */
   function localSlotFor(tabId: string): string | null {
     const s = windowState();
@@ -5110,7 +3436,6 @@ export function createWindow(deps: WindowDeps) {
     const state = s.tabs.get(tabId);
     return state !== undefined && state.panel !== null ? state.slotId : null;
   }
-
 
   /**
    * Reserve one editor for one conversation, letting a committed controller take a
@@ -5135,7 +3460,6 @@ export function createWindow(deps: WindowDeps) {
     s.bridgeEditors.releaseEditor(incumbent);
     return s.bridgeEditors.reserve({ tabId: conversation, editorId: slot, provenance, sequence: ++s.editorEventSequence });
   }
-
 
   /**
    * Make sure a ready panel's tab has a conversation to show.
@@ -5169,7 +3493,6 @@ export function createWindow(deps: WindowDeps) {
     s.guestDispatcher.presentUnavailable(index, tabId, DRAFT_NO_HOST_DETAIL);
   }
 
-
   /**
    * Project one restore pass's own result into the conversations of the rows it considered.
    *
@@ -5186,7 +3509,6 @@ export function createWindow(deps: WindowDeps) {
     for (const stopped of report.stopped) windowState().guestDispatcher.presentUnavailable(index, stopped.tabId, stopped.detail);
   }
 
-
   async function setActiveTab(index: SessionIndex, tabId: string): Promise<void> {
     try {
       await index.setActiveTab(tabId);
@@ -5195,7 +3517,6 @@ export function createWindow(deps: WindowDeps) {
     }
     windowState().usageStatus?.update();
   }
-
 
   // Chat pages: the routes that show a host-owned conversation
 
@@ -5209,7 +3530,6 @@ export function createWindow(deps: WindowDeps) {
     }
     return id;
   }
-
 
   /** The Webview `postMessage` route of one panel. */
   function panelChatPage(state: TabState, panel: vscode.WebviewPanel): ChatPage {
@@ -5226,7 +3546,6 @@ export function createWindow(deps: WindowDeps) {
       },
     };
   }
-
 
   /** The bridge route of one surviving page: host pushes ride the bridge's own frames. */
   function bridgeChatPage(bridge: NonNullable<TabState["bridge"]>, documentId: string): ChatPage {
@@ -5245,7 +3564,6 @@ export function createWindow(deps: WindowDeps) {
       },
     };
   }
-
 
   /**
    * Point one editor slot's conversation at the route that reaches its page now.
@@ -5285,7 +3603,6 @@ export function createWindow(deps: WindowDeps) {
     publishFooterMetadata(state.tabId);
   }
 
-
   /** Point every editor showing one conversation at its route (after its host or view changed). */
   function attachChatRoutes(tabId: string, force = false): void {
     const s = windowState();
@@ -5293,7 +3610,6 @@ export function createWindow(deps: WindowDeps) {
       if (state.tabId === tabId) attachChatRoute(slot, force);
     }
   }
-
 
   /**
    * Answer one admitted request that arrived over the bridge.
@@ -5435,7 +3751,6 @@ export function createWindow(deps: WindowDeps) {
     });
   }
 
-
   /**
    * Refuse one bridge request without inventing an answer.
    *
@@ -5449,7 +3764,6 @@ export function createWindow(deps: WindowDeps) {
     session.reply(requestId, null);
     if (routeGeneration !== null) session.send("invalidate", { routeGeneration });
   }
-
 
   /**
    * Answer one bridge request out of the ordinary guest vocabulary.
@@ -5484,7 +3798,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** The responder that lets the ordinary control/tool handlers answer over the bridge. */
   function bridgeResponder(
     tabId: string,
@@ -5513,7 +3826,6 @@ export function createWindow(deps: WindowDeps) {
       },
     };
   }
-
 
   /**
    * Reserve one bridge mutation and hand back the fence the native send re-checks.
@@ -5551,7 +3863,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   // Guest activity: notifications, the stop binding, and usage readings
 
   /** The actual active OMP editor, not another visible editor in a split group. */
@@ -5566,7 +3877,6 @@ export function createWindow(deps: WindowDeps) {
     return state as TabState & { tabId: string; panel: vscode.WebviewPanel };
   }
 
-
   async function switchActiveSessionView(context: vscode.ExtensionContext, index: SessionIndex, mode: SessionViewMode): Promise<void> {
     const state = activePanelTab();
     if (state === null) {
@@ -5577,14 +3887,12 @@ export function createWindow(deps: WindowDeps) {
     await windowState().sessionFlows.switchSessionMode(context, index, state, mode);
   }
 
-
   function forgetTerminalCopy(state: TabState): void {
     const s = windowState();
     const pending = s.terminalCopyRequests.get(state);
     if (pending !== undefined) clearTimeout(pending.timer);
     s.terminalCopyRequests.delete(state);
   }
-
 
   function copyActiveTerminalScreen(): void {
     const s = windowState();
@@ -5607,7 +3915,6 @@ export function createWindow(deps: WindowDeps) {
     void state.panel.webview.postMessage({ type: "omp:terminal-copy-request", requestId: nonce } satisfies GuestTerminalCopyRequestMessage);
   }
 
-
   /**
    * `OMP Desk: Redraw Terminal`: ask the native OMP program in the active editor to repaint its own
    * screen (the resize nudge a reattach performs), for the moments its renderer and the terminal
@@ -5624,7 +3931,6 @@ export function createWindow(deps: WindowDeps) {
       if (!redrawn) showWarning("OMP's terminal cannot be repainted now: it must be visible and own the session's input. Click into the terminal and try again.");
     });
   }
-
 
   async function acceptTerminalCopy(state: TabState, reply: GuestTerminalCopyReplyMessage): Promise<void> {
     const s = windowState();
@@ -5650,7 +3956,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** The panel a command should act on: the showing one, else the index's active tab. */
   function actionTargetTab(index: SessionIndex): { tabId: string; panel: vscode.WebviewPanel } | null {
     const active = activePanelTab();
@@ -5660,7 +3965,6 @@ export function createWindow(deps: WindowDeps) {
     const panel = stateOf(tabId)?.panel ?? null;
     return panel === null ? null : { tabId, panel };
   }
-
 
   /**
    * Ask the showing panel's UI to run one of its own actions.
@@ -5690,7 +3994,6 @@ export function createWindow(deps: WindowDeps) {
     log.debug(`tab ${target.tabId}: ${action} asked from a VS Code command or keybinding`);
   }
 
-
   // Chat quick actions (ADR-0052): the TUI's retry, history search, compaction, cycling, export and share,
   // run for one Chat's live conversation with VS Code's own consent UI. None of them starts a host.
 
@@ -5709,12 +4012,10 @@ export function createWindow(deps: WindowDeps) {
     return target.tabId;
   }
 
-
   /** Ask the active Chat editor's own composer to run one of its actions (retry, thinking or tools toggle). */
   function postChatPanelAction(action: GuestPanelAction): void {
     if (activeChatTab() !== null) postPanelAction(action);
   }
-
 
   /**
    * Open the find bar of the active Chat editor's transcript. Searching writes nothing, so a view-only editor may do it too
@@ -5732,25 +4033,21 @@ export function createWindow(deps: WindowDeps) {
     log.debug(`tab ${target.tabId}: find-in-chat asked from a VS Code command`);
   }
 
-
   /** Run one {@link GuestChatCommand} for the active Chat editor, from the command palette or a keybinding. */
   function runActiveChatAction(context: vscode.ExtensionContext, index: SessionIndex, command: GuestChatCommand): void {
     const tabId = activeChatTab();
     if (tabId !== null) void runChatAction(context, index, tabId, command);
   }
 
-
   function chatRefusalText(reason: SendRefusal): string {
     return reason === "busy" ? "OMP is busy with another request; try again in a moment." : reason === "not-live" || reason === "not-owner" ? "This conversation is not accepting commands right now." : "OMP did not accept the command.";
   }
-
 
   /** A maintenance pass's outcome. Its report already shows in the conversation; only a refusal or silence needs a warning. */
   function reportMaintenance(result: CommandResult<string>, notDone: string): void {
     if (result.status === "refused") showWarning(`${notDone} ${chatRefusalText(result.reason)}`);
     else if (result.status === "unconfirmed") showWarning("OMP did not report the outcome of the command.");
   }
-
 
   /**
    * One Chat action for `tabId`'s live conversation. Every action that sends or uploads anything asks first in
@@ -5887,7 +4184,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** The Desk stand-in for a terminal-UI slash command typed into Chat (`host/slash-registry.ts`). */
   async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings" | "new-session" | "delete-session" | "fork-session">): Promise<void> {
     switch (action) {
@@ -5913,11 +4209,9 @@ export function createWindow(deps: WindowDeps) {
     throw new Error(`Unsupported Desk slash action: ${exhaustive}`);
   }
 
-
   async function showChatKeyboardShortcuts(): Promise<void> {
     await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "ompDesk.");
   }
-
 
   function rememberedPrompts(): string[] {
     const s = windowState();
@@ -5925,13 +4219,11 @@ export function createWindow(deps: WindowDeps) {
     return Array.isArray(stored) ? stored.filter((item): item is string => typeof item === "string") : [];
   }
 
-
   /** A file block's path text made absolute against the sending tab's folder (forward slashes, as the labels are), or left as it is. */
   function absoluteFileLabel(label: string, cwd: string | null): string {
     if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(label) || cwd === null) return label;
     return `${cwd.replaceAll("\\", "/").replace(/\/+$/, "")}/${label}`;
   }
-
 
   /**
    * Remembers an accepted prompt of `tabId` for the history search. A message that carried files is stored with each file block
@@ -5948,7 +4240,6 @@ export function createWindow(deps: WindowDeps) {
     const next = [stored, ...rememberedPrompts().filter(item => item !== stored)].slice(0, MAX_PROMPT_HISTORY);
     void context.globalState.update(PROMPT_HISTORY_KEY, next);
   }
-
 
   /**
    * The history search (`Ctrl+Alt+Y`; the TUI's `Ctrl+R`): a QuickPick of past prompts, this conversation's first (newest first), then the ones sent
@@ -5984,7 +4275,6 @@ export function createWindow(deps: WindowDeps) {
     if (panel === undefined || panel === null) return;
     void panel.webview.postMessage(recall satisfies GuestRecallPromptMessage);
   }
-
 
   /**
    * "OMP Desk: Rewind Conversation…" (ADR-0051), the keyboard-only route to Chat's in-place Rewind: the loaded prompts of the
@@ -6033,7 +4323,6 @@ export function createWindow(deps: WindowDeps) {
     showWarning(NAVIGATE_REFUSAL_SENTENCES[outcome.status === "unconfirmed" ? "unconfirmed" : outcome.reason]);
   }
 
-
   function currentSlashRegistry(context: vscode.ExtensionContext): readonly BuiltinSlashEntry[] | null {
     const s = windowState();
     if (s.slashRegistryLoading === null && Date.now() - s.slashRegistryCheckedAt > SLASH_REGISTRY_RECHECK_MS) {
@@ -6044,7 +4333,6 @@ export function createWindow(deps: WindowDeps) {
     }
     return s.slashRegistry?.commands ?? null;
   }
-
 
   async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void> {
     const s = windowState();
@@ -6075,7 +4363,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * Whether the provider served another model than requested, for each pair, by the installed OMP's own classifier
    * (`media/served-model.mjs`). Nothing is read until a page asks; a failed read answers "unknown" and is read again next
@@ -6104,347 +4391,6 @@ export function createWindow(deps: WindowDeps) {
       return unknown();
     }
   }
-
-
-  /** An Explorer click (with its multi-selection), an editor or tab menu, or — from the palette — the active editor's file. */
-  async function addFilesToSession(context: vscode.ExtensionContext, index: SessionIndex, clicked: unknown, selected: unknown): Promise<void> {
-    const chosen = Array.isArray(selected) ? selected.filter((value): value is vscode.Uri => value instanceof vscode.Uri) : [];
-    const uris = chosen.length > 0 ? chosen : clicked instanceof vscode.Uri ? [clicked] : vscode.window.activeTextEditor === undefined ? [] : [vscode.window.activeTextEditor.document.uri];
-    const files = uris.filter(uri => uri.scheme === "file");
-    if (files.length === 0) {
-      showWarning("Select a file or folder on disk to add.");
-      return;
-    }
-    const dirty = new Set(vscode.workspace.textDocuments.filter(document => document.isDirty).map(document => document.uri.toString()));
-    await addToSession(context, index, files.map(uri => ({ fsPath: uri.fsPath })), files.some(uri => dirty.has(uri.toString())));
-  }
-
-
-  /** This window's sessions that can take text now, or by being opened first. */
-  function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): SendCandidate[] {
-    const s = windowState();
-    const found: SendCandidate[] = [];
-    for (const entry of index.list()) {
-      const facts = launcherFacts(entry.tabId);
-      // A row another window holds is never an Add-to-Session target: window-local facts cannot see
-      // that claim, so the Sessions row's own observation decides.
-      const state = s.launcherProvider?.displayedState(entry.tabId) === "otherWindow" ? "otherWindow" : sessionItemState(entry, facts);
-      const availability = insertAvailability(state, { running: facts.running, open: facts.open });
-      if (availability === null) continue;
-      const tab = stateOf(entry.tabId);
-      const editorOpen = tab?.panel != null;
-      // An editor that does not control its session shows one another writer holds.
-      if (tab !== undefined && editorOpen && passiveReasonForSlot(tab.slotId) !== null) continue;
-      // A page that outlived a host restart has no panel handle to reveal or write to.
-      if (facts.open && !editorOpen) continue;
-      found.push({
-        tabId: entry.tabId,
-        slotId: tab !== undefined && editorOpen ? tab.slotId : null,
-        title: tab?.panel?.title ?? sessionHeadline(entry, null),
-        cwd: hostOf(tab)?.cwd ?? entry.cwd,
-        mode: hostOf(tab)?.kind ?? tab?.mode ?? defaultSessionMode(context),
-        stateLabel: sessionStateLabel(state),
-        availability,
-        visible: editorOpen && tab?.panel?.visible === true,
-      });
-    }
-    return found;
-  }
-
-
-  /** The QuickPick: eligible sessions, most recently focused first and preselected, then a new session next to the file. */
-  async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIndex, firstFsPath: string | null, unsaved: boolean, chatOnly: boolean): Promise<SendTarget | null> {
-    const s = windowState();
-    // A document with no path (untitled, or another scheme) starts a new session in the first workspace folder, if there is one.
-    const workspace = firstFsPath === null ? vscode.workspace.workspaceFolders?.[0] : vscode.workspace.getWorkspaceFolder(vscode.Uri.file(firstFsPath));
-    const requestedFolder = firstFsPath === null ? workspace?.uri.fsPath ?? null : newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
-    // A workspace folder shown as the checkout root its sessions run at starts the session there.
-    const listed = requestedFolder === null ? null : s.launcherFolders?.folderForCwd(requestedFolder) ?? null;
-    const folder = listed?.path ?? requestedFolder;
-    const folderListed = listed !== null;
-    // A quote is Markdown for the Chat composer: a terminal session is not offered, and a new session is started as a Chat.
-    const candidates = chatOnly ? sendCandidates(context, index).filter(candidate => candidate.mode === "chat") : sendCandidates(context, index);
-    const entries = pickerEntries(candidates, s.editorRecency.order(), folder ?? "", chatOnly ? "chat" : defaultSessionMode(context), folderListed).filter(entry => folder !== null || entry.kind !== "new");
-    if (entries.length === 0) {
-      showWarning(chatOnly ? "No Chat session is open in this window, and there is no folder to start one in. Open a Chat session first." : "No OMP session is open in this window, and there is no folder to start one in. Open a session first.");
-      return null;
-    }
-    const items: (vscode.QuickPickItem & { target?: SendTarget })[] = [];
-    for (const entry of entries) {
-      if (entry.kind === "new") {
-        if (items.length > 0) items.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
-        items.push({ label: `$(add) ${entry.label}`, description: entry.description, target: { kind: "new", folder: entry.folder } });
-        continue;
-      }
-      const { candidate } = entry;
-      items.push({
-        label: `$(${candidate.mode === "chat" ? "comment-discussion" : "terminal"}) ${candidate.title}`,
-        description: sendCandidateDescription(candidate),
-        detail: candidate.availability === "resume" ? `${candidate.cwd} — stopped: choosing it starts the session first` : candidate.cwd,
-        target: { kind: "session", candidate },
-      });
-    }
-    const picker = vscode.window.createQuickPick<(typeof items)[number]>();
-    picker.title = chatOnly ? "Quote into OMP session" : "Add to OMP session";
-    const verb = chatOnly ? "quote it into" : "add it to";
-    picker.placeholder = unsaved ? `Choose the session to ${verb} — ${chatOnly ? "the quote holds the unsaved text, the location is the saved file's" : "unsaved changes are not included"}` : `Choose the session to ${verb}`;
-    picker.matchOnDescription = true;
-    picker.matchOnDetail = true;
-    picker.items = items;
-    const first = items[0];
-    if (first !== undefined) picker.activeItems = [first];
-    const { promise, resolve } = Promise.withResolvers<SendTarget | null>();
-    picker.onDidAccept(() => {
-      resolve(picker.selectedItems[0]?.target ?? null);
-      picker.hide();
-    });
-    picker.onDidHide(() => {
-      resolve(null);
-      picker.dispose();
-    });
-    picker.show();
-    return await promise;
-  }
-
-
-  /** The request written for one session's working directory: the page message, and the text a terminal would be pasted (`null`: it takes none). */
-  function composeRequest(request: InsertionRequest, cwd: string):
-    | { readonly ok: true; readonly summary: string; readonly chat: GuestInsertTextMessage | GuestInsertQuoteMessage; readonly pasteText: string | null }
-    | { readonly ok: false; readonly reason: string } {
-    if (request.kind === "references") {
-      const composed = composeInsertion(request.sources, cwd);
-      return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-text", text: composed.text }, pasteText: composed.text } : composed;
-    }
-    if (request.kind === "line") {
-      const composed = composeLineReference(request.source, cwd);
-      return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-text", text: composed.text }, pasteText: null } : composed;
-    }
-    if (request.kind === "hunk") {
-      const composed = composeHunkQuote(request.source, cwd);
-      return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
-    }
-    if (request.kind === "preview") {
-      const composed = composePreviewQuote(request.document, request.text, cwd);
-      return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
-    }
-    const composed = composeEditorQuotes(request.source, cwd);
-    return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
-  }
-
-
-  async function addToSession(context: vscode.ExtensionContext, index: SessionIndex, sources: readonly ReferenceSource[], unsaved: boolean): Promise<void> {
-    const first = sources[0];
-    if (first === undefined) return;
-    await sendToSession(context, index, { kind: "references", sources }, first.fsPath, unsaved);
-  }
-
-
-  /**
-   * "OMP Desk: Quote Selection to Session" (`Alt+Q` in a text editor): every non-empty selection of the active editor becomes a quote
-   * in the chosen Chat session's draft; the page places the quote the way it places a Chat quote
-   * (docs/designs/2026-10-15-quote-chat-selection.md, decision 9). With nothing selected the primary caret's line is referenced instead
-   * (docs/designs/2026-10-18-chat-keys-and-empty-state.md, decision 3): `path:N` as inline code, inserted at the caret of the draft, by
-   * the quote's own location rule and target rule. The active editor of a diff is the side that has the focus; a side that is a Git
-   * revision names the version it is (decision 10 of the quote design, `src/wiring/quote-source.ts`).
-   * In a diff editor, with nothing selected and the caret on a changed line, the whole hunk is quoted instead (decision 11, `wiring/quote-hunk.ts`).
-   */
-  async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-    const preview = activePreview();
-    if (preview !== null) {
-      await quotePreviewSelectionToSession(context, index, preview);
-      return;
-    }
-    const editor = vscode.window.activeTextEditor;
-    if (editor === undefined) {
-      showWarning("Open a text editor to quote from or to point at a line.");
-      return;
-    }
-    const { document } = editor;
-    const selections = editor.selections.filter(selection => !selection.isEmpty);
-    if (selections.length === 0) {
-      // In a diff editor with the caret on a changed line, the whole hunk is the quote (decision 11); anywhere else the caret's line is referenced.
-      const hunk = await quoteHunkOf(editor);
-      if (hunk !== null) {
-        log.debug(`diff hunk: ${hunk.modified.version ?? "file on disk"} against ${hunk.original.version ?? "file on disk"}`);
-        const early = composeHunkQuote(hunk, "");
-        if (!early.ok) {
-          showWarning(`${early.reason} Nothing was quoted.`);
-          return;
-        }
-        await sendToSession(context, index, { kind: "hunk", source: hunk }, hunk.modified.fsPath ?? hunk.original.fsPath, document.isDirty);
-        return;
-      }
-      const where = await quoteSourceOf(document, [editor.selection]);
-      const source: LineReferenceSource = { fsPath: where.fsPath, version: where.version, line: editor.selection.active.line + 1 };
-      log.debug(`line reference: ${document.uri.scheme} document, ${source.fsPath === null ? "no path" : source.version === null ? "file on disk" : `version ${source.version}`}`);
-      // A document with no location, or a path that cannot be written, is refused before a session is chosen or started.
-      const early = composeLineReference(source, "");
-      if (!early.ok) {
-        showWarning(early.reason);
-        return;
-      }
-      await sendToSession(context, index, { kind: "line", source }, source.fsPath, document.isDirty);
-      return;
-    }
-    const source = await quoteSourceOf(document, selections);
-    log.debug(`quote source: ${document.uri.scheme} document, ${source.fsPath === null ? "no path" : source.version === null ? "file on disk" : `version ${source.version}`}, ${selections.length} selection(s)`);
-    // What cannot be quoted at all (too long, a control character, too many selections) is refused before a session is chosen or started.
-    const early = composeEditorQuotes(source, "");
-    if (!early.ok) {
-      showWarning(`${early.reason} Nothing was quoted.`);
-      return;
-    }
-    await sendToSession(context, index, { kind: "quote", source }, source.fsPath, document.isDirty);
-  }
-
-
-  /**
-   * `Alt+Q` while VS Code's Markdown preview has the focus: the selected rendered text goes into the Chat draft under the path of the
-   * document the preview shows (docs/designs/2026-10-15-quote-chat-selection.md, decision 12). Nothing selected is a notice and
-   * nothing is quoted; the session is chosen as for any quote.
-   */
-  async function quotePreviewSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex, preview: ActivePreview): Promise<void> {
-    log.debug(`preview quote: ${preview.fsPath === null ? "preview panel" : "preview editor"}`);
-    const text = await copyPreviewSelection();
-    if (text.trim().length === 0) {
-      showInfo("Select some text in the preview first.");
-      return;
-    }
-    const document = await previewDocumentOf(preview);
-    log.debug(`preview quote: ${document.fsPath === null ? "document not identified" : "document identified"}`);
-    const early = composePreviewQuote(document, text, "");
-    if (!early.ok) {
-      showWarning(`${early.reason} Nothing was quoted.`);
-      return;
-    }
-    await sendToSession(context, index, { kind: "preview", document, text }, document.fsPath, false);
-  }
-
-
-  async function sendToSession(context: vscode.ExtensionContext, index: SessionIndex, request: InsertionRequest, firstFsPath: string | null, unsaved: boolean): Promise<void> {
-    const s = windowState();
-    const chatOnly = request.kind !== "references";
-    const words = SEND_WORDS[request.kind];
-    // A quote or a line reference goes straight into the Chat the user can see in this window; the picker only asks when none is shown.
-    const visibleChat = chatOnly ? visibleQuoteTarget(sendCandidates(context, index), s.editorRecency.order()) : null;
-    const target = visibleChat !== null ? { kind: "session" as const, candidate: visibleChat } : await pickSendTarget(context, index, firstFsPath, unsaved, chatOnly);
-    if (target === null) return;
-    let tabId: string;
-    let cwd: string;
-    let folderAdded = false;
-    if (target.kind === "new") {
-      const folders = s.launcherFolders;
-      if (folders === undefined) return;
-      // Refuse what cannot be written before anything is added or started.
-      const probe = composeRequest(request, target.folder);
-      if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${words.past}.`); return; }
-      // Choosing "New session in <folder>" for a folder the launcher already shows (open in this
-      // window or pinned) just starts there; for any other folder it is the explicit act of pinning
-      // it (a session is never started in a folder the launcher does not show); the picker row says so.
-      const shown = folders.folderForCwd(target.folder);
-      folderAdded = shown === null;
-      const added = shown === null ? await folders.add(target.folder) : { ok: true as const, folder: shown, created: false };
-      if (!added.ok) {
-        showError(`The folder for a new session was not pinned: ${added.reason}`);
-        return;
-      }
-      cwd = added.folder.path;
-      refreshLauncher();
-      let entry: SessionIndexEntry;
-      try {
-        entry = await index.createDraft({ cwd });
-      } catch (error) {
-        showError(`A new OMP session could not be reserved: ${messageOf(error)}`);
-        return;
-      }
-      tabId = entry.tabId;
-      refreshLauncher();
-      await windowState().sessionFlows.openTab(context, index, tabId, "started", "explicit", chatOnly ? "chat" : undefined);
-    } else {
-      tabId = target.candidate.tabId;
-      cwd = target.candidate.cwd;
-      const probe = composeRequest(request, cwd);
-      if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${words.past}.`); return; }
-      // Reveals a running session's editor, reopens a closed one and starts a stopped one, all through the
-      // path the Sessions view's Open uses (ownership is rechecked there).
-      // The references are inserted into an editor of this window, so a stopped session is launched here, not in
-      // the window its folder is open in (ADR-0057 leaves this one entry point local).
-      if (!(await openSession(context, index, tabId, "resumed", true))) return;
-    }
-    const delivered = await deliverInsertion(tabId, request, cwd);
-    if (!delivered.ok) {
-      log.warn(`tab ${tabId}: editor ${request.kind} was not ${words.past} (${delivered.reason})`);
-      void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was ${words.past}.`, ...(request.kind === "references" ? ["Copy reference"] : [])).then(choice => {
-        if (choice === "Copy reference" && request.kind === "references") {
-          const composed = composeInsertion(request.sources, cwd);
-          if (composed.ok) void vscode.env.clipboard.writeText(composed.text);
-        }
-      });
-      return;
-    }
-    log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : request.kind === "quote" ? `${request.source.selections.length} editor quote(s)` : request.kind === "hunk" ? "a diff hunk" : request.kind === "preview" ? "a preview quote" : "a line reference"}`);
-    const notes: string[] = [];
-    if (unsaved) notes.push(chatOnly ? "the file has unsaved changes: the location is the saved file's" : "unsaved changes are not included");
-    if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);
-    // OMP expands @mentions only in a prompt sent while it is idle, not in a steering or queued follow-up message. A quote and a line reference hold no mention.
-    if (request.kind === "references" && s.turnActivities.get(tabId)?.streaming === true) notes.push("the session is busy: send it once the turn ends so the files are read");
-    vscode.window.setStatusBarMessage(`${words.Past} ${delivered.summary} ${words.to} «${delivered.title}»${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`, notes.length > 0 ? 10_000 : 6_000);
-  }
-
-
-  /**
-   * Hand the references to the session's input once that input exists: the composer of a chat page that
-   * has announced itself, or the native TUI once it has enabled bracketed paste. The target is revealed
-   * and focused once; a session still starting is waited for, bounded. The text is composed against the
-   * session's working directory as it is when written, which a starting session may still be settling.
-   */
-  async function deliverInsertion(
-    tabId: string,
-    request: InsertionRequest,
-    entryCwd: string,
-  ): Promise<{ readonly ok: true; readonly title: string; readonly summary: string } | { readonly ok: false; readonly reason: string }> {
-    const s = windowState();
-    const deadline = Date.now() + INSERT_TARGET_TIMEOUT_MS;
-    let waiting = "the session did not become ready";
-    let revealed = false;
-    for (;;) {
-      const state = stateOf(tabId);
-      const panel = state?.panel ?? null;
-      if (state !== undefined && panel !== null && state.document?.kind === "guest" && !fencedOf(state)
-        && passiveReasonForSlot(state.slotId) === null && launcherFacts(tabId).running) {
-        if (s.turnActivities.get(tabId)?.pendingRequest != null) return { ok: false, reason: "The session is waiting for your answer, which covers its input." };
-        if (!revealed) {
-          revealed = true;
-          if (!panel.active) panel.reveal(undefined, false);
-        }
-        const composed = composeRequest(request, hostOf(state)?.cwd ?? entryCwd);
-        if (!composed.ok) return { ok: false, reason: composed.reason };
-        const { summary } = composed;
-        if (state.mode === "chat") {
-          if (s.readyDocuments.get(state) === state.document) {
-            const posted = await panel.webview.postMessage(composed.chat);
-            return posted ? { ok: true, title: panel.title, summary } : { ok: false, reason: "The chat page did not accept the text." };
-          }
-          waiting = "the chat page did not become ready";
-        } else if (composed.pasteText === null) {
-          return { ok: false, reason: "A quote or a line reference goes into a Chat session; this one shows its terminal." };
-        } else if (state.pipeline !== null && state.shellSlot === null) {
-          const outcome = await state.pipeline.pasteText(composed.pasteText);
-          if (outcome === "pasted") {
-            const settleBy = Date.now() + 2_000;
-            while (state.panel?.active !== true && Date.now() < settleBy) await delay(50);
-            activateNativeEditor(state);
-            return { ok: true, title: panel.title, summary };
-          }
-          if (outcome === "refused" || outcome === "unavailable") return { ok: false, reason: "The terminal could not take the text." };
-          waiting = outcome === "not-owner" ? "the terminal did not take input ownership" : "OMP's prompt is not reading input yet";
-        }
-      }
-      if (Date.now() >= deadline) return { ok: false, reason: `Timed out: ${waiting}.` };
-      await delay(INSERT_POLL_MS);
-    }
-  }
-
 
   /**
    * This window's turn notifier.
@@ -6495,11 +4441,9 @@ export function createWindow(deps: WindowDeps) {
     return s.turnNotifier.notifier;
   }
 
-
   function logNotificationSuppression(tabId: string, kind: TurnNotice["kind"], reason: NotificationSuppression | "aborted"): void {
     log.debug(`tab ${tabId}: desktop notification ${kind} suppressed (${reason}).`);
   }
-
 
   function notificationSuppression(index: SessionIndex, tabId: string): NotificationSuppression | null {
     const active = editorInFrontConversation(index) === tabId;
@@ -6512,13 +4456,11 @@ export function createWindow(deps: WindowDeps) {
     );
   }
 
-
   /** Whether the user is looking at this session now. The desktop-notification setting does not matter here. */
   function sessionLookedAt(index: SessionIndex, tabId: string): boolean {
     const active = editorInFrontConversation(index) === tabId;
     return isLookedAt(vscode.window.state.focused, stateOf(tabId)?.panel?.visible ?? active, active);
   }
-
 
   /**
    * The agent finished a reply or asked a question. The session is unread from now on unless
@@ -6536,7 +4478,6 @@ export function createWindow(deps: WindowDeps) {
     );
   }
 
-
   /** The user is in front of a session's editor: what it said so far counts as read. */
   function settleViewedSession(index: SessionIndex): void {
     const s = windowState();
@@ -6550,7 +4491,6 @@ export function createWindow(deps: WindowDeps) {
       error => log.warn(`tab ${tabId}: the unread marker could not be cleared: ${messageOf(error)}`),
     );
   }
-
 
   /**
    * Keep the context keys in step with the panel on screen, so the Stop keybinding is live
@@ -6568,7 +4508,6 @@ export function createWindow(deps: WindowDeps) {
     setDeskContext(COMPOSER_POPUP_CONTEXT, visible !== null && s.composerPopupTabs.has(visible.tabId));
   }
 
-
   function setSubagentWork(index: SessionIndex, tabId: string, active: boolean): void {
     const s = windowState();
     if ((s.subagentWork.get(tabId) ?? false) === active) return;
@@ -6577,7 +4516,6 @@ export function createWindow(deps: WindowDeps) {
     if (current !== null) applyTurnActivity(index, tabId, current.observed, false);
   }
 
-
   function stopSubagentWatch(index: SessionIndex | null, tabId: string): void {
     const s = windowState();
     const timer = s.subagentWatches.get(tabId);
@@ -6585,7 +4523,6 @@ export function createWindow(deps: WindowDeps) {
     s.subagentWatches.delete(tabId);
     if (index !== null) setSubagentWork(index, tabId, false); else s.subagentWork.delete(tabId);
   }
-
 
   /** Ask a verified chat child for its registry subagents until the channel it was started on changes. */
   function watchSubagentWork(index: SessionIndex, tabId: string, client: HostControlClient): void {
@@ -6609,7 +4546,6 @@ export function createWindow(deps: WindowDeps) {
     timer.unref?.();
     s.subagentWatches.set(tabId, timer);
   }
-
 
   /**
    * Apply the host-observed turn state of one conversation.
@@ -6648,7 +4584,6 @@ export function createWindow(deps: WindowDeps) {
     if (previous === null || activitySignature(previous) !== activitySignature(activity)) refreshLauncher();
   }
 
-
   /** Drop everything this window remembered about a conversation that is gone. */
   function forgetTurnActivity(index: SessionIndex, tabId: string): void {
     const s = windowState();
@@ -6663,7 +4598,6 @@ export function createWindow(deps: WindowDeps) {
     refreshGuestContext();
   }
 
-
   // Chat host lifecycle events
 
   /** Phases in which a conversation's process is starting, attaching or serving. */
@@ -6671,20 +4605,16 @@ export function createWindow(deps: WindowDeps) {
     return phase === "starting" || phase === "attaching" || phase === "resyncing" || phase === "live";
   }
 
-
-
   /** `ompDesk.chatHtmlPages`: whether a closed `html` fence of a reply is shown as a sandboxed page, and whether the model is told it may write one. The default is this one fallback and the manifest's. */
   function chatHtmlPagesEnabled(): boolean {
     return vscode.workspace.getConfiguration("ompDesk").get<boolean>("chatHtmlPages", true);
   }
-
 
   /** `ompDesk.chatLinkRules`: this window's link rules, read from the user's own settings only (`wiring/link-rules.ts`); a value with refused rules is logged and shown once. */
   function linkRules(): LinkRuleSource {
     const s = windowState();
     return s.linkRules ??= createWindowLinkRules(log, showWarning);
   }
-
 
   /** These are editor presentation preferences, never OMP commands. */
   function readChatDisplayPreferences(): ChatDisplayPreferences {
@@ -6700,7 +4630,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   async function toggleThinkingDefault(): Promise<void> {
     const s = windowState();
     if (activeChatTab() === null || s.context === undefined) return;
@@ -6710,7 +4639,6 @@ export function createWindow(deps: WindowDeps) {
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
 
-
   /** `Ctrl+O` (`output`) expands or collapses everything; `Ctrl+Shift+O` (`groups`) opens or closes the groups with their calls collapsed. */
   async function toggleToolsMode(key: ToolsModeKey): Promise<void> {
     const s = windowState();
@@ -6719,7 +4647,6 @@ export function createWindow(deps: WindowDeps) {
     await s.context.globalState.update(TOOLS_EXPANDED_KEY, toolsModeToStored(next));
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
-
 
   function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
     const s = windowState();
@@ -6742,7 +4669,6 @@ export function createWindow(deps: WindowDeps) {
     catch (error) { log.warn(`web link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
   }
 
-
   /**
    * A web link the user clicked in a page, already re-validated as `http(s)` by the caller: an editor
    * tab (Simple Browser) or the external browser. Only the origin is logged, never the path or query.
@@ -6751,7 +4677,6 @@ export function createWindow(deps: WindowDeps) {
     log.debug(`web link: opening ${new URL(url).origin} in ${mode === "external" ? "the external browser" : "an editor tab"}`);
     await openWebLink(vscode, url, mode, error => log.warn(`web link: the editor browser failed for ${new URL(url).origin} (${messageOf(error)}); opening it in the external browser`));
   }
-
 
   /** Confirmation the extension owns before an `open_url` request opens a browser. */
   async function confirmOpenUrl(event: { url: string; launchUrl?: string; instructions?: string }): Promise<void> {
@@ -6765,12 +4690,10 @@ export function createWindow(deps: WindowDeps) {
     await vscode.env.openExternal(vscode.Uri.parse(event.launchUrl ?? event.url));
   }
 
-
   /** What taking a session's name into its row and editors needs: the index, the launcher repaint and the tab appearance. */
   function sessionTitleDeps(context: vscode.ExtensionContext, index: SessionIndex): Parameters<typeof adoptSessionTitle>[0] {
     return { index, refreshLauncher: () => refreshLauncher(), applyAppearance: tabId => applyChatTabAppearance(context, index, tabId), log };
   }
-
 
   /**
    * One conversation event from the chat runtime, routed to the extension's own concerns:
@@ -6868,7 +4791,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * Record a lost connection and its end in the output channel, including the bounded plain-text
    * diagnostic for an autonomous managed-RPC child exit. A live phase shown before OMP confirmed a reattached session
@@ -6886,7 +4808,6 @@ export function createWindow(deps: WindowDeps) {
       if (previous === "failed") log.info(`tab ${tabId}: chat connection restored; the same session is live again.`);
     }
   }
-
 
   /** The responder of one bound panel. */
   function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: unknown): GuestResponder {
@@ -6931,8 +4852,6 @@ export function createWindow(deps: WindowDeps) {
       invalidate: () => windowState().guestDispatcher.invalidateControls(tabId),
     };
   }
-
-
 
   /**
    * Answer a guest control request for its own indexed tab only. Correlation fields supplied
@@ -7089,7 +5008,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Only fixed, credential-free display text crosses the Webview boundary. */
   function controlGuestState(
     request: GuestControlRequestMessage,
@@ -7122,7 +5040,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   function controlOutcomeNotice(outcome: ChoiceOutcome): string {
     switch (outcome.status) {
       case "accepted":
@@ -7138,8 +5055,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
-
   /**
    * Environment for the native login terminal: use the session's explicit profile,
    * or OMP's default sentinel, rather than an inherited extension-host profile.
@@ -7147,7 +5062,6 @@ export function createWindow(deps: WindowDeps) {
   function ompCliScopeEnvironment(profile: string | null): Record<string, string> {
     return { OMP_PROFILE: profile !== null && profile.length > 0 ? profile : DEFAULT_OMP_PROFILE };
   }
-
 
   /**
    * The installed OMP a launch would run, resolved now. One resolution at a time: every concurrent caller (the footer of each tab after a
@@ -7161,7 +5075,6 @@ export function createWindow(deps: WindowDeps) {
 
   let resolvingExecutable: Promise<OmpBinary> | null = null;
 
-
   /**
    * The installed OMP a CLI call runs: the exact one a host this window launched started from,
    * or — for a re-adopted host that did not record it — the one a launch would resolve now.
@@ -7170,7 +5083,6 @@ export function createWindow(deps: WindowDeps) {
     if (runtime?.binary != null) return runtime.binary;
     return await sharedOmpBinary();
   }
-
 
   /**
    * `runOmpCli` for what a page shows now (a settings question a Chat page asks): one of the window's bounded helper runs, ahead of background
@@ -7182,7 +5094,6 @@ export function createWindow(deps: WindowDeps) {
     label: `omp ${args[0] ?? ""}`, class: "visible", run: signal => runOmpCli(executable, args, timeoutMs, { ...options, signal }),
   });
 
-
   const usageFailureNotes = new UsageFailureNotes();
 
   /** A provider-usage failure goes to the log with its cause, once per distinct cause for each tab. */
@@ -7190,399 +5101,6 @@ export function createWindow(deps: WindowDeps) {
     const line = usageFailureNotes.note(binding, stage, error);
     if (line !== null) log.warn(line);
   }
-
-
-  /** Cache only a successful default-profile catalogue; unresolved OMP adds no onboarding UI. */
-  function refreshDefaultProviderModels(reason: "credentials" | "discovery" = "credentials"): Promise<void> {
-    const s = windowState();
-    // A credential change repeats a read that is already running (it may have started before the change); a discovery asked for
-    // by a session's first look or by activation joins whatever read is queued or running and starts one only when there is none.
-    if (reason === "credentials") s.defaultProviderModelsDirty = true;
-    if (s.defaultProviderModelsRead !== null) return s.defaultProviderModelsRead;
-    s.defaultProviderModelsRead = (async () => {
-      do {
-        s.defaultProviderModelsDirty = false;
-        try {
-          // Not needed for the first view: held back until the startup restore is over, bounded with the window's other helpers and spread across windows (ADR-0084).
-          await s.helpers.run({ label: "models of the default profile", class: "background", key: "models:default", run: signal => readDefaultProviderModels(s, signal) });
-        } catch (error) {
-          if (isHelperCancelled(error)) return;
-          log.warn("Default-profile models could not be read; retaining the last availability.");
-        }
-      } while (s.defaultProviderModelsDirty);
-    })().finally(() => { s.defaultProviderModelsRead = null; });
-    return s.defaultProviderModelsRead;
-  }
-
-
-  /** One read of the default profile's model catalogue: `omp models --json`. */
-  async function readDefaultProviderModels(s: WindowState, signal: AbortSignal): Promise<void> {
-    let executable: OmpCommand;
-    try { executable = await executableFor(null); }
-    catch {
-      s.defaultProviderModelsAvailable = null;
-      s.launcherProvider?.setProviderLoginRequired(false);
-      return;
-    }
-    try {
-      const result = await runOmpCli(executable, ["models", "--json"], 15_000, {
-        cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
-        env: ompCliScopeEnvironment(DEFAULT_OMP_PROFILE),
-        signal,
-      });
-      if (result.exitCode !== 0) return;
-      const parsed: unknown = JSON.parse(result.stdout);
-      if (typeof parsed !== "object" || parsed === null || !("models" in parsed) || !Array.isArray(parsed.models)) return;
-      s.defaultProviderModelsAvailable = parsed.models.length > 0;
-      s.launcherProvider?.setProviderLoginRequired(!s.defaultProviderModelsAvailable);
-    } catch (error) {
-      if (signal.aborted) throw error;
-      log.warn("Default-profile models could not be read; retaining the last availability.");
-    }
-  }
-
-
-  /**
-   * A credential may have changed through this window's login, logout or login terminal: re-read model availability here
-   * and ask every other window of the profile to re-read its own (ADR-0070). Requests that arrive from another window
-   * call {@link refreshProviderModelsEverywhere} only, so a notice is never echoed.
-   */
-  function announceCredentialsChanged(index: SessionIndex): void {
-    refreshProviderModelsEverywhere(index);
-    void windowState().routing.announceCredentialsChanged();
-  }
-
-
-  /** Re-read model availability here: the default profile and every indexed session. */
-  function refreshProviderModelsEverywhere(index: SessionIndex): void {
-    void refreshDefaultProviderModels();
-    for (const entry of index.list()) void refreshSessionModels(index, entry.tabId);
-  }
-
-
-  /**
-   * Activation, a finished provider login or logout, and the close of the explicit `omp login` terminal are the
-   * window-wide discovery triggers. Closing the window ends a login still running.
-   */
-  function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: SessionIndex): void {
-    const s = windowState();
-    context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
-      const ownedLoginClosed = terminal === s.providerLoginTerminal;
-      if (ownedLoginClosed) s.providerLoginTerminal = null;
-      if (!ownedLoginClosed && terminal.name !== "omp login") return;
-      announceCredentialsChanged(index);
-    }), { dispose: () => { s.providerAuthRun?.abort(); } });
-    void refreshDefaultProviderModels("discovery");
-  }
-
-
-  function recordSessionModels(index: SessionIndex, tabId: string, available: boolean): void {
-    const s = windowState();
-    ensureFooterBinding(index, tabId);
-    const binding = s.footerBindings.get(tabId);
-    if (!binding || binding.message.hasAvailableModels === available) return;
-    const firstLook = binding.message.hasAvailableModels === undefined;
-    binding.message = { ...binding.message, hasAvailableModels: available };
-    publishFooterMetadata(tabId);
-    // A session's first look is no change: the read of the default profile this window queued at activation covers it, so it asks again
-    // only when that catalogue was never read. A changed answer is a hint that credentials changed.
-    if (!firstLook) void refreshDefaultProviderModels("credentials");
-    else if (s.defaultProviderModelsAvailable === null) void refreshDefaultProviderModels("discovery");
-  }
-
-
-  /** Read this conversation's own profile through RPC, never a per-session CLI. */
-  function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void> {
-    const s = windowState();
-    const pending = s.sessionModelReads.get(tabId);
-    if (pending) return pending;
-    const conversations = s.sessionRuntime.conversations;
-    const live = conversations.liveOf(tabId);
-    if (live === null || live.phase !== "live") return Promise.resolve();
-    // An automatic read is not worth delaying a Stop that OMP would queue behind it; a picker the user opens may read mid-turn.
-    if (live.working) { s.sessionModelRefreshOwed.add(tabId); return Promise.resolve(); }
-    const epoch = live.epoch;
-    const read = conversations.readAvailableModels(tabId, live.incarnation).then(listed => {
-      const now = liveAt(tabId, live.incarnation);
-      if (listed.status === "stale" || now === null || now.phase !== "live" ||
-        epoch.nonce !== now.epoch.nonce || epoch.counter !== now.epoch.counter) return;
-      if (listed.status === "ok") {
-        s.sessionModelRefreshOwed.delete(tabId);
-        recordSessionModels(index, tabId, listed.models.length > 0);
-      } else if (listed.status === "refused" && listed.reason === "busy") s.sessionModelRefreshOwed.add(tabId);
-    }).finally(() => { if (s.sessionModelReads.get(tabId) === read) s.sessionModelReads.delete(tabId); });
-    s.sessionModelReads.set(tabId, read);
-    return read;
-  }
-
-  /** Host-owned optional footer facts, sent to every editor showing this exact conversation. */
-  function publishFooterMetadata(tabId: string): void {
-    const s = windowState();
-    const binding = s.footerBindings.get(tabId);
-    if (!binding) return;
-    s.usageStatus?.update();
-    for (const state of s.tabs.values()) {
-      if (state.tabId !== tabId) continue;
-      if (state.panel !== null) void state.panel.webview.postMessage(binding.message);
-      else if (state.bridge?.documentId) state.bridge.endpoint.pushTerminal(state.bridge.documentId, binding.message);
-    }
-  }
-
-
-  function ensureFooterBinding(index: SessionIndex, tabId: string): void {
-    const s = windowState();
-    const entry = index.get(tabId);
-    if (!entry) return;
-    const cwd = hostOf(stateOf(tabId))?.cwd ?? entry.cwd;
-    const existing = s.footerBindings.get(tabId);
-    if (existing?.cwd === cwd) return;
-    existing?.observer?.dispose();
-    const binding = { cwd, modelId: null as string | null,
-      message: { type: "omp:footer-metadata" as const, provider: null, windows: [], accounts: [], accountSelection: null, branch: null } as FooterMetadataMessage,
-      observer: null as BranchObservation | null };
-    s.footerBindings.set(tabId, binding);
-    const current = (): boolean => s.footerBindings.get(tabId) === binding && (hostOf(stateOf(tabId))?.cwd ?? index.get(tabId)?.cwd) === cwd;
-    const publish = (branch: string | null): void => {
-      if (!current()) return;
-      binding.message = { ...binding.message, branch };
-      publishFooterMetadata(tabId);
-    };
-    binding.observer = observeSessionBranch(cwd, undefined, publish);
-    const extension = vscode.extensions?.getExtension<{ getAPI(version: 1): GitApi }>("vscode.git");
-    if (extension) void Promise.resolve(extension.isActive ? extension.exports : extension.activate()).then(exports => {
-      if (!current()) return;
-      const api = exports.getAPI(1); // Keep the CLI observer if Git is disabled/unavailable.
-      binding.observer?.dispose();
-      binding.observer = observeSessionBranch(cwd, api, publish);
-    }).catch(() => log.warn("Git footer observation could not activate the built-in Git extension."));
-  }
-
-
-  /** Session cost has its own attach/end readback; it must not inherit the quota cache's five-minute throttle. */
-  function refreshSessionCost(index: SessionIndex, tabId: string): void {
-    const s = windowState();
-    ensureFooterBinding(index, tabId);
-    const binding = s.footerBindings.get(tabId);
-    const live = s.sessionRuntime.conversations.liveOf(tabId);
-    const runtime = hostOf(stateOf(tabId));
-    if (!binding) return;
-    binding.message = { ...binding.message, sessionCost: undefined };
-    publishFooterMetadata(tabId);
-    if (live === null || live.phase !== "live" || !runtime) return;
-    const epoch = live.epoch;
-    void s.sessionRuntime.conversations.readSessionCost(tabId, live.incarnation).then(cost => {
-      const now = liveAt(tabId, live.incarnation);
-      if (s.footerBindings.get(tabId) !== binding || now === null || hostOf(stateOf(tabId)) !== runtime ||
-        epoch.nonce !== now.epoch.nonce || epoch.counter !== now.epoch.counter) return;
-      binding.message = { ...binding.message, sessionCost: cost ?? undefined };
-      publishFooterMetadata(tabId);
-    });
-  }
-
-
-  function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage: boolean, forceUsage = false): void {
-    const s = windowState();
-    ensureFooterBinding(index, tabId);
-    const binding = s.footerBindings.get(tabId);
-    const live = s.sessionRuntime.conversations.liveOf(tabId);
-    const entry = index.get(tabId);
-    const runtime = hostOf(stateOf(tabId));
-    if (!binding || !entry) return;
-    const model = live?.state?.model ?? null;
-    const changed = binding.message.provider !== model?.provider || binding.modelId !== model?.id;
-    if (!refreshUsage && !changed) return;
-    binding.modelId = model?.id ?? null;
-    if (!model || !runtime) {
-      binding.message = { ...binding.message, provider: null, windows: [], accounts: [], accountSelection: null };
-      binding.usageReadAt = null;
-      publishFooterMetadata(tabId);
-      return;
-    }
-    const sameSession = (): boolean => s.sessionRuntime.conversations.incarnationOf(tabId) === (live?.incarnation ?? null);
-    // Resolve the exact installation before selecting the scope cache; never join different cwd/profile installs.
-    void executableFor(runtime).then(async executable => {
-      if (s.footerBindings.get(tabId) !== binding || !sameSession() || hostOf(stateOf(tabId)) !== runtime) return;
-      const scope = JSON.stringify([executable.command, executable.prefixArgs, entry.scope.profile ?? DEFAULT_OMP_PROFILE, runtime.cwd]);
-      let cache = s.usageCaches.get(scope);
-      if (!cache) { cache = new ProviderUsageCache(Date.now, log); s.usageCaches.set(scope, cache); }
-      binding.message = { ...binding.message, provider: model.provider, ...cache.get(model.provider, model.id) };
-      binding.usageReadAt = cache.readAt(model.provider);
-      publishFooterMetadata(tabId);
-      // A quota on screen (the active tab, or any Chat panel that is visible, as in a split) goes at once, bounded, and promotes a background read of the
-      // same scope that is still queued; every other tab's read waits for the startup restore (ADR-0084).
-      const usageKey = `usage\0${scope}\0${model.provider}`;
-      const onScreen = forceUsage || index.activeTabId === tabId || [...s.tabs.values()].some(state => state.tabId === tabId && state.panel?.visible === true);
-      if (onScreen) s.helpers.promote(usageKey);
-      const usage = await cache.refresh(model.provider, model.id, () => s.helpers.run({
-        label: "provider usage", class: onScreen ? "visible" : "background", key: usageKey,
-        run: signal => runOmpCli(executable, [...PROVIDER_USAGE_ARGS, "--provider", model.provider], PROVIDER_USAGE_TIMEOUT_MS,
-          { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile), signal }),
-      }), forceUsage);
-      const chosen = s.sessionRuntime.conversations.liveOf(tabId)?.state?.model;
-      if (s.footerBindings.get(tabId) !== binding || !sameSession() || hostOf(stateOf(tabId)) !== runtime ||
-        chosen?.provider !== model.provider || chosen?.id !== model.id) return;
-      binding.message = { ...binding.message, provider: model.provider, ...usage };
-      binding.usageReadAt = cache.readAt(model.provider);
-      publishFooterMetadata(tabId);
-    }, error => noteUsageFailure(binding, "resolving the OMP executable", error)).catch(error => noteUsageFailure(binding, "publishing the usage", error));
-  }
-
-
-  /**
-   * Provider login and logout start from a command or a picker row and nowhere else, so their modules are read from
-   * `out/rare-subsystems.js` with the first flow and not at activation (ADR-0085).
-   */
-  async function providerLoginModules(): Promise<ProviderLoginModules> {
-    const { providerLoginFlow, providerLoginRpc, providerLoginUi } = await rareSubsystems();
-    return { flow: providerLoginFlow, rpc: providerLoginRpc, ui: providerLoginUi };
-  }
-
-
-
-  /**
-   * Run one provider login or logout flow (ADR-0070) in a short-lived OMP process of the scope; this window runs one at a
-   * time. The guard is reserved before the asynchronous preflight (the profile question, executable resolution), so a
-   * repeated click opens nothing, and it is released only when the flow and its process have ended.
-   */
-  async function runProviderAuth<T extends string>(
-    index: SessionIndex,
-    resolveScope: () => Promise<ProviderAuthScope | null>,
-    flow: (deps: LoginFlowDeps, modules: ProviderLoginModules) => Promise<T>,
-  ): Promise<T | "busy" | "cancelled" | "failed"> {
-    const s = windowState();
-    if (s.providerLoginTerminal !== null) {
-      // A login in a terminal and one in VS Code compete for the same fixed callback ports of some providers.
-      s.providerLoginTerminal.show();
-      showInfo("An omp login terminal is still open in this window. Finish or close it first.");
-      return "busy";
-    }
-    if (s.providerAuthRun !== null) {
-      showInfo("A provider login or logout is already running in this window.");
-      return "busy";
-    }
-    const run = new AbortController();
-    s.providerAuthRun = run;
-    try {
-      const modules = await providerLoginModules();
-      const scope = await resolveScope();
-      if (scope === null) return "cancelled";
-      let executable: OmpCommand;
-      try {
-        executable = await executableFor(scope.runtime);
-      } catch (error) {
-        showError(`The installed OMP could not be resolved, so no provider login was started: ${messageOf(error)}`);
-        return "failed";
-      }
-      const env = ompCliScopeEnvironment(scope.profile);
-      return await flow({
-        ui: modules.ui.createLoginUi(vscode),
-        start: signal => modules.rpc.startLoginSession({ scope: { executable, env, cwd: scope.cwd }, signal, log }),
-        openTerminal: providerId => openProviderLoginTerminalFor(executable, env, scope.cwd, providerId),
-        credentialsChanged: () => announceCredentialsChanged(index),
-        log,
-        signal: run.signal,
-      }, modules);
-    } catch (error) {
-      log.error(`provider login: the flow failed unexpectedly: ${messageOf(error)}`);
-      showError("The provider login could not be completed.");
-      return "failed";
-    } finally {
-      s.providerAuthRun = null;
-    }
-  }
-
-
-  /**
-   * The explicit fallback for what the RPC login refuses (a provider that takes a secret or a prompt before its
-   * sign-in address) and for API keys: OMP's own `omp login [provider]` in a visible terminal. The extension reads
-   * nothing from it; its close refreshes model availability.
-   */
-  function openProviderLoginTerminalFor(executable: OmpCommand, env: Record<string, string>, cwd: string, providerId: string | undefined): void {
-    const s = windowState();
-    if (s.providerLoginTerminal !== null) {
-      s.providerLoginTerminal.show();
-      return;
-    }
-    s.providerLoginTerminal = openProviderLoginTerminal({
-      args: providerId === undefined ? ["login"] : ["login", providerId],
-      executable,
-      cwd,
-      env,
-      name: "omp login",
-    });
-  }
-
-
-  /** A session-scoped entry (Chat's model picker, its footer): log in within that session's own profile and directory. */
-  async function openProviderLogin(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-    await runProviderAuth(index, async () => ({ runtime, profile, cwd }), (deps, { flow }) => flow.runProviderLogin(deps));
-  }
-
-
-  /** A session-scoped entry (the Commands list's /logout): log out within that session's own profile and directory, as {@link openProviderLogin} does for login. */
-  async function openProviderLogout(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-    await runProviderAuth(index, async () => ({ runtime, profile, cwd }), (deps, { flow }) => flow.runProviderLogout(deps));
-  }
-
-
-  /**
-   * The scope a palette provider login or logout runs in; never another tab's host. From a session's tab it uses that
-   * session's profile. Without one it still works: a new user must log in before any session can start, so it uses
-   * the default profile, or asks when the indexed sessions use more than one profile.
-   */
-  async function paletteProviderAuthScope(index: SessionIndex, title: string, placeHolder: string): Promise<ProviderAuthScope | null> {
-    const tabId = index.activeTabId;
-    const runtime = tabId === null ? null : hostOf(stateOf(tabId)) ?? null;
-    if (tabId !== null && runtime !== null) return { runtime, profile: index.get(tabId)?.scope.profile ?? null, cwd: runtime.cwd };
-    const profiles = [...new Set(index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE))].sort();
-    let profile: string = DEFAULT_OMP_PROFILE;
-    if (profiles.length > 1 || (profiles.length === 1 && profiles[0] !== DEFAULT_OMP_PROFILE)) {
-      const choices = profiles.includes(DEFAULT_OMP_PROFILE) ? profiles : [DEFAULT_OMP_PROFILE, ...profiles];
-      const picked = await vscode.window.showQuickPick(choices, { title, placeHolder });
-      if (picked === undefined) return null;
-      profile = picked;
-    }
-    return { runtime: null, profile, cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir() };
-  }
-
-
-  /**
-   * `ompDesk.loginProvider`. Resolves with the outcome: `signed-in`, `cancelled`, `terminal` (the user chose the terminal
-   * login), `declined` (the provider takes an API key; the terminal is offered), `failed`, or `busy` (another login or logout,
-   * or a fallback terminal, is open in this window). A caller that knows its scope may pass `{ providerId?, profile? }`: a
-   * `profile` the extension already knows (the default or one of its indexed sessions') skips the profile question, and a
-   * `providerId` OMP lists as available skips the provider pick. The directory is never taken from the caller (the first
-   * workspace folder, else the home directory); anything else in the argument is ignored.
-   */
-  async function loginProviderFromPalette(index: SessionIndex, argument?: unknown): Promise<string> {
-    const given = typeof argument === "object" && argument !== null ? argument as Record<string, unknown> : {};
-    const text = (key: string): string | undefined => typeof given[key] === "string" && (given[key] as string).length > 0 ? given[key] as string : undefined;
-    const known = new Set<string>([DEFAULT_OMP_PROFILE, ...index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE)]);
-    const asked = text("profile");
-    const profile = asked !== undefined && known.has(asked) ? asked : undefined;
-    const providerId = text("providerId");
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
-    const scope = profile === undefined
-      ? () => paletteProviderAuthScope(index, "Log In to Provider", "OMP profile to log in with")
-      : async (): Promise<ProviderAuthScope> => ({ runtime: null, profile, cwd });
-    return await runProviderAuth(index, scope, (deps, { flow }) => flow.runProviderLogin(deps, providerId === undefined ? {} : { providerId }));
-  }
-
-
-  /**
-   * The in-process sign-in the Models and Agents pages use (ADR-0070 amendment): the same flow, window guard and credential refresh as
-   * `ompDesk.loginProvider`, but in the exact profile and directory of the editor that asks, which the public command's restricted argument cannot name.
-   */
-  async function signInProvider(index: SessionIndex, request: { readonly providerId: string; readonly profile: string; readonly cwd: string }): Promise<string> {
-    return await runProviderAuth(index, async () => ({ runtime: null, profile: request.profile, cwd: request.cwd }), (deps, { flow }) => flow.runProviderLogin(deps, { providerId: request.providerId }));
-  }
-
-
-  /** `ompDesk.logoutProvider`. */
-  async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
-    await runProviderAuth(index, () => paletteProviderAuthScope(index, "Log Out of Provider", "OMP profile to log out of"), (deps, { flow }) => flow.runProviderLogout(deps));
-  }
-
 
   async function copyHostTools(index: SessionIndex): Promise<void> {
     const channel = activeControl(index);
@@ -7606,8 +5124,6 @@ export function createWindow(deps: WindowDeps) {
       showWarning(`The host's tools could not be copied: ${describeControlError(error)}.`);
     }
   }
-
-
 
   /** Editor recency, not Sessions row selection, determines the capabilities shown here. */
   function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
@@ -7648,7 +5164,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** The Context view's subject: the inventory views' selection (editor recency) plus the tab and its Chat session. */
   function contextTarget(index: SessionIndex): ContextTarget | null {
     const target = toolsTarget(index);
@@ -7663,7 +5178,6 @@ export function createWindow(deps: WindowDeps) {
       session: target.mode === "chat" ? contextSessionOf(target.tabId) : null,
     };
   }
-
 
   /**
    * The Context view's handle on one incarnation of a Chat conversation: every read and request goes through the port
@@ -7689,7 +5203,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** Command-palette controls never fall back to another tab's host. */
   function activeControl(index: SessionIndex, tabId: string | null = index.activeTabId): ControlChannel | null {
     if (tabId === null) return null;
@@ -7707,7 +5220,6 @@ export function createWindow(deps: WindowDeps) {
     return { tabId, client: control.client, snapshot: control.snapshot };
   }
 
-
   function controlUnavailableMessage(index: SessionIndex): string {
     const failure = index.activeTabId === null ? null : (recordOf(stateOf(index.activeTabId))?.controlFailure ?? null) ?? null;
     return failure === null
@@ -7715,19 +5227,15 @@ export function createWindow(deps: WindowDeps) {
       : `Host control is unavailable for the selected session: ${failure}`;
   }
 
-
   function describeModel(model: { readonly provider: string; readonly id: string } | null | undefined): string {
     return model === null || model === undefined ? "unknown model" : `${model.provider}/${model.id}`;
   }
-
-
 
   /** The conversation's live Chat session as values, when it is still the incarnation the caller named. */
   function liveAt(tabId: string, incarnation: number): LiveConversation | null {
     const live = windowState().sessionRuntime.conversations.liveOf(tabId);
     return live !== null && live.incarnation === incarnation ? live : null;
   }
-
 
   /** The live Chat session of the active tab as values, or `null` (with the reason shown) when there is none. */
   function activeLiveSession(index: SessionIndex): { readonly tabId: string; readonly live: LiveConversation } | null {
@@ -7746,7 +5254,6 @@ export function createWindow(deps: WindowDeps) {
     return { tabId, live };
   }
 
-
   async function showHostControls(index: SessionIndex): Promise<void> {
     const active = activeLiveSession(index);
     if (active === null) return;
@@ -7764,8 +5271,6 @@ export function createWindow(deps: WindowDeps) {
     }
     showInfo(`The session runs ${describeModel(live.model)} with thinking ${live.thinkingLevel ?? "unknown"}. See the OMP Desk output channel for details.`);
   }
-
-
 
   async function selectHostModel(index: SessionIndex): Promise<void> {
     const conversations = windowState().sessionRuntime.conversations;
@@ -7803,7 +5308,6 @@ export function createWindow(deps: WindowDeps) {
     showInfo(controlOutcomeNotice(outcome));
   }
 
-
   async function selectHostThinking(index: SessionIndex): Promise<void> {
     const conversations = windowState().sessionRuntime.conversations;
     const active = activeLiveSession(index);
@@ -7827,7 +5331,6 @@ export function createWindow(deps: WindowDeps) {
     if (outcome.status === "stale") return;
     showInfo(controlOutcomeNotice(outcome));
   }
-
 
   async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlHostSnapshot | null> {
     try {
@@ -7861,7 +5364,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   // Editor slots: the one map of live resources (ADR-0025)
 
   /**
@@ -7893,13 +5395,11 @@ export function createWindow(deps: WindowDeps) {
     return undefined;
   }
 
-
   /** One slot's own record, or `null`. Never resolves through a conversation. */
   function slotState(slot: string): TabState | null {
     const s = windowState();
     return s.tabs.get(slot) ?? null;
   }
-
 
   /**
    * Make the chat editors a key names say what they show: the session's own
@@ -7948,7 +5448,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Build the empty record of one slot. */
   function newTabState(slotId: string): TabState {
     return {
@@ -7974,7 +5473,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /**
    * Get or create the record one key names.
    *
@@ -7991,7 +5489,6 @@ export function createWindow(deps: WindowDeps) {
     s.tabs.set(key, created);
     return created;
   }
-
 
   /** Register one election of `slot`; it is forgotten when it settles, however it ends. */
   function trackElection(slot: string, work: Promise<void>): Promise<void> {
@@ -8012,7 +5509,6 @@ export function createWindow(deps: WindowDeps) {
     return tracked;
   }
 
-
   /** Resolve once every election of `slot` that is in flight now has settled, or after the bound. */
   async function awaitElection(slot: string): Promise<void> {
     const s = windowState();
@@ -8031,13 +5527,11 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /** Why the editor that holds this key may not act, or `null` when it may. */
   function passiveReasonOf(key: string): string | null {
     const state = stateOf(key);
     return state === null || state === undefined ? null : passiveReasonForSlot(state.slotId);
   }
-
 
   /**
    * Why one exact slot may not act, or `null` when it may.
@@ -8070,7 +5564,6 @@ export function createWindow(deps: WindowDeps) {
     }
     return local;
   }
-
 
   /**
    * Point one editor slot at the conversation it now shows, and apply the role.
@@ -8139,7 +5632,6 @@ export function createWindow(deps: WindowDeps) {
     return s.tabs.get(slot) ?? state;
   }
 
-
   /** Tell one slot's page and pane what its current authority is. */
   function applySlotAuthority(slot: string): void {
     const s = windowState();
@@ -8159,7 +5651,6 @@ export function createWindow(deps: WindowDeps) {
     refreshLauncher();
     pushSessionView(s.indexForBridge, state);
   }
-
 
   // Launcher
 
@@ -8194,7 +5685,6 @@ export function createWindow(deps: WindowDeps) {
     if (index !== null) void revealActiveSession(index);
   }
 
-
   /**
    * Ask the next launcher reveal to expand this session's folder if the user collapsed it.
    *
@@ -8206,7 +5696,6 @@ export function createWindow(deps: WindowDeps) {
     const s = windowState();
     s.launcherExpandFor = tabId;
   }
-
 
   /**
    * Select the row of the tab that currently has the user's editor focus.
@@ -8251,7 +5740,6 @@ export function createWindow(deps: WindowDeps) {
     return s.launcherRevealInFlight;
   }
 
-
   /**
    * Whether the Sessions selection holds only rows another window runs, with `target` as the session this window
    * selects. A click on such a row selects it while it switches to that window, and the selection then stays there
@@ -8266,7 +5754,6 @@ export function createWindow(deps: WindowDeps) {
     return selectionLeaveOtherWindow(target, selected, tabId => provider.displayedState(tabId) === "otherWindow") !== null;
   }
 
-
   /** Put the selection back on this window's own session when it rests on a row another window runs. */
   function releaseSelectionFromOtherWindow(index: SessionIndex): void {
     const s = windowState();
@@ -8275,7 +5762,6 @@ export function createWindow(deps: WindowDeps) {
     s.launcherSelectedPath = null;
     void revealActiveSession(index);
   }
-
 
   /**
    * The session the Sessions view keeps selected: the one whose editor the user viewed most
@@ -8292,7 +5778,6 @@ export function createWindow(deps: WindowDeps) {
     );
   }
 
-
   /**
    * The row this window's Sessions view selects when it has no open editor to pin: the index's
    * recovered active tab, except a session another window holds, which this window has no
@@ -8303,7 +5788,6 @@ export function createWindow(deps: WindowDeps) {
     const tabId = index.activeTabId;
     return tabId !== null && s.launcherProvider?.displayedState(tabId) === "otherWindow" ? null : tabId;
   }
-
 
   /**
    * Put the pinned row back when the user cleared the selection or selected a non-session row.
@@ -8328,7 +5812,6 @@ export function createWindow(deps: WindowDeps) {
     s.pinnedSelectionTimer.unref?.();
   }
 
-
   /** How Sessions arranges its rows: the setting, flat by default. */
   function sessionsGrouping(): SessionsGrouping {
     const s = windowState();
@@ -8336,7 +5819,6 @@ export function createWindow(deps: WindowDeps) {
     if (grouping !== "terminals") s.lastSessionServingLayout = grouping;
     return grouping;
   }
-
 
   /** Store the chosen layout; the configuration listener redraws the view. */
   async function setSessionsGrouping(grouping: SessionsGrouping): Promise<void> {
@@ -8358,7 +5840,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * The title-bar layout button: a picker of the three layouts with the current one marked. Every
    * button variant (one icon per layout, so the icon shows what is current) and the palette command
@@ -8376,7 +5857,6 @@ export function createWindow(deps: WindowDeps) {
     if (picked !== undefined && picked.id !== current) await setSessionsGrouping(picked.id);
   }
 
-
   /** Runtime object identity is local; activity and snapshot contents are not. */
   function launcherRuntimeIdentity(tabId: string): string | null {
     const s = windowState();
@@ -8390,7 +5870,6 @@ export function createWindow(deps: WindowDeps) {
     const epoch = s.sessionRuntime.conversations.stateOf(tabId)?.epoch ?? null;
     return state === undefined && epoch === null ? null : JSON.stringify([state?.slotId, id, epoch]);
   }
-
 
   /** What only this window knows about a tab: its panel, its host, its last outcome. */
   function launcherFacts(tabId: string): SessionLauncherFacts {
@@ -8441,7 +5920,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /**
    * Read the claim's live holder before offering actions on a row this window does not run.
    *
@@ -8477,7 +5955,6 @@ export function createWindow(deps: WindowDeps) {
       legacyWriter: pid !== null && index.get(tabId)?.host?.transport !== "rpc" };
   }
 
-
   /**
    * Ask before a session another OMP process writes is opened here (ADR-0046). Nothing is
    * launched by asking; "Open Anyway" is the only answer that lets the launch proceed, and
@@ -8497,7 +5974,6 @@ export function createWindow(deps: WindowDeps) {
     );
     return choice === OPEN_ANYWAY;
   }
-
 
   /**
    * Re-read the ownership of the rows filed under claims that changed on disk.
@@ -8533,7 +6009,6 @@ export function createWindow(deps: WindowDeps) {
     }
     provider.refreshOwnership(tabIds);
   }
-
 
   /**
    * Replace the launcher's view of the last restore attempt with one pass's
@@ -8582,7 +6057,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * Pick one indexed launcher entry by name.
    *
@@ -8618,7 +6092,6 @@ export function createWindow(deps: WindowDeps) {
     return picked ? picked.tabId : null;
   }
 
-
   /** The tab a command was invoked on: a launcher row, or an explicit tab id. */
   function tabIdArgument(argument: unknown): string | null {
     if (typeof argument === "string" && argument.length > 0) return argument;
@@ -8627,1039 +6100,17 @@ export function createWindow(deps: WindowDeps) {
     return typeof tabId === "string" && tabId.length > 0 ? tabId : null;
   }
 
-
-  /**
-   * The verified facts of one tab's control channel, or `null`.
-   *
-   * A channel that has not finished its handshake proves no process identity: its
-   * accessor throws, and a thrown proof is no proof.
-   */
-  function liveControlFacts(state: TabState | undefined): EvidenceLiveChannel | null {
-    try {
-      const client = controlOf(state)?.client ?? null;
-      if (client === null) return null;
-      const live = client.binding;
-      // `peerProof` is read on the same channel: it refuses once the channel has
-      // closed, so a retained binding alone can never authorize a fact that claims to
-      // be proved by this window.
-      const proof = client.peerProof;
-      return {
-        slotId: live.slotId,
-        instanceId: live.instanceId,
-        pid: live.pid,
-        cwd: live.cwd,
-        serverPid: proof.serverPid,
-        serverCreationTime: proof.serverCreationTime,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-
-  /** Names of the sub-directories of one directory; empty when it cannot be read. */
-  async function subdirectories(directory: string): Promise<string[]> {
-    let entries: [string, vscode.FileType][];
-    try {
-      entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(directory));
-    } catch {
-      return [];
-    }
-    return entries.filter(([, type]) => type === vscode.FileType.Directory).map(([name]) => name);
-  }
-
-
-  /**
-   * Every evidence namespace one indexed session can have.
-   *
-   * The store path is
-   * `<control dir>/file-evidence/<owner>/<slot>/<workspace digest>/<session digest>`,
-   * so the workspace and session identity constrain the namespace and the launch
-   * slot names the producer. The launch this window owns comes first; a namespace
-   * written by an earlier launch of the same session, or by a launch this window
-   * never recorded (another window, an extension-host reload, a confirmed stop that
-   * released its control material), is found by re-deriving each candidate path
-   * from exactly the same workspace and session identity and accepting it only when
-   * that derivation reproduces the directory that exists. Nothing here reads or
-   * writes an observation.
-   */
-  async function evidenceSession(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    tabId: string,
-  ): Promise<EvidenceSessionResult> {
-    const entry = index.get(tabId);
-    if (entry === null) return { ok: false, reason: "that session is no longer indexed" };
-    const ownership = entry.ownership;
-    if (ownership === null) return { ok: false, reason: "that session has no claim this window owns" };
-    const sessionId = entry.sessionId;
-    if (sessionId === null || sessionId.length === 0) {
-      return {
-        ok: false,
-        reason: "the OMP session id for this tab is not known yet, and evidence is bound to that exact id",
-      };
-    }
-    const directory = controlDirectoryOf(context.globalStorageUri.fsPath);
-    const live = liveControlFacts(stateOf(tabId));
-    // The producer hashed the native process directory into its namespace; the
-    // indexed cwd is the directory this window launched that process in.
-    const workspaceRoot = live?.cwd ?? entry.cwd;
-    const record = context.globalState.get<RecordedControlProcess>(
-      controlProcessRecordKey(ownership.ownerGeneration),
-    );
-    const releases = context.globalState.get<readonly RecordedControlRelease[]>(
-      controlReleaseRecordKey(ownership.ownerGeneration),
-    ) ?? [];
-    const slotIds: string[] = [];
-    if (live !== null) slotIds.push(live.slotId);
-    if (record !== undefined && !slotIds.includes(record.slotId)) slotIds.push(record.slotId);
-    for (const slotId of await discoverEvidenceSlots(directory, workspaceRoot, sessionId)) {
-      if (!slotIds.includes(slotId)) slotIds.push(slotId);
-    }
-    const namespaces: EvidenceNamespace[] = [];
-    for (const slotId of slotIds) {
-      let paths: NativeFileObservationStorePaths;
-      try {
-        paths = resolveNativeFileObservationStorePaths({
-          storageRoot: fileEvidenceStoreRoot(directory),
-          ownerId: slotId,
-          slotId,
-          workspaceRoot,
-          sessionId,
-        });
-      } catch (error) {
-        return { ok: false, reason: `the evidence namespace could not be derived (${messageOf(error)})` };
-      }
-      const own = live !== null && live.slotId === slotId;
-      const recorded = record?.slotId === slotId ? record : null;
-      namespaces.push({
-        slotId,
-        paths,
-        directory,
-        processInstanceId: own ? live.instanceId : null,
-        pid: own ? live.pid : (recorded?.pid ?? null),
-        processCreation: own ? live.serverCreationTime : (recorded?.processCreation ?? null),
-        releaseProof: releases.find(entry => entry.slotId === slotId)?.releasedAt ?? null,
-      });
-    }
-    if (namespaces.length === 0) {
-      return {
-        ok: false,
-        reason: "no evidence store exists for this workspace and session, so there is nothing to read or delete",
-      };
-    }
-    return { ok: true, session: { tabId, directory, sessionId, namespaces } };
-  }
-
-
-  /**
-   * Launch slots with a store directory for exactly this workspace and session.
-   *
-   * Only names that re-derive to a real namespace are returned, so an unrelated
-   * directory in the evidence root can never be read as this session's store.
-   */
-  async function discoverEvidenceSlots(
-    directory: string,
-    workspaceRoot: string,
-    sessionId: string,
-  ): Promise<string[]> {
-    const storageRoot = fileEvidenceStoreRoot(directory);
-    const slots: string[] = [];
-    for (const ownerId of await subdirectories(storageRoot)) {
-      for (const slotId of await subdirectories(path.join(storageRoot, ownerId))) {
-        let candidate: NativeFileObservationStorePaths;
-        try {
-          candidate = resolveNativeFileObservationStorePaths({
-            storageRoot,
-            ownerId,
-            slotId,
-            workspaceRoot,
-            sessionId,
-          });
-        } catch {
-          continue;
-        }
-        let found: vscode.FileStat | null = null;
-        try {
-          found = await vscode.workspace.fs.stat(vscode.Uri.file(candidate.sessionDirectory));
-        } catch {
-          found = null;
-        }
-        if (found !== null && found.type === vscode.FileType.Directory) slots.push(slotId);
-      }
-    }
-    return slots;
-  }
-
-
-  /** The tab these commands act on: the active one, never another tab's store. */
-  function evidenceTabId(index: SessionIndex): string | null {
-    const tabId = index.activeTabId;
-    if (tabId === null) {
-      showInfo("No OMP session is active in this window. Focus the session you mean and run this command again.");
-      return null;
-    }
-    return tabId;
-  }
-
-
-  /**
-   * Whether one stored record belongs to this exact namespace.
-   *
-   * The journal already refuses a record whose workspace/session digests do not
-   * match the namespace it was opened with; this adds the producer identity, so a
-   * record written by another launch, another window or another session is never
-   * presented as this session's evidence.
-   */
-  function recordMatchesNamespace(record: NativeFileObservationRecord, namespace: EvidenceNamespace): boolean {
-    if (record.origin.ownerId !== namespace.paths.ownerId || record.origin.slotId !== namespace.paths.slotId) {
-      return false;
-    }
-    if (namespace.processInstanceId !== null && record.origin.processInstanceId !== namespace.processInstanceId) {
-      return false;
-    }
-    return (
-      record.session.sessionId === namespace.paths.sessionId &&
-      record.session.workspaceDigest === namespace.paths.workspaceDigest
-    );
-  }
-
-
-  /**
-   * Whether one namespace's producer is provably gone.
-   *
-   * Absence of a control record is *not* proof that a producer stopped: control
-   * material can be released by a confirmed stop, dropped on an extension-host
-   * reload or lost with a crash, while the native process keeps its open journal
-   * and can still commit an observation. Only positive evidence is accepted here:
-   *
-   * - a live verified channel, or a rendezvous record whose process exists, proves
-   *   it is running and refuses;
-   * - a rendezvous whose process no longer exists, or a recorded process whose pid
-   *   no longer exists, or a recorded pid now held by a *different* kernel process
-   *   (creation time differs, so the pid was reused), proves the stop;
-   * - when no process identity survives at all, only the release this launcher
-   *   recorded for *this exact slot* after a confirmed stop proves it — a release
-   *   belongs to the launch it released, so another launch's or another window's
-   *   namespace is never deleted on this claim's word.
-   *
-   * Everything else refuses with the exact missing fact, and the bytes stay.
-   */
-  async function producerStopProof(namespace: EvidenceNamespace): Promise<ProducerStopProof> {
-    if (namespace.processInstanceId !== null) {
-      return {
-        stopped: false,
-        detail: `this window still holds a verified control channel to launch slot ${namespace.slotId}`,
-      };
-    }
-    const rendezvous = await readControlRendezvous(namespace.directory, namespace.slotId);
-    if (rendezvous !== null) {
-      return isProcessAlive(rendezvous.pid)
-        ? {
-            stopped: false,
-            detail: `launch slot ${namespace.slotId} still publishes a live control record for pid ${rendezvous.pid}`,
-          }
-        : {
-            stopped: true,
-            detail: `the process that published launch slot ${namespace.slotId} (pid ${rendezvous.pid}) no longer exists`,
-          };
-    }
-    const pid = namespace.pid;
-    if (pid === null) {
-      return namespace.releaseProof === null
-        ? {
-            stopped: false,
-            detail: `launch slot ${namespace.slotId} has no process identity, no live control record and no release this window recorded, so its producer cannot be proven stopped`,
-          }
-        : {
-            stopped: true,
-            detail: `this window released launch slot ${namespace.slotId} after a confirmed stop (${namespace.releaseProof})`,
-          };
-    }
-    if (!isProcessAlive(pid)) {
-      return { stopped: true, detail: `the recorded process of launch slot ${namespace.slotId} (pid ${pid}) no longer exists` };
-    }
-    if (namespace.processCreation === null) {
-      return {
-        stopped: false,
-        detail: `pid ${pid} of launch slot ${namespace.slotId} still exists and no recorded process generation can tell it from a reused pid`,
-      };
-    }
-    let current: string;
-    try {
-      current = await queryControlProcessGeneration(pid);
-    } catch {
-      return {
-        stopped: false,
-        detail: `the process generation of pid ${pid} for launch slot ${namespace.slotId} could not be read, so a reused pid cannot be ruled out`,
-      };
-    }
-    return current === namespace.processCreation
-      ? {
-          stopped: false,
-          detail: `the recorded process of launch slot ${namespace.slotId} (pid ${pid}, generation ${current}) is still running`,
-        }
-      : {
-          stopped: true,
-          detail: `pid ${pid} of launch slot ${namespace.slotId} now hosts another process (generation ${current}), so the recorded producer is gone`,
-        };
-  }
-
-
-  /**
-   * Why deleting this session's stored observations would be unsafe right now, or
-   * `null` when every namespace is proven stopped.
-   *
-   * The proof is re-taken from the current launch and store on every call, so a
-   * dialog that stayed open across a launch or a release cannot make a stale answer
-   * stand. It shows no UI and deletes nothing; the delete command calls it before
-   * the confirmation dialog and again afterwards.
-   */
-  async function fileEvidenceDeletionRefusal(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    tabId: string,
-  ): Promise<string | null> {
-    const resolved = await evidenceSession(context, index, tabId);
-    if (!resolved.ok) return resolved.reason;
-    // The proof of a still-running producer reads its kernel generation with the
-    // staged PowerShell helper: stage it first, so a delete right after activation
-    // answers from a real probe instead of refusing because no helper is configured
-    // yet. A staging failure is left to that refusal, which reports it.
-    await windowState().staging.entries().catch(() => {});
-    for (const namespace of resolved.session.namespaces) {
-      const proof = await producerStopProof(namespace);
-      if (!proof.stopped) {
-        log.warn(`file observation delete refused: ${proof.detail}`);
-        return "A session may still be recording file changes. Stop it before deleting its observations.";
-      }
-    }
-    return null;
-  }
-
-
-  /** Whether capture is on for this session, as the store itself reports it. */
-  async function observationCaptureState(session: EvidenceSession): Promise<string> {
-    const first = session.namespaces[0];
-    if (first === undefined) return "no evidence store exists for this workspace and session";
-    const disabled = await readNativeFileObservationDisable({ paths: first.paths });
-    if (disabled.disabled) {
-      return `capture is disabled for this workspace (${disabled.reason ?? "no reason recorded"})`;
-    }
-    const consent = await readNativeFileObservationConsent({ paths: first.paths });
-    return consent.state === "granted" ? "capture is enabled for this session" : `capture is off (${consent.reason})`;
-  }
-
-
-  /** Register one opaque document binding and return the editor URI for it. */
-  function observationDocumentUri(
-    stage: NativeFileObservationRecord["stage"],
-    binding: ObservationDocumentBinding,
-  ): vscode.Uri {
-    const s = windowState();
-    const token = createControlRequestId();
-    const uri = vscode.Uri.from({
-      scheme: OBSERVATION_DOCUMENT_SCHEME,
-      path: observationDocumentPath(token, stage),
-    });
-    s.observationDocuments.set(token, { uri, binding });
-    while (s.observationDocuments.size > OBSERVATION_DOCUMENT_LIMIT) {
-      const oldest = s.observationDocuments.keys().next();
-      if (oldest.done) break;
-      s.observationDocuments.delete(oldest.value);
-    }
-    return uri;
-  }
-
-
-  /** Ask every open observation document to re-read the store. */
-  function refreshObservationDocuments(): void {
-    const s = windowState();
-    for (const entry of s.observationDocuments.values()) s.observationDocumentChanges.fire(entry.uri);
-  }
-
-
-  function tabShowsObservationDocument(tab: vscode.Tab): boolean {
-    const input = tab.input;
-    if (input instanceof vscode.TabInputText) return input.uri.scheme === OBSERVATION_DOCUMENT_SCHEME;
-    if (input instanceof vscode.TabInputTextDiff) {
-      return (
-        input.original.scheme === OBSERVATION_DOCUMENT_SCHEME ||
-        input.modified.scheme === OBSERVATION_DOCUMENT_SCHEME
-      );
-    }
-    return false;
-  }
-
-
-  /**
-   * Close the observation documents this window opened.
-   *
-   * An editor tab holds its own copy of whatever the provider last returned, so a
-   * deletion that left tabs open would leave readable copies of deleted bytes on
-   * screen. They are read-only, so closing one never discards user work.
-   */
-  async function closeObservationDocuments(): Promise<void> {
-    const ours: vscode.Tab[] = [];
-    for (const group of vscode.window.tabGroups.all) {
-      for (const tab of group.tabs) if (tabShowsObservationDocument(tab)) ours.push(tab);
-    }
-    if (ours.length > 0) await vscode.window.tabGroups.close(ours, true);
-  }
-
-
-  /** The read-only body of one observation document, resolved from the store. */
-  async function renderObservationDocument(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    binding: ObservationDocumentBinding,
-  ): Promise<string> {
-    const resolved = await evidenceSession(context, index, binding.tabId);
-    if (!resolved.ok) return OBSERVATION_DOCUMENT_UNAVAILABLE;
-    for (const namespace of resolved.session.namespaces) {
-      const reader = await openNativeFileObservationJournal({ paths: namespace.paths, mode: "reader" });
-      try {
-        const read = await reader.read(binding.recordId);
-        if (!read.available || !recordMatchesNamespace(read.record, namespace)) continue;
-        const text = observationTextState(read.record, read);
-        if (binding.kind === "side") {
-          // A diff side is the stored text only: an observation with no validated
-          // text is never rendered as an empty file.
-          return text.text ?? OBSERVATION_DOCUMENT_UNAVAILABLE;
-        }
-        const listed = await reader.list({ limit: OBSERVATION_LIST_LIMIT });
-        const view = observationCallViews(listed.records).get(observationCallKey(read.record)) ?? null;
-        return renderObservationDetail(read.record, view, text);
-      } finally {
-        await reader.close().catch(() => {});
-      }
-    }
-    return OBSERVATION_DOCUMENT_UNAVAILABLE;
-  }
-
-
-  /**
-   * Body of one observation document, re-validated on every request.
-   *
-   * The token is only a binding: the namespace is re-derived from the current
-   * launch, the store is re-opened read-only, and the record and its bytes are
-   * re-read and re-validated. A document whose observation was deleted, replaced or
-   * corrupted therefore reports that, instead of serving the copy a cache kept.
-   */
-  async function observationDocumentContent(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    uriPath: string,
-  ): Promise<string> {
-    const s = windowState();
-    const token = observationTokenFromPath(uriPath);
-    const entry = token === null ? undefined : s.observationDocuments.get(token);
-    if (entry === undefined) return OBSERVATION_DOCUMENT_UNAVAILABLE;
-    try {
-      return await renderObservationDocument(context, index, entry.binding);
-    } catch {
-      // A store that cannot be read is reported as unavailable, never as empty.
-      return OBSERVATION_DOCUMENT_UNAVAILABLE;
-    }
-  }
-
-
-  /**
-   * What a reader sees before any byte: provenance, the journal's verdict on the
-   * call and the fixed limits of the evidence, then the stored text unchanged.
-   */
-  function renderObservationDetail(
-    record: NativeFileObservationRecord,
-    view: NativeFileObservationCallView | null,
-    text: ObservationTextState,
-  ): string {
-    return [
-      `File observation — ${observationPathLabel(record)}`,
-      ...observationDetailLines(record, view === null ? null : view.resolution, text),
-      "",
-      text.text === null ? "(no stored text is shown for this observation)" : text.text,
-    ].join("\n");
-  }
-
-
-  async function openObservationDocument(
-    stage: NativeFileObservationRecord["stage"],
-    binding: ObservationDocumentBinding,
-  ): Promise<void> {
-    const document = await vscode.workspace.openTextDocument(observationDocumentUri(stage, binding));
-    await vscode.window.showTextDocument(document, { preview: true });
-  }
-
-
-  /** A native diff of two validated observations of one path inside one binding. */
-  async function compareObservationPair(
-    tabId: string,
-    journal: NativeFileObservationJournal,
-    pair: ObservationPair,
-  ): Promise<void> {
-    const [previousRead, currentRead] = await Promise.all([
-      journal.read(pair.previous.recordId),
-      journal.read(pair.current.recordId),
-    ]);
-    const previous = observationTextState(pair.previous, previousRead);
-    const current = observationTextState(pair.current, currentRead);
-    const notice = observationComparisonNotice(previous, current);
-    if (notice !== null || previous.text === null || current.text === null) {
-      // An absent, binary, oversize or unreadable side is never diffed as if it
-      // were empty: the notice says which side has no validated stored text.
-      showInfo(notice ?? OBSERVATION_DOCUMENT_UNAVAILABLE);
-      return;
-    }
-    await vscode.commands.executeCommand(
-      "vscode.diff",
-      observationDocumentUri(pair.previous.stage, { tabId, recordId: pair.previous.recordId, kind: "side" }),
-      observationDocumentUri(pair.current.stage, { tabId, recordId: pair.current.recordId, kind: "side" }),
-      observationComparisonTitle(pair),
-    );
-  }
-
-
-  /**
-   * The live binding a consent record may be written for, re-derived on demand.
-   *
-   * A consent record is per workspace and session, and capture is owned by the
-   * native process hosting that session, so the grant must name exactly the tab,
-   * claim, verified control channel and store that exist *now*: the active tab, its
-   * claim generation, the indexed session id and cwd, and the authenticated
-   * binding's slot, instance, pid and session file. Nothing about this can be made
-   * atomic against a native session switch — the observer binds capture to the
-   * session id it sees per stage — so the caller re-derives this identity before
-   * the disclosure and again before the grant, and refuses on any difference.
-   */
-  async function consentBinding(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    tabId: string,
-  ): Promise<ConsentBindingResult> {
-    if (index.activeTabId !== tabId) {
-      return { ok: false, reason: "the active session changed while this command was running" };
-    }
-    const channel = activeControl(index);
-    if (channel === null || channel.tabId !== tabId) {
-      return { ok: false, reason: "the verified host-control channel for this session is no longer available" };
-    }
-    const entry = index.get(tabId);
-    const ownership = entry?.ownership ?? null;
-    if (entry === null || ownership === null) {
-      return { ok: false, reason: "that session no longer holds the claim this window would record consent under" };
-    }
-    const resolved = await evidenceSession(context, index, tabId);
-    if (!resolved.ok) return { ok: false, reason: resolved.reason };
-    const namespace = resolved.session.namespaces.find(candidate => candidate.processInstanceId !== null);
-    if (namespace === undefined) {
-      return { ok: false, reason: "no verified native host is identified for this session right now" };
-    }
-    let live: EvidenceLiveChannel;
-    let sessionFile: string | null;
-    try {
-      const binding = channel.client.binding;
-      // `peerProof` refuses once the channel is closed, so this branch proves a live
-      // channel rather than a retained one.
-      const proof = channel.client.peerProof;
-      live = {
-        slotId: binding.slotId,
-        instanceId: binding.instanceId,
-        pid: binding.pid,
-        cwd: binding.cwd,
-        serverPid: proof.serverPid,
-        serverCreationTime: proof.serverCreationTime,
-      };
-      sessionFile = binding.sessionFile;
-    } catch {
-      return { ok: false, reason: "the host-control channel has not completed its handshake" };
-    }
-    if (namespace.slotId !== live.slotId) {
-      return { ok: false, reason: "the store does not belong to the native process this window authenticated" };
-    }
-    return {
-      ok: true,
-      binding: {
-        namespace,
-        key: [
-          tabId,
-          ownership.ownerGeneration,
-          entry.sessionId ?? "",
-          namespace.paths.sessionDirectory,
-          live.slotId,
-          live.instanceId,
-          String(live.pid),
-          sessionFile ?? "",
-        ].join("\u0000"),
-      },
-    };
-  }
-
-
-  /**
-   * Record explicit consent for this workspace and this session.
-   *
-   * The restricted store access rules are established and independently verified
-   * before the consent record exists (ADR-0007), the full disclosure — including
-   * that a snapshot taken before a tool runs can preserve bytes of an operation
-   * the user later denies — is shown before any approval, and only the explicit
-   * button grants capture. The tab, claim and authenticated host are re-checked
-   * after the access rewrite and again after the dialog, so a session the user
-   * switched to in the meantime never receives a consent record.
-   */
-  async function enableFileEvidence(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-    const tabId = evidenceTabId(index);
-    if (tabId === null) return;
-    const start = await consentBinding(context, index, tabId);
-    if (!start.ok) {
-      showWarning(`File observation cannot be enabled: ${start.reason}.`);
-      return;
-    }
-    const restricted = await restrictNativeFileObservationStorage({ paths: start.binding.namespace.paths });
-    const readiness = restricted.readiness;
-    if (!restricted.restricted || readiness === null || !readiness.ready) {
-      showError(
-        `File observation stayed off: ${
-          restricted.reason ?? readiness?.reason ?? "the observation store could not be verified"
-        }.`,
-      );
-      return;
-    }
-    // The access rewrite read and rewrote the store's own directories; the session may have moved on since.
-    const before = await consentBinding(context, index, tabId);
-    if (!before.ok) {
-      showWarning(`File observation stayed off: ${before.reason}.`);
-      return;
-    }
-    if (before.binding.key !== start.binding.key) {
-      showWarning(
-        "File observation stayed off: the session or its native host changed while the store was being prepared, so no consent was recorded. Run the command again.",
-      );
-      return;
-    }
-    const namespace = before.binding.namespace;
-    const disabled = await readNativeFileObservationDisable({ paths: namespace.paths });
-    log.info(`file observation consent: session ${namespace.paths.sessionId}, pid ${namespace.pid ?? "unknown"}, access ${readiness.evidence.join("; ")}`);
-    const detail = [
-      ...NATIVE_FILE_OBSERVATION_DISCLOSURE,
-      "",
-      `Workspace: ${namespace.paths.workspaceRoot}`,
-      `Store: ${namespace.paths.storageRoot}`,
-      ...(disabled.disabled
-        ? [
-            "",
-            `Capture was disabled for this workspace${
-              disabled.atMs === null ? "" : ` on ${new Date(disabled.atMs).toISOString()}`
-            }${disabled.reason === null ? "" : ` (${disabled.reason})`}. Enabling here lifts that disable marker.`,
-          ]
-        : []),
-    ].join("\n");
-    const picked = await vscode.window.showWarningMessage(
-      "OMP Desk: Store file observations for this workspace and session?",
-      { modal: true, detail },
-      ENABLE_EVIDENCE_LABEL,
-    );
-    if (picked !== ENABLE_EVIDENCE_LABEL) {
-      showInfo("File observation stays off; no consent was recorded and no byte was stored.");
-      return;
-    }
-    // The dialog can stay open across a session switch or a relaunch in the native
-    // TUI, so the grant is written only for the identity that still holds.
-    const grantedFor = await consentBinding(context, index, tabId);
-    if (!grantedFor.ok) {
-      showWarning(`File observation stayed off: ${grantedFor.reason}.`);
-      return;
-    }
-    if (grantedFor.binding.key !== start.binding.key) {
-      showWarning(
-        "File observation stayed off: the session or its native host changed while the confirmation was open, so no consent was recorded for it. Run the command again on the session you mean.",
-      );
-      return;
-    }
-    const granted = await grantNativeFileObservationConsent({
-      paths: grantedFor.binding.namespace.paths,
-      disclosureId: NATIVE_FILE_OBSERVATION_DISCLOSURE_ID,
-      preApprovalCaptureAcknowledged: true,
-      ...(disabled.disabled ? { allowReEnable: true } : {}),
-    });
-    if (!granted.granted) {
-      showError(`File observation stayed off: ${granted.reason ?? "the consent record was not stored"}.`);
-      return;
-    }
-    log.info(`file observation enabled for session namespace ${grantedFor.binding.namespace.paths.sessionDigest}`);
-    showInfo(
-      "File observation is enabled for this session. Recorded observations are read-only evidence: no undo, redo, rollback or checkpoint restore is offered from them.",
-    );
-  }
-
-
-  /**
-   * Stop capture for this workspace, durably.
-   *
-   * The disable marker sits above the session namespace of each launch, so new
-   * stages on a running native host refuse capture and the stop survives an
-   * extension-host reload. A publication already underway may still finish:
-   * deletion therefore requires a confirmed stopped producer. The launcher's own
-   * consent records are removed too, so later enablement is deliberate.
-   * Stored history is untouched until separately deleted.
-   */
-  async function disableFileEvidence(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-    const tabId = evidenceTabId(index);
-    if (tabId === null) return;
-    const resolved = await evidenceSession(context, index, tabId);
-    if (!resolved.ok) {
-      showWarning(`File observation cannot be disabled: ${resolved.reason}.`);
-      return;
-    }
-    const session = resolved.session;
-    let failed: string | null = null;
-    for (const namespace of session.namespaces) {
-      const disabled = await disableNativeFileObservationCapture({
-        paths: namespace.paths,
-        reason: "disabled from the Sessions view",
-      });
-      if (!disabled.disabled) failed = disabled.detail ?? "the disable marker was not written";
-    }
-    if (failed !== null) {
-      showError(`File observation could not be disabled: ${failed}.`);
-      return;
-    }
-    let revoked = 0;
-    for (const entry of index.list()) {
-      if (entry.sessionId === null || !controlPathEquals(entry.cwd, session.namespaces[0]?.paths.workspaceRoot ?? "")) {
-        continue;
-      }
-      const other = await evidenceSession(context, index, entry.tabId);
-      if (!other.ok) continue;
-      for (const namespace of other.session.namespaces) {
-        const result = await revokeNativeFileObservationConsent({ paths: namespace.paths });
-        if (result.revoked) revoked += 1;
-      }
-    }
-    log.info(
-      `file observation disabled for ${session.namespaces.length} namespace(s); ${revoked} consent record(s) revoked`,
-    );
-    // Open documents re-read the store: disabling keeps retained history, so they
-    // must show the retained evidence rather than a stale rendering.
-    refreshObservationDocuments();
-    showInfo(
-      `File observation is disabled for new capture stages, and a future launch of this session starts with no consent (${revoked} consent record(s) removed). An already-started publication may still finish; stop the native host before deleting retained history. Open observation documents were refreshed.`,
-    );
-  }
-
-
-  /** Show the session's stored observations as read-only text and native diffs. */
-  async function showFileEvidence(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-    const tabId = evidenceTabId(index);
-    if (tabId === null) return;
-    const resolved = await evidenceSession(context, index, tabId);
-    if (!resolved.ok) {
-      showWarning(`File observations are unavailable: ${resolved.reason}.`);
-      return;
-    }
-    const session = resolved.session;
-    const readers = new Map<string, NativeFileObservationJournal>();
-    try {
-      const records: NativeFileObservationRecord[] = [];
-      let rejected = 0;
-      let truncated = false;
-      for (const namespace of session.namespaces) {
-        const reader = await openNativeFileObservationJournal({ paths: namespace.paths, mode: "reader" });
-        readers.set(namespace.slotId, reader);
-        const listed = await reader.list({ limit: OBSERVATION_LIST_LIMIT });
-        rejected += listed.rejected;
-        truncated = truncated || listed.truncated;
-        for (const record of listed.records) {
-          if (recordMatchesNamespace(record, namespace)) records.push(record);
-        }
-      }
-      if (records.length === 0) {
-        const unvalidated = rejected === 0 ? "" : ` ${rejected} stored record(s) did not validate and are not shown.`;
-        showInfo(
-          `No file observation is recorded for this session: ${await observationCaptureState(session)}.${unvalidated}`,
-        );
-        return;
-      }
-      records.sort((left, right) => right.sequence - left.sequence || right.observedAtMs - left.observedAtMs);
-      const pairByCurrent = new Map<string, ObservationPair>();
-      for (const pair of observationPairs(records)) pairByCurrent.set(pair.current.recordId, pair);
-      const picked = await vscode.window.showQuickPick(
-        records.map(record => ({
-          label: `${observationPathLabel(record)} — ${observationShortStage(record.stage)}`,
-          description: observationSummaryLine(record),
-          detail: `tool ${record.toolCall.toolName}, call ${record.toolCall.toolCallId}, reported outcome ${record.toolOutcome}`,
-          record,
-        })),
-        {
-          title: `File observations recorded for this session (${records.length})`,
-          placeHolder: `Read-only evidence${
-            truncated ? `, newest ${OBSERVATION_LIST_LIMIT} shown` : ""
-          }; no restore is offered`,
-        },
-      );
-      if (picked === undefined) return;
-      const record = picked.record;
-      const reader = readers.get(record.origin.slotId);
-      if (reader === undefined) return;
-      const pair = pairByCurrent.get(record.recordId) ?? null;
-      const actions = pair === null ? [SHOW_OBSERVATION_LABEL] : [SHOW_OBSERVATION_LABEL, COMPARE_OBSERVATION_LABEL];
-      const action = await vscode.window.showQuickPick(actions, { title: observationPathLabel(record) });
-      if (action === undefined) return;
-      if (action === COMPARE_OBSERVATION_LABEL && pair !== null) {
-        await compareObservationPair(session.tabId, reader, pair);
-        return;
-      }
-      await openObservationDocument(record.stage, {
-        tabId: session.tabId,
-        recordId: record.recordId,
-        kind: "detail",
-      });
-    } catch (error) {
-      showWarning(`File observations could not be read: ${messageOf(error)}.`);
-    } finally {
-      for (const reader of readers.values()) await reader.close().catch(() => {});
-    }
-  }
-
-
-  /**
-   * Delete retained history for this session, or for every session of the launches
-   * that recorded it.
-   *
-   * Every namespace must be proven stopped before anything is removed: the store
-   * cannot be locked against its own producer and a stage already past its gate can
-   * still commit one observation, so promising erasure while a process might still
-   * publish would be a false statement. The proofs are re-taken after the
-   * confirmation dialog, because the answer can change while it is open; a
-   * namespace whose producer cannot be proven stopped keeps its bytes and is named
-   * in the refusal.
-   */
-  async function deleteFileEvidence(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-    const tabId = evidenceTabId(index);
-    if (tabId === null) return;
-    const refused = await fileEvidenceDeletionRefusal(context, index, tabId);
-    if (refused !== null) {
-      showWarning(
-        `Refusing to delete stored observations: ${refused}. One more observation could still be stored, so nothing was removed. Stop that native host (close its terminal, or end that exact process) and run this again.`,
-      );
-      return;
-    }
-    const resolved = await evidenceSession(context, index, tabId);
-    if (!resolved.ok) {
-      showWarning(`File observations cannot be deleted: ${resolved.reason}.`);
-      return;
-    }
-    const session = resolved.session;
-    const detail = [
-      `Session store(s): ${session.namespaces.map(namespace => namespace.paths.sessionDirectory).join(", ")}`,
-      `All observations for these folders: ${session.namespaces
-        .map(namespace => namespace.paths.workspaceDirectory)
-        .join(", ")}`,
-      "The sessions that recorded these observations have stopped.",
-      "Their recording permissions are removed with the stored content, so recording does not resume automatically.",
-      "Open observation documents are closed with the deletion, because an editor tab holds its own copy of what it displayed.",
-      "Removal is an ordinary file-system delete, not a secure erase of the underlying storage.",
-    ].join("\n");
-    const picked = await vscode.window.showWarningMessage(
-      "OMP Desk: Delete stored file observations?",
-      { modal: true, detail },
-      DELETE_SESSION_LABEL,
-      DELETE_LAUNCH_LABEL,
-    );
-    if (picked !== DELETE_SESSION_LABEL && picked !== DELETE_LAUNCH_LABEL) {
-      showInfo("Nothing was deleted.");
-      return;
-    }
-    // The dialog can stay open while a host is launched, a claim is released or the
-    // window's active session changes, so the target and the proofs are re-taken
-    // rather than trusted from before it.
-    if (index.activeTabId !== tabId) {
-      showWarning(
-        "Refusing to delete stored observations: the active session changed while the confirmation was open. Nothing was removed.",
-      );
-      return;
-    }
-    const changed = await fileEvidenceDeletionRefusal(context, index, tabId);
-    if (changed !== null) {
-      showWarning(`Refusing to delete stored observations: ${changed}. Nothing was removed.`);
-      return;
-    }
-    const confirmed = await evidenceSession(context, index, tabId);
-    if (!confirmed.ok) {
-      showWarning(`Refusing to delete stored observations: ${confirmed.reason}.`);
-      return;
-    }
-    const scope = picked === DELETE_LAUNCH_LABEL ? "workspace" : "session";
-    let records = 0;
-    let blobs = 0;
-    let namespaces = 0;
-    let revoked = false;
-    let failure: string | null = null;
-    for (const namespace of confirmed.session.namespaces) {
-      const result = await deleteNativeFileObservationHistory({
-        paths: namespace.paths,
-        scope,
-        revokeConsent: true,
-        keepDisableMarker: true,
-      });
-      records += result.removedRecords;
-      blobs += result.removedBlobs;
-      namespaces += result.removedNamespaces;
-      revoked = revoked || result.revokedConsent;
-      if (result.detail !== null) failure = result.detail;
-    }
-    // An open editor holds its own copy of what the provider last returned, so the
-    // documents this window opened are closed and refreshed instead of left showing
-    // bytes that no longer exist.
-    await closeObservationDocuments();
-    refreshObservationDocuments();
-    const removed = `removed ${records} record(s) and ${blobs} stored blob(s) across ${namespaces} namespace(s)`;
-    if (failure !== null) {
-      showWarning(`File observations were ${removed}, but the store reported: ${failure}.`);
-      return;
-    }
-    log.info(`file observations deleted (${scope}): ${removed}`);
-    showInfo(
-      `File observations deleted: ${removed}.${
-        revoked ? " Their consent records were removed as well." : ""
-      } Open observation documents were closed.`,
-    );
-  }
-
-
-  function diagnosticsUri(): vscode.Uri {
-    return vscode.Uri.from({ scheme: DIAGNOSTICS_DOCUMENT_SCHEME, path: DIAGNOSTICS_DOCUMENT_PATH });
-  }
-
-
-  /** The one-line description of a session tab this report uses. */
-  function diagnosticsLabel(cwd: string): string {
-    return `OMP: ${path.basename(cwd)}`;
-  }
-
-
-  /**
-   * Whether one stage already holds a measurement — a duration this window
-   * actually observed. A stage that is still running, or that was recorded as
-   * unobserved, is not measured yet.
-   */
-  function diagnosticsStageMeasured(tabId: string, stageId: DiagnosticStageId): boolean {
-    const s = windowState();
-    const stage = s.diagnostics.snapshot(tabId)?.stages.find(current => current.id === stageId);
-    return stage !== undefined && stage.durationMs !== null;
-  }
-
-
-  /** The verifiable environment facts of this extension host. */
-  function diagnosticsEnvironment(context: vscode.ExtensionContext): DiagnosticEnvironment {
-    const pkg: unknown = context.extension.packageJSON;
-    const version = typeof pkg === "object" && pkg !== null ? Reflect.get(pkg, "version") : undefined;
-    return {
-      extensionVersion: typeof version === "string" && version.length > 0 ? version : "unknown",
-      vscodeVersion: vscode.version,
-      platform: `${process.platform} ${process.arch}`,
-      hostPid: process.pid,
-      storagePath: context.globalStorageUri.fsPath,
-    };
-  }
-
-
-  /**
-   * Refresh the facts that change while a host lives: the exact command it was
-   * launched from, the conversation's phase and whether host control is verified.
-   * Every value is a non-secret identity.
-   */
-  function refreshSessionDiagnostics(index: SessionIndex): void {
-    const s = windowState();
-    const recorded = new Set(s.diagnostics.subjects().map(subject => subject.key));
-    let resolvedTarget = false;
-    for (const [tabId, state] of s.tabs) {
-      if (!recorded.has(tabId)) continue;
-      const runtime = hostOf(state);
-      if (runtime === null) continue;
-      const target = runtime.binary;
-      if (target !== null) {
-        resolvedTarget = true;
-        s.diagnostics.fact(tabId, "omp target", `${target.command} ${target.prefixArgs.join(" ")}`.trim());
-        s.diagnostics.fact(tabId, "omp target origin", target.origin);
-        if (typeof target.version === "string") s.diagnostics.fact(tabId, "omp reported version", target.version);
-      }
-      s.diagnostics.fact(tabId, "host pid", String(runtime.pid));
-      s.diagnostics.fact(
-        tabId,
-        "broker",
-        `slot ${runtime.identity.slot} · generation ${runtime.identity.brokerGeneration} · pid ${runtime.identity.brokerPid}`,
-      );
-      s.diagnostics.fact(tabId, "chat phase", s.sessionRuntime.conversations.stateOf(tabId)?.phase ?? "no conversation");
-      s.diagnostics.fact(
-        tabId,
-        "host control",
-        controlOf(state) !== null
-          ? "verified"
-          : `unavailable${(recordOf(state)?.controlFailure ?? null) === null ? "" : ` — ${(recordOf(state)?.controlFailure ?? null)}`}`,
-      );
-      const entry = index.get(tabId);
-      if (entry !== null) {
-        const released = entry.ownership !== null && entry.ownership.releasedAt !== null;
-        s.diagnostics.fact(tabId, "session state", `${entry.availability}${released ? " · claim released" : ""}`);
-      }
-    }
-    if (!resolvedTarget) {
-      // The resolved launcher is captured at a host's own launch; a window that
-      // never launched one has nothing to report here, and this report does not
-      // resolve (or run) a launcher of its own to fill the gap.
-      s.diagnostics.fact(
-        WINDOW_DIAGNOSTIC_SUBJECT,
-        "OMP target",
-        "not resolved in this window — no OMP host was launched here",
-      );
-    }
-  }
-
-
-  /** The report body; the provider calls this on every request, so it re-probes. */
-  async function diagnosticsDocumentContent(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    uriPath: string,
-  ): Promise<string> {
-    const s = windowState();
-    if (uriPath !== DIAGNOSTICS_DOCUMENT_PATH) {
-      return `${redactCapabilities(uriPath)}\n\nThis diagnostics document has no report bound to this path. Run "OMP Desk: Show Diagnostics" to open the window's report.\n`;
-    }
-    refreshSessionDiagnostics(index);
-    return s.diagnostics.render(diagnosticsEnvironment(context));
-  }
-
-
-  /** Show this window's read-only diagnostics report. */
-  async function showDiagnostics(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-    const s = windowState();
-    try {
-      const document = await vscode.workspace.openTextDocument(diagnosticsUri());
-      await vscode.window.showTextDocument(document, { preview: false });
-      // An already-open report holds the previous content; ask it to re-read.
-      s.diagnosticsDocumentChanges.fire(diagnosticsUri());
-      log.debug("diagnostics report shown");
-    } catch (error) {
-      showError(`The diagnostics report could not be shown: ${messageOf(error)}`);
-    }
-  }
-
-
   function showError(message: string): void {
     void vscode.window.showErrorMessage(`OMP Desk: ${message}`);
   }
-
 
   function showWarning(message: string): void {
     void vscode.window.showWarningMessage(`OMP Desk: ${message}`);
   }
 
-
   function showInfo(message: string): void {
     void vscode.window.showInformationMessage(`OMP Desk: ${message}`);
   }
-
 
   /** Tell the user another window holds the session, and offer to move it here (`ompDesk.moveSessionHere`). */
   function showClaimConflict(tabId: string, message: string): void {
@@ -9667,7 +6118,6 @@ export function createWindow(deps: WindowDeps) {
       if (choice === MOVE_TO_THIS_WINDOW_ACTION) void vscode.commands.executeCommand("ompDesk.moveSessionHere", tabId);
     });
   }
-
 
   /** `ompDesk.moveSessionHere`: the row's session, else the editor in front, else the active session, as Close and Rename resolve it. */
   async function moveSessionHere(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
@@ -9679,22 +6129,18 @@ export function createWindow(deps: WindowDeps) {
     await windowState().routing.moveSessionHere(context, index, target.tabId);
   }
 
-
   function messageOf(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
-
 
   setProcessProbeObserver(probe => windowTiming("process start time read", `pid ${probe.pid} ${probe.purpose} ${probe.ms} ms found=${probe.found}`));
 
   setToolSpawnObserver(spawn => log[spawn.outcome === "ok" ? "debug" : "warn"](formatToolSpawn(spawn)));
 
-
   /** One line of the hand-over timeline between windows (ADR-0056/0057); the log stamps each line itself. Per-step lines are `debug`; a summary is passed `info`. */
   function windowTiming(event: string, detail = "", level: "debug" | "info" = "debug"): void {
     log[level](`window timing: ${event}${detail === "" ? "" : ` ${detail}`}`);
   }
-
 
   /**
    * `vscode.commands.registerCommand` with the handler marked as a named operation of the event-loop monitor, so a stall of the
@@ -9703,7 +6149,6 @@ export function createWindow(deps: WindowDeps) {
   function registerDeskCommand(id: string, handler: (...args: never[]) => unknown): vscode.Disposable {
     return vscode.commands.registerCommand(id, (...args: never[]) => trackOperation(`command ${id}`, () => handler(...args)));
   }
-
 
   /**
    * The settings the migration of ADR-0068 reads and writes. `inspect` reports a key no extension contributes, `update` can remove one,
@@ -9745,7 +6190,6 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   /** `setContext` for a key of this extension; the keys default keybindings used are also set under their old names (`legacy-aliases.ts`). */
   function setDeskContext(key: string, value: unknown): void {
     void vscode.commands.executeCommand("setContext", key, value);
@@ -9754,7 +6198,6 @@ export function createWindow(deps: WindowDeps) {
       if (old !== null) void vscode.commands.executeCommand("setContext", old, value);
     }
   }
-
 
   /** The OMP Desk log: silent before activation (there is no window yet), the window's `LogOutputChannel` after. */
   const log: Logger = {
@@ -9793,7 +6236,6 @@ export function createWindow(deps: WindowDeps) {
     }
     return true;
   }
-
 
   /**
    * Register one panel's own listeners for one editor slot (ADR-0025).
@@ -9921,7 +6363,6 @@ export function createWindow(deps: WindowDeps) {
     });
   }
 
-
   /**
    * Route one page message to the controlling or the non-controlling handler.
    *
@@ -9949,7 +6390,6 @@ export function createWindow(deps: WindowDeps) {
       return route();
     });
   }
-
 
   /**
    * Answer one message from a non-controlling editor.
@@ -10049,7 +6489,6 @@ export function createWindow(deps: WindowDeps) {
     log.debug(`slot ${slot}: a non-controlling editor's ${parsed.type} was refused`);
   }
 
-
   /**
    * The broker frontend one editor owns.
    *
@@ -10061,7 +6500,6 @@ export function createWindow(deps: WindowDeps) {
     return stateOf(key)?.slotId ?? key;
   }
 
-
   /** `true` for a map key that serves an indexed conversation (never a shell). */
   function isSessionTab(key: string): boolean {
     const s = windowState();
@@ -10069,12 +6507,10 @@ export function createWindow(deps: WindowDeps) {
     return conversation !== null && s.indexForBridge?.get(conversation) != null;
   }
 
-
   /** A synthetic generation for "this editor has no writer", so a pane has something to reset on. */
   function absentTerminalGeneration(tabId: string): string {
     return createHash("sha256").update(`omp-pty-absent\0${tabId}`, "utf8").digest("hex").slice(0, 32);
   }
-
 
   /**
    * Push one terminal message to whichever transport this editor currently has.
@@ -10095,7 +6531,6 @@ export function createWindow(deps: WindowDeps) {
     bridge.endpoint.pushTerminal(bridge.documentId, message);
   }
 
-
   /** Answer an attach when there is no writer this host can reach. */
   function pushTerminalUnavailable(tabId: string, reason: string): void {
     pushTerminalTo(tabId, {
@@ -10110,7 +6545,6 @@ export function createWindow(deps: WindowDeps) {
       reason,
     });
   }
-
 
   /**
    * The host side of one tab's terminal, created once per writer.
@@ -10157,7 +6591,6 @@ export function createWindow(deps: WindowDeps) {
     return pipeline;
   }
 
-
   /** Drop a tab's terminal frontend; the broker keeps running. */
   function stopTerminalForTab(tabId: string): void {
     const state = stateOf(tabId);
@@ -10172,7 +6605,6 @@ export function createWindow(deps: WindowDeps) {
     state.pipeline = null;
   }
 
-
   function terminalCwd(state: TabState): string | undefined {
     const s = windowState();
     return hostOf(state)?.cwd ??
@@ -10180,12 +6612,10 @@ export function createWindow(deps: WindowDeps) {
       (state.shellSlot === null ? undefined : s.shellSlots?.get(state.shellSlot)?.cwd);
   }
 
-
   function terminalFontResource(state: TabState): vscode.Uri | undefined {
     const cwd = terminalCwd(state);
     return cwd === undefined ? undefined : vscode.Uri.file(cwd);
   }
-
 
   function terminalFontMessage(resource?: vscode.Uri): GuestTerminalFontMessage {
     const s = windowState();
@@ -10200,12 +6630,10 @@ export function createWindow(deps: WindowDeps) {
     };
   }
 
-
   function pushTerminalFont(state: TabState, resource = terminalFontResource(state)): void {
     readInstalledTerminalFonts();
     void state.panel?.webview.postMessage(terminalFontMessage(resource));
   }
-
 
   /**
    * Read the installed Nerd Font families once, when the first terminal pane asks for its font, and push the
@@ -10221,7 +6649,6 @@ export function createWindow(deps: WindowDeps) {
       for (const state of s.tabs.values()) if (state.mode === "terminal" || state.shellSlot !== null) pushTerminalFont(state);
     });
   }
-
 
   function symbolLinkResolver(): SymbolLinkResolver {
     const s = windowState();
@@ -10289,7 +6716,6 @@ export function createWindow(deps: WindowDeps) {
     return resolver;
   }
 
-
   /** `ompDesk.searchSymbolFromChat` for a non-empty selection: the link resolver's lookup in the folders of the conversation `tabId` shows (see {@link searchSymbol}). */
   async function searchSymbolFromSelection(query: string, tabId: string): Promise<void> {
     const s = windowState();
@@ -10306,7 +6732,6 @@ export function createWindow(deps: WindowDeps) {
     });
   }
 
-
   /**
    * A Chat file link's context-menu command: the same open a click, Ctrl+Click or Ctrl+Shift+Click sends,
    * routed to the editor whose panel showed the menu, so the target resolves against that session's cwd.
@@ -10322,7 +6747,6 @@ export function createWindow(deps: WindowDeps) {
       return;
     }
   }
-
 
   /**
    * Answer one terminal message from the page that shows this tab.
@@ -10509,562 +6933,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
-  // Folder shells (ADR-0024): durable slot, own editor, no session identity
-
-  /** The recoverable (detached) shells of one folder, newest first. */
-  function recoverableShellsInFolder(folderPath: string): readonly ShellSlotRecord[] {
-    const s = windowState();
-    const key = canonicalFolderKey(folderPath);
-    if (key === null || s.shellSlots === undefined) return [];
-    const bound = (slot: string) => {
-      const tabId = s.shellEditors.get(slot);
-      return tabId !== undefined && stateOf(tabId)?.panel != null;
-    };
-    return reconnectableShellSlots(s.shellSlots.list(), key, bound);
-  }
-
-
-  /** The broker slot a new folder shell occupies; never a session slot. */
-  function newShellSlot(): string {
-    return createShellSlotId();
-  }
-
-
-  /**
-   * Open Terminal: a **new** general-purpose shell in one folder.
-   *
-   * This is not the managed host and never becomes one. A user may run anything in
-   * it, including a manual `omp`, and that process is theirs: it is not registered,
-   * not attached to the full-control GUI, and not represented as a managed session.
-   * The slot is recorded before the editor exists, so a close can never strand a
-   * live shell tree.
-   */
-  async function openFolderTerminal(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    argument: unknown,
-  ): Promise<void> {
-    const folder = await terminalFolder(index, argument, "Choose the folder to open a terminal in");
-    if (folder === null) return;
-    await launchFolderShell(context, index, folder.path, newShellSlot());
-  }
-
-
-  /**
-   * Reconnect Terminal: attach to the exact detached shell a folder still owns.
-   *
-   * Attach-only: it never starts a second shell. With more than one recoverable slot
-   * the user picks the one they mean, because each is a different live process.
-   */
-  async function reconnectFolderTerminal(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    argument: unknown,
-  ): Promise<void> {
-    const s = windowState();
-    const folder = await terminalFolder(index, argument, "Choose the folder whose terminal to reconnect");
-    if (folder === null) return;
-    // Explicit Reconnect can also rebind an editor this host can still reach.
-    const key = canonicalFolderKey(folder.path);
-    const candidates = key === null ? [] : shellSlotsForFolder(s.shellSlots?.list() ?? [], key);
-    if (candidates.length === 0) {
-      showInfo("This folder has no recorded terminal to reconnect. Open Terminal starts a new one.");
-      return;
-    }
-    const chosen =
-      candidates.length === 1
-        ? candidates[0]!
-        : (
-            await vscode.window.showQuickPick(
-              candidates.map(record => ({
-                label: record.label,
-                description: record.detachedAt === null ? "detached" : `detached ${record.detachedAt}`,
-                detail: record.cwd,
-                record,
-              })),
-              { title: "Reconnect which terminal?" },
-            )
-          )?.record ?? null;
-    if (chosen === null || chosen === undefined) return;
-    const outcome = await attachFolderShell(context, index, chosen);
-    if (!outcome) {
-      showError(
-        `The terminal for ${path.basename(chosen.cwd)} could not be reconnected. It may still be starting or may have ended. ` +
-          "Try Reconnect Terminal again, or choose Open Terminal to start a new one.",
-      );
-    }
-  }
-
-
-  /**
-   * The folder a terminal command acts on: the one a row or caller named, or, run from the Command
-   * Palette with no argument, the user's choice among the folders Sessions shows.
-   */
-  async function terminalFolder(index: SessionIndex, argument: unknown, title: string): Promise<LauncherFolder | null> {
-    const s = windowState();
-    if (argument === undefined) {
-      const folders = s.launcherFolders;
-      return folders === undefined ? null : await chooseFolder(index, folders, undefined, { title, addWhenEmpty: false });
-    }
-    const folder = resolveFolderArgument(argument);
-    if (folder === null) showWarning("That folder is no longer in Sessions. Refresh Sessions and try again.");
-    return folder;
-  }
-
-
-  /** The folder one folder-scoped command was invoked for. */
-  function resolveFolderArgument(argument: unknown): LauncherFolder | null {
-    const s = windowState();
-    if (argument instanceof WorkspaceFolderTreeItem) return s.launcherFolders?.get(argument.folderId) ?? null;
-    const resolved = folderArgument(argument, s.launcherFolders?.list() ?? []);
-    if (resolved.kind === "folder") return resolved.folder;
-    if (resolved.kind === "stale") return null;
-    if (typeof argument === "string") return s.launcherFolders?.folderForCwd(argument) ?? null;
-    return null;
-  }
-
-
-  /**
-   * The owner hint this window offers the broker for a folder shell (ADR-0030).
-   *
-   * Three numbers are all the extension host can discover: its own pid, its direct
-   * parent's pid and the candidate `VSCODE_PID` the installed VS Code sets in its primary
-   * process. None of them is proof of anything — the broker's staged helper re-reads each
-   * one from the kernel and only then admits the association — so a value this window
-   * cannot read as a plain pid yields `null` (no association, and therefore a disabled
-   * automatic stop) rather than a guess. Only folder shells ask for this; a managed OMP
-   * writer never does, and a managed broker never auto-stops.
-   */
-  function folderShellOwner(): PtyOwnerHint | null {
-    return folderShellOwnerHint({
-      extensionHostPid: process.pid,
-      parentPid: process.ppid,
-      vscodePid: process.env.VSCODE_PID,
-    });
-  }
-
-
-  /**
-   * Start one folder shell under the broker, with its slot recorded first.
-   *
-   * The record exists before the editor so that every later outcome — a dismissed
-   * close prompt, a failed stop, a failed recreation — retains a durable, recoverable
-   * slot instead of stranding a live process behind a closed editor.
-   */
-  async function launchFolderShell(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    cwd: string,
-    slot: string,
-  ): Promise<void> {
-    const s = windowState();
-    const client = await brokerClient();
-    if (client === null) {
-      showError("Terminal support is unavailable. Reload the window and try Open Terminal again.");
-      return;
-    }
-    const folderKey = canonicalFolderKey(cwd) ?? cwd;
-    const store = s.shellSlots;
-    if (store === undefined) {
-      showError("This window's terminal registry is not available, so no folder terminal could be started.");
-      return;
-    }
-    // Recorded before anything can close: the slot is the recovery path. A registry
-    // that cannot carry another slot refuses here, and then no shell is started — a
-    // shell whose slot is unknown could be stranded by the very close this record
-    // exists to survive.
-    const recorded = await store.add({ slot, cwd, folderKey, label: path.basename(cwd) || cwd });
-    if (!recorded.ok) {
-      showError(recorded.reason);
-      return;
-    }
-    const launched = await client.launchFolderShell({
-      slot,
-      cwd,
-      title: `Terminal: ${path.basename(cwd)}`,
-      owner: folderShellOwner(),
-    });
-    if (launched.handle === null) {
-      // The record is the recovery route, so it survives every launch outcome that is not
-      // proof that nothing was ever started: a broker that merely published late may be
-      // running now, and an occupied slot names a record that is kept on purpose.
-      const outcome = shellLaunchOutcome({ state: launched.state, brokerPid: launched.brokerPid });
-      if (!outcome.retain) await store.remove(slot).catch(() => undefined);
-      showError(
-        `The folder terminal could not be started: ${launched.reason}` +
-          (outcome.retain
-            ? " Try Reconnect Terminal again once it is available."
-            : ""),
-      );
-      return;
-    }
-    s.shellEditors.set(slot, slot);
-    await store.update(slot, { lastGeneration: launched.handle.record.generation, detachedAt: null });
-    openShellEditor(context, index, slot, launched.handle);
-  }
-
-
-  /** Attach to a recorded detached shell and show it, or report that it is gone. */
-  async function attachFolderShell(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    record: ShellSlotRecord,
-  ): Promise<boolean> {
-    const s = windowState();
-    const client = await attachBrokerClient();
-    if (client === null) return false;
-    const attached = await client.attach(record.slot, { owner: folderShellOwner() });
-    if (attached.handle === null) {
-      // The broker could not be reached — it may still be starting, or it may be gone. The
-      // slot is kept either way (the shell's own exit has not been proven),
-      // and no promise is made that a retry will succeed.
-      return false;
-    }
-    s.shellEditors.set(record.slot, record.slot);
-    await s.shellSlots?.update(record.slot, { detachedAt: null, lastGeneration: attached.handle.record.generation });
-    openShellEditor(context, index, record.slot, attached.handle);
-    return true;
-  }
-
-
-  /**
-   * Keep one shell's compact title and tooltip in step with its live cleanup verdict.
-   * The exact handle subscription is replaced on reconnect or recreation and dropped
-   * when the editor stops, so an old writer cannot change the current shell's metadata.
-   */
-  function watchShellPanelOwnerStop(slot: string, panel: vscode.WebviewPanel, handle: PtyHandle, label: string): void {
-    const state = tabState(slot);
-    state.ownerStopWatch?.();
-    state.ownerStopWatch = null;
-    state.ownerStopWatch = watchShellOwnerStop(handle, label, (title, status) => {
-      if (stateOf(slot)?.panel !== panel) return;
-      if (panel.title !== title) panel.title = title;
-      state.pipeline?.noteDescription(shellCleanupDescription(status?.state));
-      // The transition is the diagnostic: the verdict the editor opened on was logged once,
-      // and a later disarm — a lost helper, an unattested topology — is what a support log
-      // needs. The broker's own reason is recorded verbatim; this is not an error.
-      if (status?.state === "disarmed") {
-        log.warn(`shell ${slot}: automatic owner-exit cleanup is disarmed: ${status.detail}`);
-      }
-    });
-  }
-
-
-  /** Show the shell editor for one slot, creating it when this window has none. */
-  function openShellEditor(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    slot: string,
-    handle: PtyHandle,
-  ): void {
-    const s = windowState();
-    const state = tabState(slot);
-    state.shellSlot = slot;
-    const record = s.shellSlots?.get(slot) ?? null;
-    const cwd = record?.cwd ?? handle.record.title ?? "";
-    const label = path.basename(cwd) || cwd;
-    if (state.panel !== null) {
-      // The watcher writes the fresh verdict's title, so a reconnect through an existing
-      // editor corrects the marker instead of leaving the one the previous handle produced.
-      state.panel.reveal();
-      watchShellPanelOwnerStop(slot, state.panel, handle, label);
-      void startShellTerminal(index, slot, handle);
-      return;
-    }
-    const panel = vscode.window.createWebviewPanel(
-      SHELL_VIEW_TYPE,
-      shellEditorTitle(label),
-      vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
-      },
-    );
-    bindShellPanel(context, index, slot, panel, "created");
-    watchShellPanelOwnerStop(slot, panel, handle, label);
-    void startShellTerminal(index, slot, handle);
-  }
-
-
-  /**
-   * Bind one shell editor: its own document, its own message routing, its own close
-   * outcome.
-   *
-   * A shell has no session identity, no claim and no bridge. Its page speaks the same
-   * terminal vocabulary as a chat editor's pane, so the same pipeline serves it, and
-   * closing a live shell asks for explicit stop confirmation. Confirmed child exit
-   * and broker shutdown retire the slot without claiming escaped descendants ended.
-   */
-  function bindShellPanel(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    slot: string,
-    panel: vscode.WebviewPanel,
-    origin: "created" | "restored",
-  ): void {
-    const state = tabState(slot);
-    state.panel = panel;
-    panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "terminal-icon.svg");
-    state.origin = origin;
-    state.shellSlot = slot;
-    if (origin === "restored") {
-      panel.webview.options = {
-        enableScripts: true,
-        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
-      };
-    }
-    panel.webview.html = createShellHtml(panel.webview, context.extensionUri, slot);
-    panel.webview.onDidReceiveMessage(message => {
-      if (stateOf(slot)?.panel !== panel) return;
-      const parsed = parseGuestWebviewMessage(message);
-      if (parsed === null || TERMINAL_PANEL_TYPES[parsed.type] !== true) return;
-      void handleTerminalGuestMessage(slot, parsed, parsed as unknown as Record<string, unknown>).catch(() => {
-        log.warn(`shell ${slot}: a terminal message could not be processed`);
-      });
-    });
-    panel.onDidDispose(() => {
-      void handleShellEditorClosed(context, index, slot, panel);
-    });
-    panel.onDidChangeViewState(() => {
-      if (stateOf(slot)?.panel !== panel) return;
-      stateOf(slot)?.pipeline?.notePanelVisible(panel.visible);
-    });
-    refreshLauncher();
-  }
-
-
-  /** Attach the shell's writer and give its pane a frontend. */
-  async function startShellTerminal(index: SessionIndex, slot: string, handle: PtyHandle): Promise<void> {
-    const s = windowState();
-    const state = tabState(slot);
-    recordFor(state).runtime = null;
-    recordFor(state).endedNotice = null;
-    try {
-      await handle.attach();
-    } catch (error) {
-      log.warn(`shell ${slot}: the broker could not be attached: ${messageOf(error)}`);
-    }
-    if (stateOf(slot)?.panel == null) return;
-    ensureTerminalPipeline(index, slot, handle);
-    const stopOwnerWatch = state.ownerStopWatch;
-    const stopExitWatch = watchShellExit(handle, {
-      async retireSlot() {
-        await s.shellSlots?.remove(slot);
-        await s.brokerSlots?.forget(slot);
-        refreshLauncher();
-      },
-      log: prefixedLogger(log, `shell ${slot}: `),
-      runRetirement: operation => index.lifecycle.run(slot, operation),
-    });
-    // The shell's broker may be ended from outside (Kill in Sessions, Task Manager, a crash) without a word over the
-    // connection. Its absence is only a trigger: the slot is retired and the pane says its process ended only once the
-    // broker's and the shell root's recorded creation times both name gone processes (see `watchRuntimeBroker`).
-    // A shell root whose identity was never read keeps its recovery record. The retirement re-checks, inside the slot's
-    // gate, that an ordinary Stop or a replacement pane has not taken over the watch.
-    let watchingBroker = true;
-    const shellRoot = { pid: handle.statusValue?.nativePid ?? 0, creationTime: handle.statusValue?.nativeCreationTime ?? null };
-    const stopLossWatch = watchBrokerLoss({
-      brokerPid: handle.brokerPid,
-      isCurrent: () => watchingBroker,
-      onLost: async () => {
-        log.warn(`shell ${slot}: the broker process ${handle.brokerPid} no longer exists; checking that its shell (pid ${shellRoot.pid}) is gone too`);
-        const proven = shellRoot.pid > 0 && await brokerLossProven(attachBrokerClient, () => watchingBroker, { pid: handle.brokerPid, creationTime: handle.record.brokerCreationTime }, shellRoot);
-        if (!watchingBroker) return;
-        if (!proven) {
-          log.warn(`shell ${slot}: the broker process is gone but its shell could not be confirmed gone; the recovery record is kept`);
-          showWarning("A terminal's background process ended, but its shell could not be confirmed ended. Check Task Manager or refresh Sessions.");
-          return;
-        }
-        await index.lifecycle.run(slot, async () => {
-          if (!watchingBroker || stateOf(slot)?.ownerStopWatch !== ownStop) return;
-          log.info(`shell ${slot}: the broker process and the shell pid ${shellRoot.pid} are gone`);
-          await s.shellSlots?.remove(slot);
-          await s.brokerSlots?.forget(slot);
-          const ended = stateOf(slot);
-          if (ended !== undefined) {
-            // The pane ends as for an exit the broker reported (exit banner, copyable screen), not as a lost connection.
-            recordFor(ended).endedNotice = "This terminal's process has ended.";
-            ended.pipeline?.noteProcessGone();
-          }
-          stopTerminalForTab(slot);
-          refreshLauncher();
-        });
-      },
-    });
-    const ownStop: ShellExitWatchStop = options => {
-      watchingBroker = false;
-      stopLossWatch();
-      stopOwnerWatch?.(options);
-      stopExitWatch(options);
-    };
-    state.ownerStopWatch = ownStop;
-  }
-
-
-  /**
-   * A shell editor closed.
-   *
-   * VS Code cannot veto a webview editor's close, so this is a post-close decision.
-   * Its order is fixed: the durable slot is already recorded (it was written before
-   * the editor existed), a dismissal never
-   * authorizes termination, Keep Running recreates the editor and reattaches the same
-   * broker, and a confirm that cannot be verified as a stop keeps the slot.
-   */
-  async function handleShellEditorClosed(
-    context: vscode.ExtensionContext,
-    index: SessionIndex,
-    slot: string,
-    panel: vscode.WebviewPanel,
-  ): Promise<void> {
-    const s = windowState();
-    const state = stateOf(slot);
-    if (state === undefined || state.panel !== panel) return;
-    state.panel = null;
-    state.origin = null;
-    s.shellEditors.delete(slot);
-    const record = s.shellSlots?.get(slot) ?? null;
-    if (record === null) {
-      stopTerminalForTab(slot);
-      s.tabs.delete(slot);
-      s.shellEditors.delete(slot);
-      refreshLauncher();
-      return;
-    }
-    // Detaching is recorded first: from here on, this slot is recoverable whether or
-    // not the confirm below ever returns.
-    await s.shellSlots?.update(slot, { detachedAt: new Date().toISOString() });
-    const observation = await observeFolderShell(slot);
-    stopTerminalForTab(slot);
-    if (observation === "exited") {
-      s.tabs.delete(slot);
-      s.shellEditors.delete(slot);
-      await s.shellSlots?.remove(slot);
-      log.info(`shell ${slot}: closed after its process exited; no tree-stop claim made`);
-      refreshLauncher();
-      return;
-    }
-    // A live or unreachable shell is kept recoverable. Closing its editor never
-    // promises that commands detached from it were stopped.
-    const prompt = shellClosePrompt({
-      label: record.label,
-      liveness: observation,
-    });
-    const choice = await vscode.window.showWarningMessage(
-      prompt.message,
-      { modal: true, detail: prompt.detail },
-      "Keep Running",
-      prompt.confirmLabel,
-    );
-    if (choice !== "Terminate") {
-      // Keep Running, or a dismissed prompt: both mean the shell keeps running. The
-      // editor is recreated and reattached so a live tree is never left without a
-      // visible editor.
-      const reattached = await attachFolderShell(context, index, record);
-      if (!reattached) {
-        log.warn(`shell ${slot}: terminal for ${record.cwd} could not be reattached`);
-        showWarning("This terminal could not be reconnected. Use Reconnect Terminal to try again.");
-      }
-      refreshLauncher();
-      return;
-    }
-    await terminateFolderShell(slot, record);
-    refreshLauncher();
-    // A genuine failure retains its recovery slot, but no longer represents an open
-    // editor. Re-read child status so Processes offers Stop with the current facts.
-    void vscode.commands.executeCommand("ompDesk.refreshProcesses");
-  }
-
-
-  /** The broker handle for a shell slot, or `null` when it cannot be reached. */
-  async function shellWriterFor(slot: string): Promise<PtyHandle | null> {
-    const client = await brokerClient();
-    if (client === null) return null;
-    // Every folder-shell connection offers its owner hint: an attach that carried none
-    // would be an unattested association, which the broker answers by disabling automatic
-    // stopping — so a liveness check must not silently disarm a shell it is only reading.
-    const attached = await client.attach(slot, { owner: folderShellOwner() });
-    return attached.handle;
-  }
-
-
-  /**
-   * What this window can honestly say about one recorded shell, from one attach.
-   *
-   * `running` means the broker reported the child alive; `exited` means that child
-   * ended, not that every command it started ended. An exited shell can leave the
-   * editor and its recovery record silently. An unreachable shell remains recoverable.
-   */
-  async function observeFolderShell(slot: string): Promise<ShellLiveness> {
-    const handle = await shellWriterFor(slot);
-    if (handle === null) return "unreachable";
-    try {
-      const status = await handle.refreshStatus();
-      return status.state === "running" ? "running" : "exited";
-    } catch {
-      return "unreachable";
-    }
-  }
-
-
-  /**
-   * Terminate one shell and keep or forget its slot on the broker's own verdict.
-   *
-   * Confirmed shell-child absence followed by authenticated broker shutdown retires
-   * its slot. Uncontained descendant uncertainty is logged, never claimed as an
-   * empty tree, and is not a failure to stop the shell.
-   */
-  async function terminateFolderShell(slot: string, record: ShellSlotRecord): Promise<void> {
-    const s = windowState();
-    const handle = await shellWriterFor(slot);
-    if (handle === null) {
-      log.warn(`shell ${slot}: terminal for ${record.cwd} could not be reached for termination`);
-      showWarning("This terminal could not be reached. Use Stop in Processes to try again.");
-      return;
-    }
-    const outcome = await stopShellAndBroker(handle, {
-      async retireSlot() {
-        await s.shellSlots?.remove(slot);
-        await s.brokerSlots?.forget(slot);
-        s.tabs.delete(slot);
-        s.shellEditors.delete(slot);
-      },
-      log: prefixedLogger(log, `shell ${slot}: `),
-    });
-    if (outcome.kind === "unconfirmed") {
-      showWarning(outcome.stage === "retirement"
-        ? "This terminal stopped, but its recovery record could not be updated. See OMP Desk output."
-        : "This terminal could not be confirmed stopped. Use Stop in Processes to try again; see OMP Desk output.");
-    }
-  }
-
-
-  /** The serializer VS Code revives folder-shell editors through. */
-  function shellSerializerFor(context: vscode.ExtensionContext, index: SessionIndex) {
-    const s = windowState();
-    return {
-      async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
-        const slot = persistedShellSlotId(state);
-        const record = slot === null ? null : s.shellSlots?.get(slot) ?? null;
-        if (slot === null || record === null) {
-          // A shell this workspace no longer has: the editor is kept and explained
-          // rather than disposed, exactly as the chat serializers do.
-          panel.webview.html = createUnavailableGuestHtml(
-            "This terminal editor belongs to a folder shell this window no longer has a record for.",
-          );
-          return;
-        }
-        bindShellPanel(context, index, slot, panel, "restored");
-        const attached = await attachFolderShell(context, index, record);
-        if (!attached) {
-          log.warn(`shell ${slot}: the restored editor could not reattach its broker`);
-        }
-      },
-    };
-  }
-
-
   /**
    * The broker client, with its staged runtime proven ready to *start* a child.
    *
@@ -11084,7 +6952,6 @@ export function createWindow(deps: WindowDeps) {
     return await gate.client();
   }
 
-
   /**
    * The broker client of a Chat launch: it does not wait for the full runtime proof, which is the console-child proof a terminal
    * needs. Every broker start is gated inside the client by the proof of the runtime it starts on (a Chat on Bun by its own
@@ -11100,7 +6967,6 @@ export function createWindow(deps: WindowDeps) {
     return await gate.chatLaunchClient();
   }
 
-
   /**
    * Hold the first launch of a process until the move of the old settings ended, so `executablePath` and the other launch-time
    * settings are not read half-moved (ADR-0068). Counted from activation and capped: a hung settings write must not keep a
@@ -11114,7 +6980,6 @@ export function createWindow(deps: WindowDeps) {
       log.warn(`settings: the move from omp.* to ompDesk.* is still running ${LEGACY_SETTINGS_MOVE_WAIT_MS} ms after activation; the launch goes on`);
     }
   }
-
 
   /**
    * The broker client for re-adopting an already-running broker. Re-adoption uses the durable
@@ -11132,7 +6997,6 @@ export function createWindow(deps: WindowDeps) {
     if (gate === undefined) return null;
     return await gate.attachClient();
   }
-
 
   // Session actions: Rename, Close, Reload
 
@@ -11155,7 +7019,6 @@ export function createWindow(deps: WindowDeps) {
     return index.get(conversation) === null ? null : conversation;
   }
 
-
   /**
    * The indexed row one row command names: the tree item, an explicit tab id, or — from the
    * command palette — the chat editor the user is looking at, then a showing panel, then the
@@ -11177,7 +7040,6 @@ export function createWindow(deps: WindowDeps) {
     const entry = index.get(tabId);
     return entry === null ? null : { tabId, entry };
   }
-
 
   /**
    * Ask for a session's stored name, validated by the same rules every writer uses.
@@ -11204,7 +7066,6 @@ export function createWindow(deps: WindowDeps) {
     });
     return proposed;
   }
-
 
   /**
    * Rename a *stopped* session's stored title through the installed agent's own
@@ -11337,7 +7198,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * Rename a session's *own* stored title.
    *
@@ -11356,7 +7216,6 @@ export function createWindow(deps: WindowDeps) {
     // The live-row checks before the title prompt can take seconds: the row says it is renaming from the click.
     await pendingEntry(target.tabId, "rename", { origin: "row", step: "checking" }, () => renameSessionChecked(context, index, target));
   }
-
 
   async function renameSessionChecked(context: vscode.ExtensionContext, index: SessionIndex, target: NonNullable<ReturnType<typeof sessionTargetFromArgument>>): Promise<void> {
     const s = windowState();
@@ -11434,7 +7293,6 @@ export function createWindow(deps: WindowDeps) {
     refreshLauncher();
   }
 
-
   /**
    * Close: confirm, stop the exact process, prove it gone, keep the row.
    *
@@ -11480,7 +7338,6 @@ export function createWindow(deps: WindowDeps) {
     }
     if (state !== undefined) await pendingEntry(tabId, "close", { origin: "row", step: "checking" }, () => confirmAndStopRuntime(context, index, tabId, "Close"));
   }
-
 
   /** Dialogs never hold the gate; admission remains fenced through both stop attempts. */
   async function confirmAndStopRuntime(
@@ -11559,7 +7416,6 @@ export function createWindow(deps: WindowDeps) {
     }
   }
 
-
   /**
    * Reload: replace this session's process with a fresh one on the same exact file.
    *
@@ -11587,6 +7443,18 @@ export function createWindow(deps: WindowDeps) {
     }
     await windowState().sessionFlows.switchSessionMode(context, index, state, hosted.kind, true);
   }
+
+  const { diagnosticsEnvironment, showDiagnostics, diagnosticsDocumentContent, diagnosticsLabel, diagnosticsStageMeasured } = createSessionDiagnostics({ windowState, hostOf, controlOf, recordOf, log, showError, messageOf });
+
+  const { enableFileEvidence, disableFileEvidence, showFileEvidence, deleteFileEvidence, observationDocumentContent } = createFileEvidence({ controlOf, stateOf, messageOf, showInfo, isProcessAlive, windowState, log, activeControl, showWarning, showError });
+
+  const { addWorkspaceFolder, pinWorkspaceFolder, unpinWorkspaceFolder, resumeWorkspaceFolder, revealExistingTab, resumeFromFolderHistory, chooseFolder } = createFolderCommands({ windowState, showError, refreshLauncher, showWarning, showInfo, log, hostOf, messageOf, stateOf, pendingEntry, timedLaunch, requestSessionRowExpand, setActiveTab, revealActiveSession });
+
+  const { shellSerializerFor, recoverableShellsInFolder, openFolderTerminal, reconnectFolderTerminal, attachFolderShell, handleShellEditorClosed } = createFolderShells({ windowState, stateOf, showInfo, showError, chooseFolder, showWarning, brokerClient, attachBrokerClient, tabState, log, handleTerminalGuestMessage, refreshLauncher, recordFor, messageOf, ensureTerminalPipeline, stopTerminalForTab });
+
+  const { quoteEditorSelectionToSession, addFilesToSession } = createSessionInsertions({ showWarning, windowState, launcherFacts, stateOf, passiveReasonForSlot, hostOf, defaultSessionMode, log, showInfo, showError, refreshLauncher, messageOf, openSession, fencedOf, activateNativeEditor });
+
+  const { signInProvider, subscribeProviderLoginRefresh, refreshFooterMetadata, loginProviderFromPalette, logoutProviderFromPalette, refreshProviderModelsEverywhere, publishFooterMetadata, openProviderLogin, openProviderLogout, refreshSessionModels, refreshSessionCost, ensureFooterBinding, recordSessionModels, refreshDefaultProviderModels } = createProviderModels({ windowState, log, executableFor, ompCliScopeEnvironment, liveAt, hostOf, stateOf, noteUsageFailure, showInfo, showError, messageOf });
 
   state = createWindowState(deps.context);
   if (deps.output !== undefined) state.output = deps.output;

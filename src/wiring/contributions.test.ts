@@ -464,7 +464,7 @@ describe("commands", () => {
 		assert.equal((contributes.keybindings.find(binding => binding.command === "ompDesk.findInChat") as { mac?: string } | undefined)?.mac, "cmd+f");
 		assert.equal(declared.get("ompDesk.findInChat")?.title, "Find in Chat");
 		assert.deepEqual(menus.filter(({ menu, entry }) => menu === "editor/title" && entry.command === "ompDesk.findInChat").map(({ entry }) => entry.when), [chatOnly]);
-		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		const source = readFileSync(new URL("./window.ts", import.meta.url), "utf8");
 		assert.match(source, /registerDeskCommand\("ompDesk\.findInChat", \(\) => findInChat\(\)\)/);
 	});
 
@@ -486,7 +486,7 @@ describe("commands", () => {
 		assert.equal(entries.length, 1);
 		assert.match(entries[0]?.entry.when ?? "", new RegExp(`webviewId =~ /\\^omp\\[\\.\\]session/ && ${CHAT_TEXT_MENU_KEY}$`));
 		assert.equal(JSON.parse(CHAT_TEXT_MENU_CONTEXT)[CHAT_TEXT_MENU_KEY], true);
-		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		const source = readFileSync(new URL("./window.ts", import.meta.url), "utf8");
 		assert.match(source, /registerDeskCommand\("ompDesk\.quoteEditorSelection", \(\) => quoteEditorSelectionToSession\(context, index\)\)/);
 		assert.match(source, /registerDeskCommand\("ompDesk\.quoteChatSelection", \(\) => postChatPanelAction\("quote-selection"\)\)/, "a palette run with no argument posts the action and reads nothing");
 	});
@@ -518,11 +518,11 @@ describe("commands", () => {
 
 	it("declare Fork Session, Branch… and Clear Context…, register each, offer them on live Sessions rows in Chat or with no editor, and in the Chat title menu except Branch, never hidden from the palette", () => {
 		const titles: [string, string][] = [["ompDesk.forkSession", "Fork Session"], ["ompDesk.branchSession", "Branch…"], ["ompDesk.clearSession", "Clear Context…"]];
-		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		const source = readFileSync(new URL("./window.ts", import.meta.url), "utf8");
 		for (const [command, title] of titles) {
 			assert.equal(declared.get(command)?.title, title, `${command} title`);
 			assert.equal(declared.get(command)?.category, "OMP Desk", `${command} category`);
-			assert.ok(source.includes(`registerDeskCommand("${command}", `), `${command} is registered in extension.ts`);
+			assert.ok(source.includes(`registerDeskCommand("${command}", `), `${command} is registered in window.ts`);
 			assert.ok(!hiddenFromPalette.has(command), `${command} is not hidden from the palette`);
 		}
 		const rows = (command: string) => menus.filter(({ menu, entry }) => menu === "view/item/context" && entry.command === command).map(({ entry }) => entry);
@@ -546,12 +546,12 @@ describe("commands", () => {
 	});
 
 	it("declare Move to This Window on every Sessions row open in another window, in the Open group beside Stop and Switch, and Move Session to This Window as its palette command, both registered", () => {
-		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		const source = readFileSync(new URL("./window.ts", import.meta.url), "utf8");
 		assert.equal(declared.get("ompDesk.moveSessionHere")?.title, "Move to This Window");
 		assert.equal(declared.get("ompDesk.moveSessionHere")?.category, "OMP Desk");
 		assert.equal(declared.get("ompDesk.moveSessionHere.palette")?.title, "Move Session to This Window");
 		assert.equal(declared.get("ompDesk.moveSessionHere.palette")?.category, "OMP Desk", "the palette reads OMP Desk: Move Session to This Window");
-		for (const command of ["ompDesk.moveSessionHere", "ompDesk.moveSessionHere.palette"]) assert.ok(source.includes(`registerDeskCommand("${command}", `), `${command} is registered in extension.ts`);
+		for (const command of ["ompDesk.moveSessionHere", "ompDesk.moveSessionHere.palette"]) assert.ok(source.includes(`registerDeskCommand("${command}", `), `${command} is registered in window.ts`);
 		assert.ok(hiddenFromPalette.has("ompDesk.moveSessionHere"), "the row command is hidden: the palette offers its own command");
 		assert.ok(!hiddenFromPalette.has("ompDesk.moveSessionHere.palette"));
 		const rows = menus.filter(({ menu, entry }) => menu === "view/item/context" && entry.command === "ompDesk.moveSessionHere").map(({ entry }) => entry);
@@ -819,7 +819,7 @@ describe("the namespace (ADR-0068)", () => {
 		const clauses = [...menus.map(({ entry }) => entry.when ?? ""), ...contributes.viewsWelcome.map(welcome => welcome.when ?? ""), ...contributes.keybindings.map(binding => binding.when ?? "")];
 		const configured = new Set(Object.keys(contributes.configuration.properties));
 		const tested = new Set(clauses.flatMap(clause => [...clause.matchAll(/(?<![\w.])(ompDesk\.[\w.]+)/g)].map(match => match[1] ?? "")));
-		const sources = ["../extension.ts", "./context-wiring.ts", "./inventory-wiring.ts", "./process-wiring.ts"].map(file => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
+		const sources = ["./window.ts", "./context-wiring.ts", "./inventory-wiring.ts", "./process-wiring.ts"].map(file => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
 		const unset = [...tested].filter(key => !configured.has(key.replace(/^config\./, "")) && !viewIds.has(key) && !recording.contextKeys.has(key) && !sources.includes(`"${key}"`) && !/^ompDesk\.(skills|tools|mcp|extensions)\.scope$/.test(key));
 		assert.deepEqual(unset, [], "a when clause tests a context key nothing in the source sets (the clause is never true)");
 	});
