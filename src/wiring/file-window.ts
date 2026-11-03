@@ -10,8 +10,9 @@
  */
 
 import * as vscode from "vscode";
-import { EDITOR_GROUP_FOCUS_COMMANDS, chatGroupColumn, filesGroupColumn } from "../host/chat-layout.ts";
+import { EDITOR_GROUP_FOCUS_COMMANDS, chatGroupColumn, filesGroupColumn, filesSideOf } from "../host/chat-layout.ts";
 import { appearedGroup, FILE_WINDOW_SIZE, FileWindowTracker } from "../host/file-window.ts";
+import { chatTabGroupSide } from "./chat-tab-group.ts";
 import type { Logger } from "../shared/logger.ts";
 
 /** VS Code's editor-group target that opens an editor in a new auxiliary window (`AUX_WINDOW_GROUP`). */
@@ -161,10 +162,11 @@ export function createFileWindow(rawDeps: FileWindowDeps): FileWindow {
 
 	/**
 	 * Bring every tab of the file window back into the group next to the chat, in order, then close the originals; VS Code
-	 * closes the emptied window. That group is the existing files group, else a new one to the right of the chat group:
-	 * the first tab is opened into the chat group by its exact column, which activates the main window's group whichever
-	 * window the key was pressed in, and moved into a new group on its right. A tab that cannot be reopened stays in the
-	 * window, which is then still remembered, and the user is told.
+	 * closes the emptied window. That group is the existing files group, else a new one on the other side of the chat group
+	 * (`filesSideOf`: the right of a chat group at the left edge, the left of one at the right edge; the first tab is opened
+	 * into the chat group by its exact column, which activates the main window's group whichever window the key was
+	 * pressed in, and moved into a new group beside it). A tab that cannot be reopened stays in the window, which is
+	 * then still remembered, and the user is told.
 	 */
 	async function returnFilesFromWindow(window: vscode.TabGroup): Promise<void> {
 		const groups = vscode.window.tabGroups;
@@ -184,7 +186,7 @@ export function createFileWindow(rawDeps: FileWindowDeps): FileWindow {
 				// `ViewColumn.Beside` is relative to the focused window's active group, which is the file window's own when the key
 				// was pressed there. An exact column is not: the first tab is opened into the chat group (VS Code accepts that for a
 				// group that holds editors), which makes it the active group of the main window, and is then moved into a new group
-				// on its right, so the chat group ends up with no file in it.
+				// on the other side of it, so the chat group ends up with no file in it.
 				if (!await reopenTabInColumn(tab, chat?.viewColumn ?? candidates[0]?.viewColumn ?? vscode.ViewColumn.One)) {
 					kept.push(tab);
 					continue;
@@ -195,7 +197,7 @@ export function createFileWindow(rawDeps: FileWindowDeps): FileWindow {
 						setTimeout(resolve, 50);
 						await promise;
 					}
-					await vscode.commands.executeCommand("workbench.action.moveEditorToRightGroup");
+					await vscode.commands.executeCommand(filesSideOf(candidates, chatColumn, chatTabGroupSide()) === "left" ? "workbench.action.moveEditorToLeftGroup" : "workbench.action.moveEditorToRightGroup");
 				}
 				target = await groupHoldingReopened(tab, window);
 				if (target === null) {

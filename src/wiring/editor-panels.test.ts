@@ -18,6 +18,7 @@ import type { LoggedLine } from "../shared/logger.ts";
 import { recordingLogger } from "../shared/logger.ts";
 import type { BridgeTicketFacts } from "./bridge-host.ts";
 import type { EditorPanels, EditorPanelsDeps, EditorPanelsTab } from "./editor-panels.ts";
+import type { StubTabGroup } from "./vscode-test-stub.ts";
 
 // The module and the host modules it imports load the `vscode` specifier; map it before the first import.
 if (typeof module.registerHooks === "function") {
@@ -142,6 +143,7 @@ function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 		editors: new EditorCoordinator(),
 		live: new Set<string>(),
 		columns: new Map<string, number>(),
+		fileWindowColumn: undefined as number | undefined,
 		waiters: new Map<string, Set<() => void>>(),
 		drafts: new Map<string, unknown>(),
 		sequence: 0,
@@ -231,12 +233,17 @@ function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 			const panel = fakePanel(viewType, typeof showOptions === "number" ? showOptions : showOptions.viewColumn);
 			panel.title = title;
 			created.push({ viewType, title, showOptions, options, panel });
-			// VS Code reports the new editor's tab in the group it was created in.
+			// VS Code reports the new editor's tab in the group it was created in, and creates a column that does not exist yet (up to the ninth) to the right of the last group.
 			const column = typeof showOptions === "number" ? showOptions : showOptions.viewColumn;
+			if (column > stub.window.tabGroups.all.length && column <= 9) {
+				const added: StubTabGroup = { viewColumn: stub.window.tabGroups.all.length + 1, tabs: [], activeTab: undefined };
+				stub.window.tabGroups.all = [...stub.window.tabGroups.all, added];
+			}
 			const group = stub.window.tabGroups.all.find(candidate => candidate.viewColumn === column);
 			if (group !== undefined) group.tabs.push({ label: title, input: new stub.TabInputWebview(viewType), group });
 			return panel as never;
 		},
+		fileWindowColumn: () => state.fileWindowColumn,
 		editorTabOf: () => state.editorTab as never,
 		reviveEditorPanel: async () => { calls.push("revive"); return state.revive as never; },
 		activePanelTab: () => state.active,
@@ -389,6 +396,106 @@ describe("openPanel", () => {
 		assert.ok(w.logged.includes("chat column: session editor placed at column 2 (lock)"));
 		for (let turn = 0; turn < 20 && !stub.commands.calls.some(call => call[0] === "workbench.action.lockEditorGroup"); turn++) await nextTurn();
 		assert.deepEqual(stub.commands.calls, [["workbench.action.lockEditorGroup"]]);
+	});
+
+	/** The window's editor groups as VS Code reports them, left to right; the fake panel factory adds the new session tab to the group of its column. */
+	const arrangeGroups = (...columns: ("empty" | "files" | "chat")[]) => {
+		const groups = columns.map((kind, at) => {
+			const group = { viewColumn: at + 1, tabs: [] as unknown[], activeTab: undefined };
+			if (kind === "files") group.tabs.push({ label: "file", input: new stub.TabInputText(URI.file("/work/file.ts")), group });
+			if (kind === "chat") group.tabs.push({ label: "chat", input: new stub.TabInputWebview(bridgeViewType(TAB.replace("1111", "2222"), OTHER_EDITOR)), group });
+			return group;
+		});
+		stub.window.tabGroups.all = groups as never;
+		stub.window.tabGroups.activeTabGroup = groups[0] as never;
+		return groups;
+	};
+	const commandsRun = async (until: string): Promise<string[]> => {
+		for (let turn = 0; turn < 20 && !stub.commands.calls.some(call => call[0] === until); turn++) await nextTurn();
+		return stub.commands.calls.map(call => String(call[0]));
+	};
+
+	it("moves a new chat group to the left edge by default and locks it", async () => {
+		const w = world();
+		arrangeGroups("files", "empty");
+		w.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(w.created[0]!.showOptions, 2);
+		assert.ok(w.logged.includes("chat column: session editor placed at column 2 (move-to-side-and-lock)"));
+		assert.deepEqual(await commandsRun("workbench.action.lockEditorGroup"), ["workbench.action.moveActiveEditorGroupLeft", "workbench.action.lockEditorGroup"]);
+	});
+
+	it("moves a new chat group to the right edge and locks it when ompDesk.chatTabGroup is right", async () => {
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "right";
+		const w = world();
+		arrangeGroups("empty", "files");
+		w.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(w.created[0]!.showOptions, 1);
+		assert.deepEqual(await commandsRun("workbench.action.lockEditorGroup"), ["workbench.action.moveActiveEditorGroupRight", "workbench.action.lockEditorGroup"]);
+	});
+
+	it("uses the empty group nearest the chosen edge when several are empty", () => {
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "right";
+		const rightWorld = world();
+		arrangeGroups("empty", "files", "empty");
+		rightWorld.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(rightWorld.created[0]!.showOptions, 3);
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "left";
+		const leftWorld = world();
+		arrangeGroups("empty", "files", "empty");
+		leftWorld.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(leftWorld.created[0]!.showOptions, 1);
+	});
+
+	it("does not move a chat group that exists (a restored one, or one the user placed) when the setting says the other side", async () => {
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "right";
+		const w = world();
+		const [chatGroup] = arrangeGroups("chat", "files");
+		stub.window.tabGroups.activeTabGroup = chatGroup as never;
+		w.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(w.created[0]!.showOptions, 1);
+		assert.deepEqual(await commandsRun("workbench.action.lockEditorGroup"), ["workbench.action.lockEditorGroup"]);
+	});
+
+	it("opens a chat group of its own past the last group when every group shows files, and moves it to the chosen edge", async () => {
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "right";
+		const right = world();
+		arrangeGroups("files", "files");
+		right.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(right.created[0]!.showOptions, 3, "a new third group, not the second one beside the active group");
+		assert.deepEqual(await commandsRun("workbench.action.lockEditorGroup"), ["workbench.action.lockEditorGroup"], "it is already at the right edge");
+		stub.commands.calls.length = 0;
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "left";
+		const left = world();
+		arrangeGroups("files", "files");
+		left.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(left.created[0]!.showOptions, 3);
+		assert.deepEqual(await commandsRun("workbench.action.lockEditorGroup"), ["workbench.action.moveActiveEditorGroupLeft", "workbench.action.moveActiveEditorGroupLeft", "workbench.action.lockEditorGroup"]);
+	});
+
+	it("asks for the group beside the active one while the file window exists, and when nine groups are open", () => {
+		const withWindow = world();
+		withWindow.state.fileWindowColumn = 3;
+		arrangeGroups("files", "files", "files");
+		withWindow.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(withWindow.created[0]!.showOptions, stub.ViewColumn.Beside);
+		const crowded = world();
+		arrangeGroups("files", "files", "files", "files", "files", "files", "files", "files", "files");
+		crowded.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(crowded.created[0]!.showOptions, stub.ViewColumn.Beside);
+	});
+
+	it("follows a changed setting for the next new group without a reload", async () => {
+		const first = world();
+		arrangeGroups("empty", "files");
+		first.panels.openPanel(context(), indexFixture(), TAB);
+		assert.equal(first.created[0]!.showOptions, 1);
+		await commandsRun("workbench.action.lockEditorGroup");
+		stub.commands.calls.length = 0;
+		stub.workspace.settings["ompDesk.chatTabGroup"] = "right";
+		const second = world();
+		arrangeGroups("files", "empty");
+		second.panels.openPanel(context(), indexFixture(), TAB);
+		assert.deepEqual(await commandsRun("workbench.action.lockEditorGroup"), ["workbench.action.lockEditorGroup"], "the empty group is already at the right edge");
 	});
 
 	it("renders the panel without a bridge when its endpoint could not be provided, and clears the half-made binding", async () => {

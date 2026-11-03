@@ -6,7 +6,7 @@
  * restore paths (the versioned view type of one editor, and the one-time migration of the legacy generic
  * panel); `bindPanel` is the one place a panel becomes a chat surface, and `renderPanelDocument` points a bound
  * panel at the document its tab's state calls for. The chat column keeps session editors in their own locked
- * group on the left (`ompDesk.chatColumn`). What a document connects to — the bridge endpoint, its ticket and its
+ * group at the left or right edge (`ompDesk.chatColumn`, `ompDesk.chatTabGroup`). What a document connects to — the bridge endpoint, its ticket and its
  * routes — belongs to the bridge host; the window's records, the editor-slot elections, the launcher and the
  * conversation pages all arrive through {@link EditorPanelsDeps} as getters and callbacks.
  */
@@ -14,6 +14,7 @@
 import * as vscode from "vscode";
 import { decodeBridgeViewType, persistedBridgeState, recoveredBridgePanelState, tabInputIdentity, bridgeViewType } from "../host/bridge-identity.ts";
 import { arrangeChatGroup, chatGroupColumn, chatPlacement, strayEmptyGroups } from "../host/chat-layout.ts";
+import { chatColumnEnabled, chatTabGroupSide } from "./chat-tab-group.ts";
 import type { ChatPlacement } from "../host/chat-layout.ts";
 import type { EditorCoordinator, EditorReservationResult } from "../host/editor-coordinator.ts";
 import type { EditorSlotRole } from "../host/editor-slots.ts";
@@ -59,6 +60,9 @@ const UNIDENTIFIED_PANEL_DETAIL =
 const LEGACY_DUPLICATE_DETAIL =
 	"Another tab for this OMP session is already open in this window, so this old tab was left as a note instead of " +
 	"starting a second copy. Close this tab and use the one already open.";
+
+/** VS Code creates a missing editor column only up to the ninth (`ViewColumn.Nine`). */
+const MAX_VIEW_COLUMN = 9;
 
 /** Shown by a restored editor whose identity names a row this workspace no longer has. */
 const STALE_PANEL_DETAIL =
@@ -162,6 +166,8 @@ export interface EditorWorkbenchPort<Tab extends EditorPanelsTab> {
 		showOptions: vscode.ViewColumn | { readonly viewColumn: vscode.ViewColumn; readonly preserveFocus?: boolean },
 		options?: vscode.WebviewPanelOptions & vscode.WebviewOptions,
 	): vscode.WebviewPanel;
+	/** The view column of the file window's group while that window is open, else `undefined`: its group is listed after the main window's, so a column past the main groups is not free then. */
+	fileWindowColumn(): number | undefined;
 	/** The tab VS Code shows for an editor slot, or `null`. */
 	editorTabOf(slot: string): vscode.Tab | null;
 	/** Select an editor VS Code restored but never showed, and wait for it to hand over its panel. */
@@ -315,20 +321,22 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		})();
 	}
 
-	/** Whether session editors keep their own locked editor group on the left (`ompDesk.chatColumn`). */
-	function chatColumnEnabled(): boolean {
-		return vscode.workspace.getConfiguration("ompDesk").get<boolean>("chatColumn", true);
-	}
-
 	/** Whether a tab shows a session editor of this extension. */
 	function isSessionTabInput(input: unknown): boolean {
 		return input instanceof vscode.TabInputWebview && tabInputIdentity(input.viewType) !== null;
 	}
 
-	/** Where a session editor opens now, from the tabs VS Code reports. */
+	/**
+	 * Where a session editor opens now, from the tabs VS Code reports. When every group shows files the editor gets a
+	 * column of its own, one past the last group (VS Code creates a missing column, up to the ninth, to the right of the
+	 * last group): `ViewColumn.Beside` would put it into the group already beside the active one. While the file window
+	 * exists its group counts among `groups` and holds the next column, and past the ninth column VS Code creates none, so
+	 * `Beside` stays the fallback there.
+	 */
 	function chatPlacementNow(): ChatPlacement {
 		const groups = vscode.window.tabGroups;
-		return chatPlacement(groups.all, groups.activeTabGroup.viewColumn, isSessionTabInput, vscode.ViewColumn.Beside);
+		const freshColumn = deps.fileWindowColumn() === undefined && groups.all.length < MAX_VIEW_COLUMN ? groups.all.length + 1 : vscode.ViewColumn.Beside;
+		return chatPlacement(groups.all, groups.activeTabGroup.viewColumn, isSessionTabInput, freshColumn, chatTabGroupSide());
 	}
 
 	/** The column VS Code really shows a session editor in, from the tab it reports; `panel.viewColumn` keeps the requested column until a view-state event. */
@@ -339,8 +347,8 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 	/**
 	 * Arrange a new session editor's group (`arrangeChatGroup`) from the column its tab is really in. VS Code does not put
 	 * an editor into an empty locked group, even by exact column, so after the chat group's last editor was closed the
-	 * editor lands in a new group on the right while `panel.viewColumn` still says the requested column. The group is then
-	 * moved from where it is, and the emptied locked remnant, now to its right, is closed so no stray group stays beside the chat.
+	 * editor lands in a new group beside it while `panel.viewColumn` still says the requested column. The group is then
+	 * moved to the chosen edge from where it is, and the emptied locked remnant is closed so no stray group stays beside the chat.
 	 */
 	async function arrangeSessionPanelGroup(placement: ChatPlacement, panel: vscode.WebviewPanel, viewType: string): Promise<void> {
 		for (let attempt = 0; attempt < 40 && sessionTabColumn(viewType) === undefined; attempt++) {
@@ -348,12 +356,17 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			setTimeout(resolve, 50);
 			await promise;
 		}
-		const live = { get active() { return panel.active; }, get viewColumn() { return sessionTabColumn(viewType) ?? panel.viewColumn; }, onDidChangeViewState: (listener: () => void) => panel.onDidChangeViewState(listener) };
+		const live = {
+			get active() { return panel.active; },
+			get viewColumn() { return sessionTabColumn(viewType) ?? panel.viewColumn; },
+			get groupCount() { return vscode.window.tabGroups.all.length; },
+			onDidChangeViewState: (listener: () => void) => panel.onDidChangeViewState(listener),
+		};
 		const landed = live.viewColumn;
 		deps.log.debug(`chat column: the session editor is at column ${landed} (asked for ${placement.column})`);
 		await arrangeChatGroup({ executeCommand: command => vscode.commands.executeCommand(command) }, placement, live);
 		// The editor missed the requested group, so that group is still there, emptied. VS Code reports the move a moment later.
-		if (placement.arrange !== "move-left-and-lock" || landed === placement.column) return;
+		if (placement.arrange !== "move-to-side-and-lock" || landed === placement.column) return;
 		for (let attempt = 0; attempt < 40; attempt++) {
 			const groups = vscode.window.tabGroups;
 			const strays = strayEmptyGroups(groups.all, isSessionTabInput);

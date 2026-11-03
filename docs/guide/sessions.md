@@ -85,6 +85,6 @@ A background process on Bun keeps the `bun.exe` it started from, so after `bun u
 
 ## Where sessions and files open
 
-Sessions open in their own editor group on the left, and OMP Desk locks it. Files opened from Chat links, the Explorer or Quick Open go to a group on the right, so you read them next to the chat. Turn this off with [`ompDesk.chatColumn`](settings.md); unlock the group from its title bar for a one-off change.
+Sessions open in their own editor group, on the left by default, and OMP Desk locks it. Files opened from Chat links, the Explorer or Quick Open go to a group on the other side, so you read them next to the chat. Choose the right edge instead with [`ompDesk.chatTabGroup`](settings.md): it applies when Desk creates the group (the first session of a window, or the first after the last session tab was closed), so tabs restored after a reload and a group you dragged elsewhere stay where they are. Turn the own group off with [`ompDesk.chatColumn`](settings.md); unlock the group from its title bar for a one-off change.
 
 `Ctrl+Shift+M` moves all files of the group next to the chat into one window that stays on top and back again; see [Keyboard shortcuts](keyboard-shortcuts.md).

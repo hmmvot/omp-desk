@@ -1,14 +1,24 @@
 /**
- * Where a session editor opens when chat has its own editor column (`ompDesk.chatColumn`).
+ * Where a session editor opens when chat has its own editor column (`ompDesk.chatColumn`), and on which side of the
+ * window that column is (`ompDesk.chatTabGroup`).
  *
- * Session editors share one editor group on the left, and that group is locked. VS Code never puts a new editor into
- * a locked group unless it is targeted by its exact column, so files opened from the Explorer, Quick Open, chat links
- * and every other OMP Desk tab (Stats, Models, TODO/Agents details) land in a group to the right and leave the chat
- * visible. Only session editors target the chat group by column.
+ * Session editors share one editor group at the left or the right edge of the editor area, and that group is locked.
+ * VS Code never puts a new editor into a locked group unless it is targeted by its exact column, so files opened from
+ * the Explorer, Quick Open, chat links and every other OMP Desk tab (Stats, Models, TODO/Agents details) land in
+ * another group and leave the chat visible. Only session editors target the chat group by column.
  *
  * The group is found from the tabs VS Code reports, so it follows the user when they drag it elsewhere; it is created
- * and moved to the far left only when no group holds a session editor yet.
+ * and moved to the chosen edge only when no group holds a session editor yet. A group that exists keeps its place
+ * whatever the setting says now.
  */
+
+/** The edge of the editor area the chat group is moved to when it is created. */
+export type ChatSide = "left" | "right";
+
+/** `ompDesk.chatTabGroup` as a side: anything but `right` is the default, `left`. */
+export function chatSideOf(value: unknown): ChatSide {
+	return value === "right" ? "right" : "left";
+}
 
 /** The slice of an editor group this module reads. */
 export interface LayoutGroup {
@@ -20,8 +30,8 @@ export interface LayoutGroup {
 export type ChatPlacement =
 	/** Join the existing chat group at this column; lock it so files keep opening beside it. */
 	| { readonly column: number; readonly arrange: "lock" }
-	/** No chat group: open in a new group (or the empty editor area), then move it to the far left and lock it. */
-	| { readonly column: number; readonly arrange: "move-left-and-lock" };
+	/** No chat group: open in a new group (or the empty editor area), then move it to the chosen edge and lock it. */
+	| { readonly column: number; readonly arrange: "move-to-side-and-lock"; readonly side: ChatSide };
 
 /** The column of the group that holds session editors: the active group if it holds one, else the leftmost. */
 export function chatGroupColumn(groups: readonly LayoutGroup[], activeColumn: number, isChat: (input: unknown) => boolean): number | null {
@@ -35,16 +45,30 @@ export function chatGroupColumn(groups: readonly LayoutGroup[], activeColumn: nu
 }
 
 /**
- * Placement of a new session editor. Without a chat group, the leftmost empty group takes it: that is usually the
- * chat group whose last session editor was closed, which VS Code keeps while it is locked, or the empty area of a
- * window without editors. `beside` is VS Code's `ViewColumn.Beside`, a new group next to the active one, used only
- * when every group shows files.
+ * Placement of a new session editor. Without a chat group, the empty group nearest the chosen edge takes it: that is
+ * usually the chat group whose last session editor was closed, which VS Code keeps while it is locked, or the empty
+ * area of a window without editors. `newGroup` is the column to use when every group shows files: one past the last
+ * group (VS Code creates the missing columns), or VS Code's `ViewColumn.Beside` when that cannot be told, which is a
+ * new group next to the active one unless a group is already there, and then the editor joins it.
  */
-export function chatPlacement(groups: readonly LayoutGroup[], activeColumn: number, isChat: (input: unknown) => boolean, beside: number): ChatPlacement {
+export function chatPlacement(groups: readonly LayoutGroup[], activeColumn: number, isChat: (input: unknown) => boolean, newGroup: number, side: ChatSide): ChatPlacement {
 	const existing = chatGroupColumn(groups, activeColumn, isChat);
 	if (existing !== null) return { column: existing, arrange: "lock" };
 	const empty = groups.filter(group => group.tabs.length === 0).map(group => group.viewColumn);
-	return { column: empty.length > 0 ? Math.min(...empty) : beside, arrange: "move-left-and-lock" };
+	const column = empty.length === 0 ? newGroup : side === "right" ? Math.max(...empty) : Math.min(...empty);
+	return { column, arrange: "move-to-side-and-lock", side };
+}
+
+/**
+ * The side of the chat group a files group is opened on when none exists. Next to other groups it is the side they
+ * are on (left of a chat group that is the rightmost of several, else right of it); a chat group that stands alone
+ * leaves the files the side away from the edge it was put at. `groups` are the main window's groups and `chatColumn`
+ * the chat group's column among them.
+ */
+export function filesSideOf(groups: readonly LayoutGroup[], chatColumn: number | null, chatSide: ChatSide): ChatSide {
+	const others = groups.filter(group => group.viewColumn !== chatColumn);
+	if (chatColumn === null || others.length === 0) return chatSide === "right" ? "left" : "right";
+	return others.every(group => group.viewColumn < chatColumn) ? "left" : "right";
 }
 
 /**
@@ -89,6 +113,8 @@ export interface ChatLayoutApi {
 export interface ChatLayoutPanel {
 	readonly active: boolean;
 	readonly viewColumn: number | undefined;
+	/** How many editor groups the window has now; the right edge is the last column. */
+	readonly groupCount: number;
 	onDidChangeViewState(listener: () => void): { dispose(): void };
 }
 
@@ -96,18 +122,21 @@ export interface ChatLayoutPanel {
 const ACTIVE_TIMEOUT_MS = 5000;
 
 /**
- * Move the chat group to the far left when asked, then lock it.
+ * Move the chat group to the chosen edge when asked, then lock it.
  *
  * A panel learns its column and that it is active only from a later view-state event, so this first waits for that.
- * Both commands act on the active group: moving takes `column - 1` steps, which is a no-op at the left edge of a grid
- * row, and locking happens only while the session editor is still the active one, so a group the user switched to
- * meanwhile is never locked.
+ * Both commands act on the active group: moving left takes `column - 1` steps and moving right `groupCount - column`,
+ * each a no-op once the group is at the edge of its grid row (a count that includes a group of another window only adds
+ * such no-op steps), and locking happens only while the session editor is still the active one, so a group the user
+ * switched to meanwhile is never locked.
  */
 export async function arrangeChatGroup(api: ChatLayoutApi, placement: ChatPlacement, panel: ChatLayoutPanel, timeoutMs = ACTIVE_TIMEOUT_MS): Promise<void> {
 	if (!await untilActive(panel, timeoutMs)) return;
-	if (placement.arrange === "move-left-and-lock") {
-		const steps = (panel.viewColumn ?? 1) - 1;
-		for (let step = 0; step < steps; step++) await api.executeCommand("workbench.action.moveActiveEditorGroupLeft");
+	if (placement.arrange === "move-to-side-and-lock") {
+		const column = panel.viewColumn ?? 1;
+		const steps = placement.side === "right" ? panel.groupCount - column : column - 1;
+		const command = placement.side === "right" ? "workbench.action.moveActiveEditorGroupRight" : "workbench.action.moveActiveEditorGroupLeft";
+		for (let step = 0; step < steps; step++) await api.executeCommand(command);
 	}
 	if (panel.active) await api.executeCommand("workbench.action.lockEditorGroup");
 }

@@ -120,7 +120,17 @@
         "ompDesk.chatColumn": {
           "type": "boolean",
           "default": true,
-          "description": "Open OMP session editors in their own editor group on the left and lock that group, so files and other tabs open in a group to the right and the chat stays visible. When off, a session editor opens in the active editor group."
+          "description": "Open OMP session editors in their own editor group at one edge of the editor area (see ompDesk.chatTabGroup: the left by default) and lock that group, so files and other tabs open in another group and the chat stays visible. When off, a session editor opens in the active editor group."
+        },
+        "ompDesk.chatTabGroup": {
+          "type": "string",
+          "enum": ["left", "right"],
+          "enumDescriptions": [
+            "The Chat and Terminal group is the leftmost editor group, files open to its right.",
+            "The Chat and Terminal group is the rightmost editor group, files open to its left."
+          ],
+          "default": "left",
+          "description": "Which edge of the editor area the group of Chat and Terminal session tabs is placed at while ompDesk.chatColumn is on; files open in a group on the other side. It applies when Desk creates that group, that is, to a session opened while no group of the window holds a session tab (the first one, or the first after the last was closed). A group that already exists stays where it is, including the tabs VS Code restores after a reload and a group you dragged elsewhere, so changing the setting affects only sessions opened after the old group is gone."
         },
         "ompDesk.linkCodeSymbols": {
           "type": "boolean",

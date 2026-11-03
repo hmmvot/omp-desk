@@ -2714,6 +2714,7 @@ export function createWindow(deps: WindowDeps) {
       packageChangedOnDisk,
       replayPanelOutcome,
       createWebviewPanel: (viewType, title, showOptions, options) => vscode.window.createWebviewPanel(viewType, title, showOptions, options),
+      fileWindowColumn: () => windowState().fileWindow.column(),
       editorTabOf,
       reviveEditorPanel,
       activePanelTab,
