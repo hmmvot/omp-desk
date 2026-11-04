@@ -801,15 +801,16 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			await openRunningAgentWithRows("detail-agent-steady");
 			await ui.evaluate(`(()=>{
 			 const body=document.querySelector('.omp-native-child-body');
-			 window.watch={body,button:body.querySelector('.omp-native-child-toolbar .omp-btn'),transcript:body.querySelector('.omp-transcript'),row:[...body.querySelectorAll('*')].find(node=>node.children.length===0&&node.textContent==='First child row'),records:[]};
+			 window.watch={body,button:document.querySelector('.omp-native-child-toolbar .omp-btn'),transcript:body.querySelector('.omp-transcript'),row:[...body.querySelectorAll('*')].find(node=>node.children.length===0&&node.textContent==='First child row'),records:[]};
 			 window.watcher=new MutationObserver(records=>{for(const record of records)window.watch.records.push(record.type+':'+(record.attributeName??'')+':'+record.addedNodes.length+'/'+record.removedNodes.length+'@'+(record.target.className||record.target.nodeName))});
 			 window.watcher.observe(body,{subtree:true,childList:true,attributes:true,characterData:true});
+			 window.watcher.observe(document.querySelector('.omp-native-child-toolbar'),{subtree:true,childList:true,attributes:true,characterData:true});
 			})()`);
 			for (let cycle = 1; cycle <= 3; cycle += 1) {
 				await ui.evaluate("window.fixtureClock.fire(2000)");
 				await ui.wait(`window.ui.reads().length === ${cycle + 1}`);
 				assert.equal(await ui.evaluate("window.ui.reads().at(-1).fromByte"), 100, "each background read continues from the byte cursor");
-				assert.deepEqual(await ui.evaluate("(()=>{const body=document.querySelector('.omp-native-child-body');return[body.getAttribute('aria-busy'),body.querySelector('.omp-native-child-toolbar .omp-btn').disabled,body.querySelector(':scope > .omp-native-note')!==null]})()"), ["false", false, false], "a read in flight is not shown: the button stays enabled, no busy state, no note");
+				assert.deepEqual(await ui.evaluate("(()=>{const body=document.querySelector('.omp-native-child-body');return[body.getAttribute('aria-busy'),document.querySelector('.omp-native-child-toolbar .omp-btn').disabled,body.querySelector(':scope > .omp-native-note')!==null]})()"), ["false", false, false], "a read in flight is not shown: the button stays enabled, no busy state, no note");
 				await ui.evaluate(`window.ui.answer(window.ui.reads()[${cycle}],{status:'available',entries:[],olderCount:0,fromByte:100,nextByte:100,reset:false})`);
 				await ui.evaluate(nextFrames);
 			}
@@ -871,6 +872,32 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			await ui.wait("window.ui.reads().length === 4");
 			await ui.evaluate(`window.ui.answer(window.ui.reads()[3],{status:'available',entries:[${message("c2", "c1", "Last child row")}],olderCount:0,fromByte:100,nextByte:200,reset:false})`);
 			await ui.wait("document.querySelector('.omp-native-child-body').textContent.includes('Last child row')");
+		});
+
+		await t.test("an agent's tab is laid out like the Chat page: one scroller that follows the tail, one left edge for header and rows, Refresh in the header line", async () => {
+			await open("detail-agent-layout");
+			await ui.evaluate(`window.ui.push({agents:${agents(1)},agentAvailability:'available'})`);
+			await ui.wait("window.ui.reads().length === 1");
+			const prompt = Array.from({ length: 12 }, (_, line) => `Acceptance item ${line}`).join("\n\n");
+			const user = `{type:'message',id:'u1',parentId:null,timestamp:'2026-10-02T00:00:00Z',message:{role:'user',timestamp:1,content:${JSON.stringify(prompt)}}}`;
+			const replies = Array.from({ length: 40 }, (_, index) => message(`r${index}`, index === 0 ? "u1" : `r${index - 1}`, `Reply number ${index} of the agent`)).join(",");
+			await ui.evaluate(`window.ui.answer(window.ui.reads()[0],{status:'available',entries:[${user},${replies}],olderCount:0,fromByte:0,nextByte:100,reset:false})`);
+			await ui.wait("document.querySelector('.omp-transcript .omp-row--assistant')");
+			await ui.evaluate(nextFrames);
+			const layout = await ui.evaluate<{ scrollers: string[]; page: boolean; titleLeft: number; replyLeft: number; assignmentLeft: number | null; refreshInHead: boolean; tail: boolean }>(`(()=>{
+			 const left=node=>Math.round(node.getBoundingClientRect().left),transcript=document.querySelector('.omp-transcript'),assignment=document.querySelector('.omp-detail-assignment .omp-tool-head');
+			 const scrollers=[...document.querySelectorAll('*')].filter(node=>{const style=getComputedStyle(node);return (style.overflowY==='auto'||style.overflowY==='scroll')&&node.scrollHeight>node.clientHeight+1}).map(node=>node.className);
+			 const scrolling=document.scrollingElement;
+			 return{scrollers,page:scrolling.scrollHeight>scrolling.clientHeight+1,titleLeft:left(document.querySelector('.omp-detail-title')),
+			  replyLeft:left(document.querySelector('.omp-row--assistant .omp-body-block')),assignmentLeft:assignment===null?null:left(assignment),
+			  refreshInHead:document.querySelector('.omp-detail-agent-head .omp-native-child-toolbar .omp-btn')!==null,tail:transcript.scrollTop+transcript.clientHeight>=transcript.scrollHeight-2}})()`);
+			assert.deepEqual(layout.scrollers, ["omp-transcript"], "the transcript is the only scroller of the tab, as in the Chat");
+			assert.equal(layout.page, false, "the document itself does not scroll");
+			assert.equal(layout.titleLeft, layout.replyLeft, "the header and the rows share one left edge");
+			assert.equal(layout.assignmentLeft, layout.replyLeft, "and so does the Assignment disclosure");
+			assert.equal(layout.refreshInHead, true, "Refresh stands in the header line, not on a row of its own");
+			assert.equal(layout.tail, true, "a history that is longer than the tab opens at its tail, as the Chat does");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("a detail document that names nothing the extension can show says so and shows no session", async () => {

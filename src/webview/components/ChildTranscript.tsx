@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { createChatModel } from "../../chat/model";
 import type { ActiveTool } from "../../chat/pending";
 import type { ChatEntry } from "../../chat/messages";
@@ -72,6 +73,14 @@ export interface ChildTranscriptBodyProps extends Required<Pick<ChildTranscriptP
 	keepOnFailure?: boolean;
 	/** The registry assignment is omitted when the first transcript card already contains it. */
 	assignment?: string;
+	/**
+	 * The body is the page of an agent's detail tab: its transcript is the page's one scroller and behaves as the Chat's own (it
+	 * follows the tail, windows long histories, finds text), not an inline block of a tool card. A child nested in one of its calls
+	 * still counts the tab as one level.
+	 */
+	standalone?: boolean;
+	/** With `standalone`: where the Refresh button goes (the tab's header); the button waits until the host exists. */
+	toolbarHost?: HTMLElement | null;
 }
 
 /**
@@ -83,7 +92,7 @@ export interface ChildTranscriptBodyProps extends Required<Pick<ChildTranscriptP
  * background runs while the user is reading earlier history (the same rule as the timer's).
  */
 type ReadMode = "user" | "tick" | "final";
-export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keepOnFailure = false, assignment = "" }: ChildTranscriptBodyProps): ReactNode {
+export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keepOnFailure = false, assignment = "", standalone = false, toolbarHost = null }: ChildTranscriptBodyProps): ReactNode {
 	const [page, setPage] = useState<SubagentTranscriptPage | null>(null);
 	const [busy, setBusy] = useState(false);
 	const [failure, setFailure] = useState<string | null>(null);
@@ -209,7 +218,8 @@ export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentI
 		if (page?.status !== "available") return null;
 		return {
 			...createChatModel(),
-			phase: "view-only" as const,
+			// A running child's newest turn is unfinished, as in the Chat (no reply footer under it yet); a finished child is read-only history.
+			phase: live ? "live" as const : "view-only" as const,
 			readOnlyReason: "Read-only child transcript",
 			entries: page.entries,
 			durableCount: page.entries.length,
@@ -227,10 +237,18 @@ export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentI
 	const duplicatesAssignment = firstEntry?.type === "message" && firstEntry.message.role === "user"
 		&& messageText(firstEntry.message).trim() === assignment.trim();
 
+	const refresh = (
+		<div className="omp-native-child-toolbar">
+			<button type="button" className="omp-btn" aria-label={earlier ? "Refresh latest child history" : "Refresh child history"} title={earlier ? "Refresh latest child history" : "Refresh child history"} disabled={busy || reader === undefined} onClick={() => read("refresh")}>
+				<span className="codicon codicon-refresh" aria-hidden="true" />
+			</button>
+		</div>
+	);
+
 	return (
 		<div className="omp-native-child-body" aria-busy={busy}>
 			{page !== null && assignment.trim() !== "" && !duplicatesAssignment && (
-				<div className="omp-detail-assignment">
+				<div className="omp-native-tool omp-detail-assignment">
 					<button type="button" className="omp-tool-head" aria-expanded={assignmentOpen} aria-controls={assignmentOpen ? assignmentId : undefined} onClick={() => setAssignmentOpen(open => !open)}>
 						<span className={`codicon codicon-${assignmentOpen ? "chevron-down" : "chevron-right"}`} aria-hidden="true" />
 						<span className="omp-tool-name">Assignment</span>
@@ -238,23 +256,14 @@ export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentI
 					{assignmentOpen && <div id={assignmentId} className="omp-tool-body"><Markdown text={assignment} /></div>}
 				</div>
 			)}
-			<div className="omp-native-child-toolbar">
-				<button type="button" className="omp-btn" aria-label={earlier ? "Refresh latest child history" : "Refresh child history"} title={earlier ? "Refresh latest child history" : "Refresh child history"} disabled={busy || reader === undefined} onClick={() => read("refresh")}>
-					<span className="codicon codicon-refresh" aria-hidden="true" />
-				</button>
-				{page?.status === "available" && page.olderCount > 0 && (
-					<button type="button" className="omp-btn" disabled={busy} onClick={() => read("older")}>
-						<span className="codicon codicon-chevron-up" aria-hidden="true" /> Older ({page.olderCount} rows)
-					</button>
-				)}
-			</div>
+			{standalone ? toolbarHost !== null && createPortal(refresh, toolbarHost) : refresh}
 			{busy && (page === null || refreshMs === undefined) && <div className="omp-native-note" role="status">Loading child history…</div>}
 			{page?.status === "unavailable" && <div className="omp-native-child-unavailable" role="status">{SUBAGENT_UNAVAILABLE_TEXT[page.reason]}</div>}
 			{failure !== null && <div className="omp-native-note omp-native-child-stale" role="status">Showing the rows already read — {failure}</div>}
 			{earlier && <div className="omp-native-note">Viewing an earlier page. Refresh returns to the latest history.</div>}
 			{page?.status === "available" && page.entries.length === 0 && <div className="omp-native-note">OMP returned no child transcript entries.</div>}
 			{childModel !== null && page?.status === "available" && page.entries.length > 0 && (
-				<Transcript entries={childModel.entries} durableCount={childModel.durableCount} stream={childModel.stream} activeTools={childModel.activeTools} working={childModel.working} phase={childModel.phase} olderCount={childModel.olderCount} pending={childModel.pending} cards={childModel.ephemeral} depth={depth} renderChild={(id, nextDepth) => <ChildTranscript subagentId={id} reader={reader} depth={nextDepth} />} onLoadOlder={() => read("older")} />
+				<Transcript entries={childModel.entries} durableCount={childModel.durableCount} stream={childModel.stream} activeTools={childModel.activeTools} working={childModel.working} phase={childModel.phase} olderCount={childModel.olderCount} pending={childModel.pending} cards={childModel.ephemeral} depth={standalone ? 0 : depth} renderChild={(id, nextDepth) => <ChildTranscript subagentId={id} reader={reader} depth={standalone ? nextDepth + depth : nextDepth} />} onLoadOlder={() => read("older")} />
 			)}
 		</div>
 	);

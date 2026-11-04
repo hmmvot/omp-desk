@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { ArtifactEpochContext } from "../lib/artifact-opener";
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { RunningAgent } from "../../chat/agents";
 import type { ChatModel } from "../../chat/model";
 import { agentActivityText, agentDescription, agentModelLabel, agentRow, AGENT_STATUS_ICON, runningAgentDescriptions, sortedAgents, todoGlyph, todoNoteMarker, todoSummary, TODO_STATUS_WORD } from "../../chat/hud-summary";
@@ -164,18 +164,23 @@ function AgentDetail({ client, snapshot, agentId }: { client: ChatClient; snapsh
 	const description = agent === null ? "" : agentDescription(agent);
 	const assignment = agent?.assignment ?? "";
 	const model = agent === null ? null : agentModelLabel(agent.progress);
+	// The Refresh button of the child history lives in the header's first line; the history draws it there once this element exists.
+	const [actionsHost, setActionsHost] = useState<HTMLElement | null>(null);
 	return (
 		<article className="omp-detail-body omp-detail-body--agent" aria-label={`Agent ${agentId}`}>
 			<header className="omp-detail-agent-head">
-				<h1 className="omp-detail-title">
-					{agent !== null && <span className={`codicon codicon-${AGENT_STATUS_ICON[agent.status]}`} aria-hidden="true" />}
-					<span>{agentId}</span>
-					{agent !== null && agent.agent.trim() !== "" && agent.agent.trim() !== "task" && <span className="omp-hud-dim"> {agent.agent.trim()}</span>}
-					<span className="omp-detail-status">{current !== undefined ? current.status : settling ? agent?.status ?? "waiting for the registry" : agent === null ? "not in the native registry" : "no longer in the native registry"}</span>
-					{model !== null && <span className="omp-detail-model" title={model.title}>{model.text}</span>}
-					{elapsed !== null && <span className="omp-hud-elapsed">{fmtDuration(elapsed)}</span>}
-				</h1>
-				{description !== "" && <div className="omp-detail-agent-line">{description}</div>}
+				<div className="omp-detail-agent-top">
+					<h1 className="omp-detail-title">
+						{agent !== null && <span className={`codicon codicon-${AGENT_STATUS_ICON[agent.status]}`} aria-hidden="true" />}
+						<span>{agentId}</span>
+						{agent !== null && agent.agent.trim() !== "" && agent.agent.trim() !== "task" && <span className="omp-hud-dim"> {agent.agent.trim()}</span>}
+						<span className="omp-detail-status">{current !== undefined ? current.status : settling ? agent?.status ?? "waiting for the registry" : agent === null ? "not in the native registry" : "no longer in the native registry"}</span>
+						{model !== null && <span className="omp-detail-model" title={model.title}>{model.text}</span>}
+						{elapsed !== null && <span className="omp-hud-elapsed">{fmtDuration(elapsed)}</span>}
+					</h1>
+					<div className="omp-detail-agent-actions" ref={setActionsHost} />
+				</div>
+				{description !== "" && <div className="omp-detail-agent-line omp-detail-agent-description" title={description}>{description}</div>}
 				{agent !== null && (
 					<div className="omp-detail-agent-line omp-hud-dim">
 						<AgentProgressView progress={agent.progress ?? NO_PROGRESS} activity={snapshot.agentActivity.get(agentId)} showElapsed={false} elapsedMs={elapsed} />
@@ -185,7 +190,7 @@ function AgentDetail({ client, snapshot, agentId }: { client: ChatClient; snapsh
 			</header>
 			{loading
 				? <div className="omp-native-note" role="status" aria-busy="true"><span className="codicon codicon-loading codicon-modifier-spin" aria-hidden="true" /> Loading child history…</div>
-				: <ChildTranscriptBody key={agentId} subagentId={agentId} reader={readChild} depth={1} assignment={assignment} keepOnFailure {...(live ? { refreshMs: AGENT_REFRESH_MS } : {})} />}
+				: <ChildTranscriptBody key={agentId} subagentId={agentId} reader={readChild} depth={1} assignment={assignment} standalone toolbarHost={actionsHost} keepOnFailure {...(live ? { refreshMs: AGENT_REFRESH_MS } : {})} />}
 		</article>
 	);
 }

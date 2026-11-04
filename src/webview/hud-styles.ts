@@ -69,7 +69,7 @@ export const HUD_STYLES = `
 .omp-detail { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .omp-detail--todo, .omp-detail--agents { overflow-y: auto; }
 .omp-detail-body { display: flex; flex-direction: column; min-height: 0; padding: 12px max(12px, calc((100% - 840px) / 2)) 24px; }
-.omp-detail-body--agent { flex: 1 1 auto; padding-bottom: 0; }
+.omp-detail-body--agent { flex: 1 1 auto; padding: 0; }
 .omp-detail-title { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin: 0 0 8px; font-size: 1.15em; font-weight: 600; }
 .omp-detail-count, .omp-detail-status { color: var(--omp-muted); font-size: 0.85em; font-weight: 400; }
 .omp-detail-model { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; color: var(--omp-muted); font-size: 0.85em; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
@@ -86,10 +86,19 @@ export const HUD_STYLES = `
 .omp-detail-agent:hover:not(:disabled) { background: var(--vscode-list-hoverBackground); }
 .omp-detail-agent-line { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
 .omp-detail-agent > .omp-native-agent-progress { flex: 1 1 100%; }
-.omp-detail-agent-head { flex: none; }
-.omp-detail-assignment { flex: none; margin: 4px 0 8px; }
-.omp-detail-assignment > .omp-tool-head { padding-left: 0; }
+/* An agent's tab is laid out like the Chat page: the header stands where the HUD stands, the transcript is the one scroller of the tab with the Chat's own column, and everything else takes the same gutters (the header reserves the scrollbar's width, so right-aligned text meets the rows' right edge). Nothing in the tab sits in a scroller of its own besides the transcript. */
+.omp-detail--agent { --omp-detail-inset: max(12px, calc((100% - 840px) / 2)); }
+.omp-detail-agent-head { flex: none; box-sizing: border-box; padding: 12px var(--omp-detail-inset) 4px; overflow-y: hidden; scrollbar-gutter: stable; }
+.omp-detail-body--agent > .omp-native-note { padding-inline: var(--omp-detail-inset); }
+.omp-detail-agent-top { display: flex; align-items: baseline; gap: 8px; }
+.omp-detail-agent-top > .omp-detail-title { flex: 1 1 auto; min-width: 0; margin: 0 0 4px; }
+.omp-detail-agent-actions { flex: none; align-self: center; }
+.omp-detail-agent-actions .omp-btn { height: 22px; padding: 0 6px; border-color: transparent; background: transparent; color: var(--omp-muted); }
+.omp-detail-agent-actions .omp-btn:hover:not(:disabled) { border-color: transparent; background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+.omp-detail-agent-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.omp-detail-assignment { flex: none; }
 .omp-detail--agent .omp-native-child-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; border: 0; padding: 0; }
-.omp-detail--agent .omp-native-child-toolbar { flex: none; padding: 4px 0; }
+.omp-detail--agent .omp-native-child-body > :not(.omp-transcript-frame) { padding-inline: var(--omp-detail-inset); }
+.omp-detail--agent .omp-native-child-body > .omp-detail-assignment { margin: 0 0 4px; }
 .omp-detail--agent .omp-transcript-frame { flex: 1 1 auto; min-height: 0; }
 `;

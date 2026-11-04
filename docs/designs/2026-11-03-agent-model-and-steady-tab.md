@@ -45,6 +45,8 @@ Settling. `AgentDetail` treats a reconnect and the reload of the roster (`agentA
 
 Layout. The model chip has `min-width: 0` and truncates; the assignment disclosure padding in the agent header is aligned with the other header lines.
 
+Layout amendment (2026-11-04). The tab's page is the Chat page's layout, not a block of its own: `ChildTranscriptBody` takes `standalone` and runs its `Transcript` at depth 0 (the Chat's scroll controller that opens at and follows the tail, row windowing, Find; a child inside one of its calls still counts the tab as one level), the history of a running child has the `live` phase so its newest turn shows no reply footer, and the Refresh button is portalled into the header's first line. The transcript is the only scroller; the header, the Assignment disclosure (a tool row) and the notes take the transcript's own gutter (`--omp-detail-inset`), and the header reserves the scrollbar's width. The steady-tab rules above are unchanged: the header host is held in state, so the memoised body renders when it appears once and never for a header change, and the tests that watch the body's DOM also watch the relocated toolbar.
+
 ## Alternatives
 
 - Poll `get_subagents` from the host and push the label: duplicates the roster the page already holds and adds a protocol message for a derived string.
