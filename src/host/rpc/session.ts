@@ -23,6 +23,7 @@ import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { CHAT_EXIT_STDERR_BYTES, parseChatExitReason, type ChatExitReason } from "../../chat/exit-reason.ts";
+import { stripAnsi } from "../../chat/ansi.ts";
 import {
 	applyChatEntries,
 	applyChatLiteState,
@@ -641,6 +642,10 @@ const WITHDRAW_READ_PASSES = 4;
 const NO_HELD: HeldChoices = { model: null, modelCycles: 0, thinking: null, thinkingCycles: 0 };
 const MAX_HELD_CYCLES = 16;
 const STDERR_TAIL_BYTES = CHAT_EXIT_STDERR_BYTES;
+/** OMP's own notice while a start is slow ("Still starting after 16s — phase: createAgentSession > discoverSkills > …"), written to stderr every few seconds until it is ready. */
+const OMP_SLOW_START_NOTICE = /^Still starting after \d+s\b/;
+/** A stderr line longer than this is not a startup notice: its start is dropped instead of being buffered without bound. */
+const STDERR_LINE_CHARS = 4096;
 const MESSAGE_ID_TAIL = /,"messageId":"([^"\\]{1,64})"\}$/;
 /**
  * How often live `message_update` frames are passed on while a reply streams. OMP writes one per
@@ -888,6 +893,12 @@ export class RpcSession {
 	#disposed = false;
 	#ended = false;
 	#stderr = "";
+	/** The unfinished last line of stderr, kept only to find OMP's slow-start notices. */
+	#stderrLine = "";
+	/** Slow-start notices seen while an attach waits for its answer; null when no attach is pending. */
+	#heldStartNotices: string[] | null = null;
+	/** The slow-start notices already logged. OMP stops writing them once it is ready, so this stays small. */
+	readonly #loggedStartNotices = new Set<string>();
 	#protocolErrors = 0;
 	#resyncs = 0;
 	#historyFallbacks = 0;
@@ -2385,11 +2396,17 @@ export class RpcSession {
 		this.#setPhase(kind === "start" ? "starting" : "attaching", null);
 		let result: RpcAttachResult;
 		this.#ringGap = false;
+		// The broker replays its stderr tail right after an attach: notices that arrive before the attach's answer are held until it says whether OMP was already ready (then they are old).
+		this.#heldStartNotices = [];
 		try {
 			result = await this.#attachWithinDeadline({ sinceSeq: this.#lastSeq, ...(kind === "start" && this.#options.reclaimInput !== undefined ? { reclaimInput: this.#options.reclaimInput } : {}) });
 		} catch (error) {
+			this.#heldStartNotices = null;
 			throw new SessionFailure("attach-failed", error instanceof Error ? error.message : undefined);
 		}
+		const held = this.#heldStartNotices;
+		this.#heldStartNotices = null;
+		if (result.ready === null && result.child.state !== "exited") for (const notice of held ?? []) this.#logStartNotice(notice);
 		if (this.#disposed) return;
 		this.#hostRetention = result.hostToolRetention;
 		this.#hostAttach += 1;
@@ -2834,6 +2851,7 @@ export class RpcSession {
 				let start = Math.max(0, bytes.length - STDERR_TAIL_BYTES);
 				while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
 				this.#stderr = bytes.subarray(start).toString("utf8");
+				this.#logSlowStartNotices(event.text);
 				return;
 			}
 			case "child":
@@ -3061,6 +3079,27 @@ export class RpcSession {
 		this.#readySeen = true;
 		if (first) this.#options.onReady?.();
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(true);
+	}
+
+	/** Logs each complete stderr line that is OMP's slow-start notice, as it arrives (the exit tail alone shows it only after the process ended); no other stderr text is logged, and nothing once OMP is ready. */
+	#logSlowStartNotices(text: string): void {
+		const lines = (this.#stderrLine + text).split(/\r?\n/);
+		const rest = lines.pop()!;
+		this.#stderrLine = rest.length > STDERR_LINE_CHARS ? "" : rest;
+		if (this.#readySeen) return;
+		for (const line of lines) {
+			const plain = stripAnsi(line, STDERR_LINE_CHARS).trim();
+			if (!OMP_SLOW_START_NOTICE.test(plain)) continue;
+			if (this.#heldStartNotices !== null) this.#heldStartNotices.push(plain);
+			else this.#logStartNotice(plain);
+		}
+	}
+
+	/** A reattach before OMP is ready replays the notices already logged: each is logged once. */
+	#logStartNotice(notice: string): void {
+		if (this.#loggedStartNotices.has(notice)) return;
+		this.#loggedStartNotices.add(notice);
+		this.#options.log?.info(`OMP start: ${notice}`);
 	}
 
 	#onResponse(frame: Record<string, unknown>): void {

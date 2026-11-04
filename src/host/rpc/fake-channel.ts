@@ -170,6 +170,8 @@ export class FakeRpcChannel implements RpcChannel {
 			else if (this.claimRefusals > 0) this.claimRefusals -= 1;
 		}
 		this.setOwned(owned);
+		// The broker sends its stderr tail right after the attach answer, before the attach's caller resumes.
+		if (this.attachStderrTail !== null) this.#deliver({ type: "stderr", text: this.attachStderrTail });
 		const replay = this.#ring.filter(line => line.seq > request.sinceSeq);
 		const result: RpcAttachResult = {
 			fromSeq: request.sinceSeq,
@@ -259,6 +261,14 @@ export class FakeRpcChannel implements RpcChannel {
 		this.childExitCode = exitCode;
 		this.childStderrTail = stderrTail;
 		this.#deliver({ type: "child", status: { state: "exited", pid: 1234, exitCode, ...(stderrTail === undefined ? {} : { stderrTail }) } });
+	}
+
+	/** What the broker replays as the child's stderr tail on every attach; null sends none. */
+	attachStderrTail: string | null = null;
+
+	/** Stream a chunk of the child's stderr as it is written. */
+	emitStderr(text: string): void {
+		if (this.#attached) this.#deliver({ type: "stderr", text });
 	}
 
 	commandsOfType(type: string): Record<string, unknown>[] {

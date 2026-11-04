@@ -19,6 +19,7 @@ import { turnActivity } from "../../protocol/activity.ts";
 import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
 import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
 import { TurnActivityLedger, type TurnNotice } from "../../wire/notifications.ts";
+import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
 import {
 	ManualTimers,
 	ScratchDir,
@@ -308,6 +309,29 @@ describe("resync sequence", () => {
 		rig.channel.emitLateReady(2);
 		await waitUntil(() => (rig.session.phase as string) === "live");
 		assert.equal(late, 1);
+	});
+
+	it("logs OMP's slow-start notices as they arrive, each once, and none once OMP is ready or from a tail replayed to a ready OMP", async () => {
+		const notice = (seconds: number): string => `\u001b[33mStill starting after ${seconds}s\u001b[39m\u001b[2m — phase: createAgentSession > discoverSkills\u001b[22m\n  logs: D:\\scratch\\omp.log\n`;
+		const expected = (seconds: number): string => `OMP start: Still starting after ${seconds}s — phase: createAgentSession > discoverSkills`;
+		const lines: LoggedLine[] = [];
+		const rig = await boot({ noWait: true, session: { log: recordingLogger(lines) }, setup: ch => { ch.ready = null; ch.rpcProtocol = null; ch.negotiating = true; ch.attachStderrTail = notice(15); } });
+		await tick();
+		const split = notice(20);
+		rig.channel.emitStderr(`some other warning\n${split.slice(0, 12)}`);
+		rig.channel.emitStderr(split.slice(12));
+		rig.channel.emitStderr(notice(15));
+		rig.channel.ready = JSON.stringify({ type: "ready", protocolVersion: 2, supportedProtocolVersions: [1, 2] });
+		rig.channel.negotiating = false;
+		rig.channel.emitLateReady(2);
+		await waitUntil(() => (rig.session.phase as string) === "live");
+		rig.channel.emitStderr(notice(25));
+		assert.deepEqual(lines.filter(line => line.message.startsWith("OMP start:")).map(line => [line.level, line.message]), [["info", expected(15)], ["info", expected(20)]]);
+		assert.ok(!lines.some(line => line.message.includes("some other warning") || line.message.includes("omp.log")), "no other stderr text is logged");
+
+		const readyLines: LoggedLine[] = [];
+		await boot({ session: { log: recordingLogger(readyLines) }, setup: ch => { ch.attachStderrTail = notice(15); } });
+		assert.deepEqual(readyLines.filter(line => line.message.startsWith("OMP start:")), [], "a window attaching to a ready OMP does not log its old notices");
 	});
 
 	it("goes live when `ready` arrives after the attach answered, whatever the last folded line seq is", async () => {
