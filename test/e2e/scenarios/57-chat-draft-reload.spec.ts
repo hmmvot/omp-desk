@@ -44,7 +44,10 @@ test("a draft with text, a linked file and an image comes back after Reload Wind
 	const file = join(folder, name);
 	writeFileSync(file, `# Draft probe ${stamp}\nEND-OF-DRAFT-PROBE\n`);
 	const store = join(state.dataDir, "User", "globalStorage", "hmmvot.omp-desk", "drafts");
-	const records = (suffix: string): string[] => existsSync(store) ? readdirSync(store).filter(entry => entry.endsWith(suffix)) : [];
+	// Earlier scenarios of a full run type into other Chats of the same profile, and their drafts stay on disk by design: only this test's records are counted.
+	const listed = (): string[] => existsSync(store) ? readdirSync(store) : [];
+	const before = new Set(listed());
+	const records = (suffix: string): string[] => listed().filter(entry => entry.endsWith(suffix) && !before.has(entry));
 	try {
 		const page = await desk.window("alpha-desk");
 		await desk.ready(page);
