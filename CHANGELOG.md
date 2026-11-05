@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
 ### Added
 
 - **Chat: your unsent draft survives Reload Window.** Before, Reload Window (and any restart of the window) threw away what you had typed in the composer. The text, the images, the files you attached (by path or held), the commands and skills, quotes and the cards of a message that was not confirmed are now kept on your disk, per Chat editor, and come back in the composer when the editor is restored; if you start typing before they arrive, they come back as a card instead of replacing what you typed. A sent or emptied draft is deleted at once, a closed editor's draft goes with the editor, and a draft untouched for 14 days is swept. The draft is saved only in OMP Desk's private storage of your profile (never in the log, the session catalog or its backup), within the limits of the composer itself; there is no setting. Design: [The Chat draft survives Reload Window](docs/designs/2026-11-03-keep-the-chat-draft-across-a-window-reload.md).
@@ -632,7 +634,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.15...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hmmvot/omp-desk/compare/v0.4.15...v0.5.0
 [0.4.15]: https://github.com/hmmvot/omp-desk/compare/v0.4.14...v0.4.15
 [0.4.14]: https://github.com/hmmvot/omp-desk/compare/v0.4.13...v0.4.14
 [0.4.13]: https://github.com/hmmvot/omp-desk/compare/v0.4.12...v0.4.13
