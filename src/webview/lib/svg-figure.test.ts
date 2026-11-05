@@ -29,7 +29,7 @@ function refused(source: string): string {
 
 /** What no output may hold, whatever the input was. */
 function assertClean(svg: string): void {
-	for (const needle of ["<script", "onload", "onclick", "javascript:", "foreignobject", "<!", "<iframe", "<image", "<animate", "<set"]) assert.ok(!svg.toLowerCase().includes(needle), `${needle} in ${svg}`);
+	for (const needle of ["<script", "onload", "onclick", "javascript:", "vbscript:", "data:", "foreignobject", "<!", "<iframe", "<image", "<animate", "<set"]) assert.ok(!svg.toLowerCase().includes(needle), `${needle} in ${svg}`);
 	assert.doesNotMatch(svg, /\son\w+\s*=/i);
 	assert.doesNotMatch(svg, /(?:href|src)\s*=\s*"(?!#)/i, "an external href");
 	assert.doesNotMatch(svg, /url\((?!#)/i, "an external url()");
@@ -250,8 +250,8 @@ describe("a malicious figure", () => {
 	it("sees a javascript: scheme however it is spelled with character references", () => {
 		sanitizedTo(`<svg viewBox="0 0 10 10"><use href="&#106;avascript:alert(1)"/><use xlink:href="&#x6A;&#97;vascript&#58;alert(1)"/><rect fill="&#106;avascript:x" style="fill:&#106;avascript:x"/><a href="&#106;avascript:alert(1)"><rect/></a></svg>`, figure(`<use/><use/><rect/>`));
 		// As text it is harmless; its colon is written as a reference so that the output holds none.
-		const text = drawn(`<svg viewBox="0 0 10 10"><text>&#106;avascript:alert(1) and javascript:x</text></svg>`);
-		assert.equal(text.svg, figure(`<text>javascript&#58;alert(1) and javascript&#58;x</text>`));
+		const text = drawn(`<svg viewBox="0 0 10 10"><text>&#106;avascript:alert(1) and javascript:x, VBScript:y and data:text/html,z</text></svg>`);
+		assert.equal(text.svg, figure(`<text>javascript&#58;alert(1) and javascript&#58;x, VBScript&#58;y and data&#58;text/html,z</text>`));
 		assertClean(text.svg);
 	});
 

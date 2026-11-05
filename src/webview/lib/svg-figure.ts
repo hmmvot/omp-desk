@@ -561,8 +561,8 @@ function checkUseExpansion(root: Element): void {
 // ---- writing it back ----------------------------------------------------------------------------------
 
 function escapeText(text: string): string {
-	// `javascript:` is not harmful as text, but the output is promised to hold none: its colon is written as a reference.
-	return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replace(/javascript:/gi, match => `${match.slice(0, -1)}&#58;`);
+	// A script scheme is not harmful as text, but the output is promised to hold none: its colon is written as a reference.
+	return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replace(/(?:java|vb)script:|data:/gi, match => `${match.slice(0, -1)}&#58;`);
 }
 
 function escapeAttribute(value: string): string {

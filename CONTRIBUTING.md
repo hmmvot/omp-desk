@@ -113,6 +113,7 @@ Project documentation lives in [`docs/`](docs/README.md): current architecture, 
 - Add or update focused tests for behavior you change.
 - Add a line to the `Unreleased` section of [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
 - Do not commit personal data: absolute local paths, user names, e-mail addresses or tokens.
+- CodeQL (`.github/workflows/codeql.yml`) analyses every push to `main` and every pull request. It skips the tests and their harness (`.github/codeql/codeql-config.yml`), which build page scripts from their own constants; an alert therefore points at code that ships or packages the extension.
 
 ## Licensing
 

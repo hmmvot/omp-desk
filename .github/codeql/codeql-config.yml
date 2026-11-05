@@ -1,0 +1,9 @@
+# What CodeQL analyses. The tests build page scripts and HTML from their own constants and match the
+# extension's own output with regular expressions; CodeQL reads both as untrusted-input handling and
+# raised 58 of its 63 first alerts there. Only code that ships or builds the VSIX is analysed.
+name: OMP Desk CodeQL
+paths-ignore:
+  - "**/*.test.ts"
+  - "**/*.test.mjs"
+  - test/**
+  - out/**
