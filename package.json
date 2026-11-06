@@ -1914,6 +1914,11 @@
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "^11.0.1"
+    }
+  },
   "devDependencies": {
     "@playwright/test": "^1.64.0",
     "@types/node": "^22.0.0",
