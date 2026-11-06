@@ -263,7 +263,7 @@ export const ChildTranscriptBody = memo(function ChildTranscriptBody({ subagentI
 			{earlier && <div className="omp-native-note">Viewing an earlier page. Refresh returns to the latest history.</div>}
 			{page?.status === "available" && page.entries.length === 0 && <div className="omp-native-note">OMP returned no child transcript entries.</div>}
 			{childModel !== null && page?.status === "available" && page.entries.length > 0 && (
-				<Transcript entries={childModel.entries} durableCount={childModel.durableCount} stream={childModel.stream} activeTools={childModel.activeTools} working={childModel.working} phase={childModel.phase} olderCount={childModel.olderCount} pending={childModel.pending} cards={childModel.ephemeral} depth={standalone ? 0 : depth} renderChild={(id, nextDepth) => <ChildTranscript subagentId={id} reader={reader} depth={standalone ? nextDepth + depth : nextDepth} />} onLoadOlder={() => read("older")} />
+				<Transcript entries={childModel.entries} durableCount={childModel.durableCount} stream={childModel.stream} activeTools={childModel.activeTools} working={childModel.working} phase={childModel.phase} olderCount={childModel.olderCount} pending={childModel.pending} cards={childModel.ephemeral} depth={standalone ? 0 : depth} slidingPage renderChild={(id, nextDepth) => <ChildTranscript subagentId={id} reader={reader} depth={standalone ? nextDepth + depth : nextDepth} />} onLoadOlder={() => read("older")} />
 			)}
 		</div>
 	);

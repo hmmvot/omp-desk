@@ -111,6 +111,11 @@ export interface TranscriptProps {
 	settled?: boolean;
 	asyncPaused?: boolean;
 	pagedHistory?: boolean;
+	/**
+	 * `entries` is a page that slides: its oldest rows leave as newer ones arrive (a live child's last rows). A row the reader holds as the
+	 * window's top that has left is not a different conversation; the window then starts at the oldest row still loaded, so what is read stays.
+	 */
+	slidingPage?: boolean;
 	/** What the host says the session is doing while it starts (`Starting the session · OMP is starting · 12 s`); the empty transcript shows it instead of "joining the session…". */
 	startupText?: string | null;
 	footerByHost?: ReadonlyMap<string, ReplyFooterData>;
@@ -324,9 +329,10 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			if (position >= 0) end = canonical[Math.min(canonical.length - 1, position + TRANSCRIPT_WINDOW_ROWS - 1)]!.id;
 		}
 		const page = pageTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, end);
-		const window = props.pagedHistory ? page : windowTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, pinnedTopId ?? (previousPaged.current ? page.topId : null));
+		const heldTop = pinnedTopId !== null && props.slidingPage && !canonical.some(card => card.id === pinnedTopId || card.sourceIds.includes(pinnedTopId)) ? canonical[0]?.id ?? null : pinnedTopId;
+		const window = props.pagedHistory ? page : windowTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, heldTop ?? (previousPaged.current ? page.topId : null));
 		return { ...window, page };
-	}, [canonical, pinnedTopId, props.pagedHistory, pageEndId, heldPageEndId, activatingPaged]);
+	}, [canonical, pinnedTopId, props.pagedHistory, props.slidingPage, pageEndId, heldPageEndId, activatingPaged]);
 
 	const overviewRef = useRef<OverviewProjection | undefined>(undefined);
 	const namespace = props.conversationKey ?? "chat";

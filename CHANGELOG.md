@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An agent's tab no longer throws you back to the newest rows while you read earlier ones.** An agent's tab keeps the last 200 rows it read and drops the oldest as new ones arrive. A reader who had scrolled up held the top row of the tab's window, and once the agent had written enough rows for the page to drop that row, the tab took it for a different conversation and opened on its newest rows again: the line you were reading left the page and a note said your position had changed. A held top row that the page has dropped now moves to the oldest row still loaded, so the rows you are reading stay where they are while the agent works, new rows do not move them, and the tab still follows the tail when you are at the bottom.
+
 ## [0.5.0] - 2026-11-05
 
 ### Added

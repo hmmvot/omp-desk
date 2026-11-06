@@ -112,7 +112,7 @@ window.ui = {
  token: location.search, current: () => current, receive, push,
  view(patch = {}) { receive({ type: "omp:session-view", mode: "chat", title: "Owned UI session", running: true, starting: false, stopping: false, canSwitch: true, reason: null, ...patch }); },
  reads: () => window.sent.filter(message => message.type === "omp:chat-subagent-read"),
- answer(request, page) { receive({ type: "omp:chat-subagent-chunk", requestId: request.requestId, epoch: request.epoch, subagentId: request.subagentId, index: 0, chunks: 1, text: JSON.stringify(page) }); },
+ answer(request, page) { const text = JSON.stringify(page), size = 30000, chunks = Math.max(1, Math.ceil(text.length / size)); for (let index = 0; index < chunks; index += 1) receive({ type: "omp:chat-subagent-chunk", requestId: request.requestId, epoch: request.epoch, subagentId: request.subagentId, index, chunks, text: text.slice(index * size, (index + 1) * size) }); },
 };
 const nonce=readCspNonce(); adoptNonceForCreatedStyles(nonce); injectGuestStyles(nonce);
 createRoot(document.getElementById("root")).render(<App client={client} />); window.ui.view(); if (!location.search.includes("delayed")) push();
@@ -898,6 +898,81 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			assert.equal(layout.refreshInHead, true, "Refresh stands in the header line, not on a row of its own");
 			assert.equal(layout.tail, true, "a history that is longer than the tab opens at its tail, as the Chat does");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		/**
+		 * The reader scrolled up in a working agent's tab: the refreshes that add rows or find nothing, and the parent's progress
+		 * updates, move neither the rows they read nor the Jump-to-latest state; at the bottom the tab follows the tail again.
+		 * `entry(n)` is the n-th row of the history, so any prefix of it is a valid transcript.
+		 */
+		const keepsTheReader = async (name: string, entry: (n: number) => string, first: number, perRefresh: number, wheel: number) => {
+			await open(name);
+			await ui.evaluate(`window.ui.push({agents:${agents(1)},agentAvailability:'available'})`);
+			await ui.wait("window.ui.reads().length === 1");
+			const rows = (from: number, to: number) => Array.from({ length: to - from }, (_, index) => entry(from + index)).join(",");
+			await ui.evaluate(`window.ui.answer(window.ui.reads()[0],{status:'available',entries:[${rows(0, first)}],olderCount:0,fromByte:0,nextByte:100,reset:false})`);
+			await ui.wait("document.querySelector('.omp-transcript [data-anchor-key]')");
+			await settle();
+			const probe = (key: string) => `(()=>{const root=document.querySelector('.omp-transcript'),top=root.getBoundingClientRect().top,rows=[...root.querySelectorAll('[data-anchor-key]')];
+			 const key=${JSON.stringify(key)};const target=key?rows.find(row=>row.dataset.anchorKey===key):rows.find(row=>row.getBoundingClientRect().top>=top+40);
+			 return{key:target?.dataset.anchorKey??null,offset:target?target.getBoundingClientRect().top-top:null,scrollTop:root.scrollTop,tail:Math.abs(root.scrollHeight-root.clientHeight-root.scrollTop)<=1,btn:Boolean(document.querySelector('.omp-jump-latest')),transcript:root===window.keepTranscript}})()`;
+			assert.equal((await ui.evaluate<{ tail: boolean }>(probe(""))).tail, true, "a long history opens at its tail");
+			await ui.evaluate("window.keepTranscript=document.querySelector('.omp-transcript');0");
+			const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const rect=document.querySelector('.omp-transcript').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", x: point.x, y: point.y, deltaX: 0, deltaY: wheel });
+			await ui.wait("document.querySelector('.omp-jump-latest')");
+			await sleep(600);
+			await settle();
+			const base = await ui.evaluate<{ key: string; offset: number; scrollTop: number; tail: boolean; btn: boolean }>(probe(""));
+			assert.equal(base.tail, false, "the wheel took the reader off the tail");
+			assert.equal(base.btn, true);
+			let next = first;
+			const same = async (label: string) => {
+				await ui.evaluate(frames); await settle();
+				const now = await ui.evaluate<{ offset: number | null; tail: boolean; btn: boolean; transcript: boolean }>(probe(base.key));
+				assert.ok(now.offset !== null && Math.abs(now.offset - base.offset) <= 1, `${label} moved the reader (the row they read stood ${base.offset}px below the top, now ${now.offset}px)`);
+				assert.equal(now.btn, true, `${label} kept the jump-to-latest button`);
+				assert.equal(now.transcript, true, `${label} kept the transcript node`);
+			};
+			const refresh = async (entries: string, nextByte: number) => {
+				const read = await ui.evaluate<number>("window.ui.reads().length");
+				await ui.evaluate("window.fixtureClock.fire(2000)");
+				await ui.wait(`window.ui.reads().length === ${read + 1}`);
+				await ui.evaluate(`window.ui.answer(window.ui.reads()[${read}],{status:'available',entries:[${entries}],olderCount:0,fromByte:100,nextByte:${nextByte},reset:false})`);
+			};
+			for (let cycle = 1; cycle <= 3; cycle += 1) {
+				await refresh(rows(next, next + perRefresh), 100 + cycle * 100);
+				next += perRefresh;
+				await same(`refresh ${cycle} that added rows`);
+				await refresh("", 100 + cycle * 100);
+				await same(`refresh ${cycle} that found nothing`);
+				await ui.evaluate(`window.ui.push({agents:${agents(1)}.map(agent=>({...agent,lastUpdate:${cycle + 1},progress:{...agent.progress,durationMs:${20000 + cycle * 1000},tokens:${5000 + cycle * 100}}}))})`);
+				await same(`the parent's progress update ${cycle}`);
+			}
+			await ui.evaluate("document.querySelector('.omp-jump-latest').click()");
+			await settle();
+			assert.equal((await ui.evaluate<{ tail: boolean }>(probe(""))).tail, true, "Jump to latest returns to the tail");
+			await refresh(rows(next, next + perRefresh), 900);
+			await settle();
+			assert.equal((await ui.evaluate<{ tail: boolean }>(probe(""))).tail, true, "back at the bottom the tab follows the new rows");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		};
+		const proseRow = (n: number) => message(`s${n}`, n === 0 ? null : `s${n - 1}`, `Reply number ${n} of the agent`);
+		await t.test("a working agent's tab keeps the reader where they scrolled up: new rows, identical reads and the parent's progress updates do not move it", async () => {
+			await keepsTheReader("detail-agent-scroll", proseRow, 40, 2, -600);
+		});
+		// What an agent really writes: prose, then calls answered by results, the newest call still running; a page already full.
+		const workRow = (n: number) => {
+			const id = `w${n}`, parent = n === 0 ? "null" : `'w${n - 1}'`, at = "timestamp:'2026-10-02T00:00:00Z'", kind = n % 5;
+			if (kind === 0) return `{type:'message',id:'${id}',parentId:${parent},${at},message:{role:'assistant',timestamp:1,model:'m',stopReason:'stop',content:[{type:'text',text:'Step ${n}: ${"working through the next part of the assignment. ".repeat(4)}'}]}}`;
+			const call = kind === 1 || kind === 3, name = kind === 1 ? "read" : "bash", callId = `c${n - (call ? 0 : 1)}`;
+			return call
+				? `{type:'message',id:'${id}',parentId:${parent},${at},message:{role:'assistant',timestamp:1,model:'m',stopReason:'toolUse',content:[{type:'toolCall',id:'${callId}',name:'${name}',arguments:${name === "read" ? "{path:'src/file-" + n + ".ts'}" : "{command:'echo " + n + "'}"}}]}}`
+				: `{type:'message',id:'${id}',parentId:${parent},${at},message:{role:'toolResult',timestamp:2,toolCallId:'${callId}',toolName:'${kind === 2 ? "read" : "bash"}',isError:false,content:[{type:'text',text:'output ${n}'}]}}`;
+		};
+		await t.test("the reader keeps their place in a full page of work rows with a call still running as refreshes add rows and the page drops its oldest", async () => {
+			await keepsTheReader("detail-agent-scroll-work", workRow, 199, 40, -600);
 		});
 
 		await t.test("a detail document that names nothing the extension can show says so and shows no session", async () => {
